@@ -6,6 +6,15 @@ import flet as ft
 
 from components.app_shell import app_shell
 from services.auth_service import sign_out_local_session
+from services.evento_context_service import (
+    guardar_contexto_sesion,
+    guardar_eventos_disponibles,
+    limpiar_contexto_sesion,
+    limpiar_evento_activo,
+    sincronizar_evento_activo,
+    establecer_evento_activo,
+)
+from services.evento_service import obtener_eventos_disponibles
 from views.dashboard_view import dashboard_view
 
 
@@ -33,7 +42,14 @@ def build_home_view(
     contexto_usuario: dict[str, Any],
     supabase: Any = None,
 ) -> ft.Control:
-    state = {"selected": "dashboard"}
+    state: dict[str, Any] = {
+        "selected": "dashboard",
+        "eventos_estado": "loading",
+        "eventos": [],
+        "eventos_mensaje": "Cargando eventos...",
+        "eventos_loading": False,
+        "eventos_consulta_iniciada": False,
+    }
 
     def build_content() -> ft.Control:
         if state["selected"] == "arrivals":
@@ -53,7 +69,14 @@ def build_home_view(
                 "Preferencias se implementara en un proximo incremento.",
             )
 
-        return dashboard_view(contexto_usuario)
+        return dashboard_view(
+            contexto_usuario,
+            eventos_estado=state["eventos_estado"],
+            eventos=state["eventos"],
+            eventos_mensaje=state["eventos_mensaje"],
+            on_select_event=select_event,
+            on_retry_events=cargar_eventos,
+        )
 
     def build_shell() -> ft.Control:
         content = build_content()
@@ -77,6 +100,65 @@ def build_home_view(
         page.add(home_control)
         page.update()
 
+    def cargar_eventos() -> None:
+        if state["eventos_loading"]:
+            return
+
+        state["eventos_loading"] = True
+        state["eventos_estado"] = "loading"
+        state["eventos_mensaje"] = "Cargando eventos..."
+        print("[EVENTOS][INFO] Inicio de carga de eventos.")
+        render()
+
+        def worker() -> None:
+            try:
+                resultado = obtener_eventos_disponibles(contexto_usuario, supabase=supabase)
+                state["eventos"] = resultado.eventos
+                state["eventos_mensaje"] = resultado.mensaje
+                state["eventos_estado"] = resultado.estado if resultado.ok else "error"
+
+                if resultado.ok:
+                    if (
+                        len(resultado.eventos) > 1
+                        and not contexto_usuario.get("usr_evento_id_default")
+                        and not contexto_usuario.get("evento_activo_seleccionado")
+                    ):
+                        limpiar_evento_activo(contexto_usuario)
+                        evento_activo = None
+                        print("[EVENTOS][INFO] Varios eventos disponibles; se requiere seleccion explicita.")
+                    else:
+                        evento_activo = sincronizar_evento_activo(contexto_usuario, resultado.eventos)
+                    guardar_contexto_sesion(page.session.store, contexto_usuario)
+                    guardar_eventos_disponibles(page.session.store, resultado.eventos)
+                    if evento_activo:
+                        print(
+                            "[EVENTOS][INFO] Evento activo:",
+                            evento_activo.get("cuenta_id"),
+                            evento_activo.get("evento_id"),
+                        )
+                    elif not resultado.eventos:
+                        print("[EVENTOS][INFO] Consulta de eventos vacia.")
+                    else:
+                        print("[EVENTOS][INFO] Esperando seleccion explicita de evento.")
+                else:
+                    print("[EVENTOS][ERROR]", resultado.estado, resultado.mensaje)
+            finally:
+                state["eventos_loading"] = False
+                render()
+
+        page.run_thread(worker)
+
+    def select_event(evento: dict[str, Any]) -> None:
+        evento_activo = establecer_evento_activo(contexto_usuario, evento)
+        contexto_usuario["evento_activo_seleccionado"] = True
+        guardar_contexto_sesion(page.session.store, contexto_usuario)
+        print(
+            "[EVENTOS][INFO] Cambio de evento activo:",
+            evento_activo.get("cuenta_id"),
+            evento_activo.get("evento_id"),
+        )
+        render()
+
     def select_tab(tab: str) -> None:
         if not (contexto_usuario.get("cuenta_actual") and contexto_usuario.get("evento_actual")):
             state["selected"] = "dashboard"
@@ -95,8 +177,8 @@ def build_home_view(
         except Exception:
             pass
         try:
-            page.session.store.remove("usuario_contexto")
-            page.session.store.remove("diagnostico_login")
+            limpiar_contexto_sesion(page.session.store)
+            print("[EVENTOS][INFO] Contexto de evento eliminado durante logout.")
         except Exception:
             pass
         page.clean()
@@ -105,4 +187,6 @@ def build_home_view(
         build_login_view(page)
         page.update()
 
-    return build_shell()
+    home_control = build_shell()
+    home_control.data = {"start_eventos": cargar_eventos}
+    return home_control

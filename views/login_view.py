@@ -233,6 +233,11 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
                 print("[HOME] Agregando Home")
                 page.add(home_control)
                 page.update()
+                start_eventos = None
+                if isinstance(home_control.data, dict):
+                    start_eventos = home_control.data.get("start_eventos")
+                if callable(start_eventos):
+                    start_eventos()
                 print("[HOME] Home mostrado")
             except Exception:
                 traceback.print_exc()

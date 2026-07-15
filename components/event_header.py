@@ -16,10 +16,11 @@ def event_header(contexto: dict[str, Any]) -> ft.Container:
     cuenta = contexto.get("cuenta_actual") or {}
     evento = contexto.get("evento_actual") or {}
     fase = _get(evento, "fase_evento", "")
+    evento_nombre = _get(evento, "nombre_evento", "Ningun evento seleccionado")
 
     details = [
         ft.Text(
-            _get(evento, "nombre_evento", "Sin evento actual"),
+            evento_nombre,
             size=18,
             weight=ft.FontWeight.BOLD,
             overflow=ft.TextOverflow.ELLIPSIS,

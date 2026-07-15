@@ -10,6 +10,8 @@ MODULES = [
     "config",
     "db",
     "services.auth_service",
+    "services.evento_context_service",
+    "services.evento_service",
     "services.response_utils",
     "services.usuario_service",
     "components.app_shell",
@@ -47,11 +49,13 @@ def main() -> int:
         "rol_global_calculado": "Administrador",
         "cuenta_actual": {"nombre_cuenta": "Cuenta Demo"},
         "evento_actual": {
+            "cuenta_id": 1,
+            "evento_id": 1,
             "nombre_evento": "Evento Demo",
             "fase_evento": "En_proceso",
         },
         "cuentas_permitidas": [{"cuenta_id": 1}],
-        "eventos_permitidos": [{"evento_id": 1}],
+        "eventos_permitidos": [{"cuenta_id": 1, "evento_id": 1}],
         "puede_registrar_llegadas": True,
     }
 

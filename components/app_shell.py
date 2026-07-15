@@ -16,7 +16,10 @@ def app_shell(
     on_select: Callable[[str], None],
     on_logout: Callable[[], None],
 ) -> ft.Control:
-    can_use_app = bool(contexto.get("cuenta_actual") and contexto.get("evento_actual"))
+    can_use_app = bool(
+        contexto.get("cuenta_actual")
+        and (contexto.get("evento_actual") or contexto.get("eventos_permitidos"))
+    )
     can_register_arrivals = bool(contexto.get("puede_registrar_llegadas"))
 
     return ft.SafeArea(
