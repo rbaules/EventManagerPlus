@@ -85,12 +85,15 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
         page.update()
 
     def run_login_flow() -> None:
+        fase = "inicio"
         try:
             login_button.disabled = True
+            fase = "oauth_url"
             set_status("Solicitando URL OAuth a Supabase...")
 
             oauth_url = get_oauth_url()
 
+            fase = "abrir_navegador"
             set_status(
                 "Se abrira el navegador para iniciar sesion con Google. "
                 "Despues del login, vuelve a esta ventana."
@@ -98,6 +101,7 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
 
             webbrowser.open(oauth_url)
 
+            fase = "esperar_callback"
             set_status(f"Esperando callback OAuth en {SUPABASE_OAUTH_REDIRECT_URL} ...")
 
             callback_result = wait_for_oauth_callback(timeout_seconds=180)
@@ -117,8 +121,10 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
 
             set_status("Callback recibido. Intercambiando code por sesion Supabase...")
 
+            fase = "obtener_sesion"
             exchange_code_for_session(str(code))
 
+            fase = "obtener_usuario_auth"
             user = get_current_user()
             if not user:
                 raise RuntimeError("No se pudo obtener el usuario autenticado con supabase.auth.get_user().")
@@ -134,6 +140,7 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
 
             set_status("Login exitoso. Consultando evp_usr_usuario para validar trigger...")
 
+            fase = "cargar_usuario_eventplus"
             usuario_eventplus = buscar_usuario_eventplus_por_auth_uuid(auth_user_id)
 
             diagnostico = [
@@ -195,6 +202,7 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
 
             set_status("Cargando contexto del usuario EventPlus...")
             try:
+                fase = "cargar_contexto_usuario"
                 contexto_usuario = cargar_contexto_usuario(auth_user_id)
                 page.session.store.set("usuario_contexto", contexto_usuario)
                 diagnostico.extend(["", formato_resumen_contexto(contexto_usuario)])
@@ -213,6 +221,7 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
             page.session.store.set("diagnostico_login", "\n".join(diagnostico))
             set_status("Acceso concedido. Abriendo Dashboard...")
             try:
+                fase = "construir_dashboard"
                 print("[HOME] Construyendo Home")
                 from views.home_view import build_home_view
 
@@ -249,16 +258,35 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
                 page.update()
 
         except Exception as ex:
+            print(
+                "[LOGIN][ERROR]",
+                f"fase={fase}",
+                f"tipo={type(ex).__name__}",
+                f"mensaje={ex}",
+            )
+            traceback.print_exc()
             set_status("La prueba fallo.")
             page.session.store.set(
                 "diagnostico_login",
                 "ERROR DURANTE LA PRUEBA\n\n"
+                f"Fase: {fase}\n"
                 f"{type(ex).__name__}: {ex}\n\n"
                 "TRACEBACK COMPLETO:\n"
                 f"{traceback.format_exc()}",
             )
+            if fase in {"oauth_url", "abrir_navegador", "esperar_callback", "obtener_sesion", "obtener_usuario_auth"}:
+                mensaje_principal = "No pudimos completar el inicio de sesion."
+            elif fase == "cargar_usuario_eventplus":
+                mensaje_principal = "La sesion fue iniciada, pero no fue posible cargar la informacion de tu usuario."
+            elif fase == "cargar_contexto_usuario":
+                mensaje_principal = "La sesion fue iniciada, pero no fue posible cargar tus cuentas o eventos."
+            elif fase == "construir_dashboard":
+                mensaje_principal = "La sesion fue iniciada, pero no pudimos preparar el Dashboard."
+            else:
+                mensaje_principal = "No pudimos completar el proceso de acceso."
             set_result(
-                "No pudimos completar el inicio de sesion.\n\n"
+                f"{mensaje_principal}\n\n"
+                f"Fase detectada: {fase}\n\n"
                 "Puntos a revisar:\n"
                 "1. Que SUPABASE_URL y SUPABASE_PUBLISHABLE_KEY esten correctos en .env.\n"
                 "2. Que Google este habilitado en Authentication > Providers.\n"

@@ -50,6 +50,15 @@ def _extraer_filas(response: Any) -> list[dict[str, Any]]:
     return filas
 
 
+def _trazar_filas(label: str, filas: list[dict[str, Any]]) -> None:
+    keys = sorted(filas[0].keys()) if filas else []
+    print(f"[CONTEXTO][INFO] {label}: tipo=list cantidad={len(filas)} keys={keys}")
+
+
+def _trazar_error(fase: str, ex: Exception) -> None:
+    print(f"[CONTEXTO][ERROR] fase={fase} tipo={type(ex).__name__} mensaje={ex}")
+
+
 def _normalizar_id(value: Any) -> int | None:
     if value is None or value == "":
         return None
@@ -141,9 +150,11 @@ def _consultar_cuentas_master() -> list[dict[str, Any]]:
         .order("cta_cuenta_id")
         .execute()
     )
+    filas = _extraer_filas(response)
+    _trazar_filas("cuentas_master", filas)
     return [
         cuenta
-        for row in _extraer_filas(response)
+        for row in filas
         if (cuenta := _cuenta_desde_row(row, "Master")) is not None
     ]
 
@@ -166,9 +177,11 @@ def _consultar_eventos_por_cuenta(
     if solo_activos:
         query = query.eq("eve_estado", "Activo")
     response = query.order("eve_evento_id").execute()
+    filas = _extraer_filas(response)
+    _trazar_filas(f"eventos_cuenta_{cuenta_id}", filas)
     return [
         evento
-        for row in _extraer_filas(response)
+        for row in filas
         if (evento := _evento_desde_row(row, rol)) is not None
     ]
 
@@ -189,6 +202,7 @@ def _consultar_evento_activo(cuenta_id: int, evento_id: int, rol: str) -> dict[s
         .execute()
     )
     data = _extraer_filas(response)
+    _trazar_filas(f"evento_activo_{cuenta_id}_{evento_id}", data)
     if not data:
         return None
     return _evento_desde_row(data[0], rol)
@@ -211,7 +225,9 @@ def _consultar_cuentas_vinculadas(usr_usuario_id: str) -> list[dict[str, Any]]:
     )
 
     cuentas: list[dict[str, Any]] = []
-    for row in _extraer_filas(response):
+    filas = _extraer_filas(response)
+    _trazar_filas("cuentas_vinculadas", filas)
+    for row in filas:
         rol = str(safe_get(row, "ucu_rol", ""))
         cuenta = _cuenta_desde_row(row, rol)
         if cuenta and cuenta["estado"] == "Activo":
@@ -232,7 +248,9 @@ def _consultar_eventos_asignados_operador(usr_usuario_id: str, cuenta_id: int) -
     )
 
     eventos: list[dict[str, Any]] = []
-    for row in _extraer_filas(response):
+    filas = _extraer_filas(response)
+    _trazar_filas(f"eventos_asignados_operador_cuenta_{cuenta_id}", filas)
+    for row in filas:
         evento_id = _normalizar_id(safe_get(row, "uev_evento_id"))
         if evento_id is None:
             continue
@@ -285,7 +303,14 @@ def _seleccionar_evento_actual(
 
 
 def cargar_contexto_usuario(auth_user_id: str) -> dict[str, Any]:
-    usuario = buscar_usuario_eventplus_por_auth_uuid(auth_user_id)
+    try:
+        usuario = buscar_usuario_eventplus_por_auth_uuid(auth_user_id)
+    except Exception as ex:
+        _trazar_error("cargar_usuario", ex)
+        raise UsuarioContextoError(
+            "No fue posible cargar la informacion de tu usuario."
+        ) from ex
+
     if not usuario:
         raise UsuarioContextoError(
             "Tu usuario fue autenticado, pero no esta autorizado en EventPlus."
@@ -305,37 +330,63 @@ def cargar_contexto_usuario(auth_user_id: str) -> dict[str, Any]:
     es_master = bool(safe_get(usuario, "usr_es_usuario_master", False))
 
     if es_master:
-        cuentas_permitidas = _consultar_cuentas_master()
+        try:
+            cuentas_permitidas = _consultar_cuentas_master()
+        except Exception as ex:
+            _trazar_error("cargar_cuentas_master", ex)
+            raise UsuarioContextoError(
+                "No fue posible cargar las cuentas disponibles."
+            ) from ex
+
         eventos_permitidos: list[dict[str, Any]] = []
-        for cuenta in cuentas_permitidas:
-            eventos_permitidos.extend(
-                _consultar_eventos_por_cuenta(
-                    cuenta["cuenta_id"],
-                    "Master",
-                    solo_activos=False,
+        try:
+            for cuenta in cuentas_permitidas:
+                eventos_permitidos.extend(
+                    _consultar_eventos_por_cuenta(
+                        cuenta["cuenta_id"],
+                        "Master",
+                        solo_activos=False,
+                    )
                 )
-            )
+        except Exception as ex:
+            _trazar_error("cargar_eventos_master", ex)
+            raise UsuarioContextoError(
+                "No fue posible cargar los eventos disponibles."
+            ) from ex
         rol_global_calculado = "Master"
     else:
-        cuentas_permitidas = _consultar_cuentas_vinculadas(usr_usuario_id)
+        try:
+            cuentas_permitidas = _consultar_cuentas_vinculadas(usr_usuario_id)
+        except Exception as ex:
+            _trazar_error("cargar_cuentas_usuario", ex)
+            raise UsuarioContextoError(
+                "No fue posible cargar las cuentas disponibles."
+            ) from ex
+
         if not cuentas_permitidas:
             raise UsuarioContextoError(
                 "Tu usuario existe, pero no tiene cuentas activas asignadas."
             )
 
         eventos_permitidos = []
-        for cuenta in cuentas_permitidas:
-            if cuenta["rol"] in {"Administrador", "Consulta"}:
-                eventos_permitidos.extend(
-                    _consultar_eventos_por_cuenta(cuenta["cuenta_id"], cuenta["rol"])
-                )
-            elif cuenta["rol"] == "Operador":
-                eventos_permitidos.extend(
-                    _consultar_eventos_asignados_operador(
-                        usr_usuario_id,
-                        cuenta["cuenta_id"],
+        try:
+            for cuenta in cuentas_permitidas:
+                if cuenta["rol"] in {"Administrador", "Consulta"}:
+                    eventos_permitidos.extend(
+                        _consultar_eventos_por_cuenta(cuenta["cuenta_id"], cuenta["rol"])
                     )
-                )
+                elif cuenta["rol"] == "Operador":
+                    eventos_permitidos.extend(
+                        _consultar_eventos_asignados_operador(
+                            usr_usuario_id,
+                            cuenta["cuenta_id"],
+                        )
+                    )
+        except Exception as ex:
+            _trazar_error("cargar_eventos_usuario", ex)
+            raise UsuarioContextoError(
+                "No fue posible cargar los eventos disponibles."
+            ) from ex
         rol_global_calculado = _rol_global(cuentas_permitidas)
 
     cuentas_permitidas = _dedupe_cuentas(cuentas_permitidas)
@@ -344,10 +395,6 @@ def cargar_contexto_usuario(auth_user_id: str) -> dict[str, Any]:
     if not cuentas_permitidas:
         raise UsuarioContextoError(
             "Tu usuario existe, pero no tiene cuentas activas asignadas."
-        )
-    if not eventos_permitidos:
-        raise UsuarioContextoError(
-            "Tu usuario existe, pero no tiene eventos activos disponibles."
         )
 
     cuenta_actual = _seleccionar_cuenta_actual(
@@ -359,6 +406,9 @@ def cargar_contexto_usuario(auth_user_id: str) -> dict[str, Any]:
         cuenta_actual,
         safe_get(usuario, "usr_evento_id_default"),
     )
+
+    if not eventos_permitidos:
+        print("[CONTEXTO][WARNING] Usuario sin eventos disponibles; se abrira Dashboard en estado vacio.")
 
     puede_administrar_usuarios = rol_global_calculado in {"Master", "Administrador"}
     puede_registrar_llegadas = bool(
