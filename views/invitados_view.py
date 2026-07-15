@@ -129,6 +129,27 @@ def _invitado_card(invitado: dict[str, Any], on_detail: Any) -> ft.Control:
     )
 
 
+def _invitado_card_admin(invitado: dict[str, Any], on_detail: Any, on_edit: Any, can_manage: bool) -> ft.Control:
+    card = _invitado_card(invitado, on_detail)
+    if not can_manage or invitado.get("es_invitado_imprevisto"):
+        return card
+    content = card.content
+    if isinstance(content, ft.Column):
+        content.controls.append(
+            ft.Row(
+                [
+                    ft.OutlinedButton(
+                        content="Editar",
+                        icon=ft.Icons.EDIT,
+                        on_click=lambda e: on_edit(invitado),
+                    )
+                ],
+                alignment=ft.MainAxisAlignment.END,
+            )
+        )
+    return card
+
+
 def _detail_row(label: str, value: Any) -> ft.Control:
     return ft.Container(
         content=ft.Column(
@@ -177,6 +198,138 @@ def _detail_panel(invitado: dict[str, Any] | None, on_close: Any) -> ft.Control:
     )
 
 
+def _form_panel(
+    form_state: dict[str, Any] | None,
+    invitaciones: list[dict[str, Any]],
+    can_manage: bool,
+    is_saving: bool,
+    form_message: str,
+    on_save: Any,
+    on_cancel: Any,
+) -> ft.Control:
+    if not form_state:
+        return ft.Container()
+
+    modo = form_state.get("modo", "crear")
+    datos = form_state.get("datos", {})
+    titulo = "Agregar invitado" if modo == "crear" else "Editar invitado"
+
+    nombre = ft.TextField(
+        label="Nombre",
+        value=str(datos.get("nombre_completo") or ""),
+        max_length=80,
+        disabled=is_saving or not can_manage,
+    )
+    email = ft.TextField(
+        label="Email",
+        value=str(datos.get("email") or ""),
+        max_length=254,
+        disabled=is_saving or not can_manage,
+    )
+    telefono = ft.TextField(
+        label="Telefono",
+        value=str(datos.get("telefono") or ""),
+        max_length=20,
+        disabled=is_saving or not can_manage,
+    )
+    mesa = ft.TextField(
+        label="Mesa",
+        value="" if datos.get("mesa_id") is None else str(datos.get("mesa_id")),
+        disabled=is_saving or not can_manage,
+    )
+    puesto = ft.TextField(
+        label="Puesto",
+        value="" if datos.get("puesto_id") is None else str(datos.get("puesto_id")),
+        disabled=is_saving or not can_manage,
+    )
+    principal = ft.Checkbox(
+        label="Invitado principal",
+        value=bool(datos.get("es_invitado_principal")),
+        disabled=is_saving or not can_manage,
+    )
+
+    invitacion = ft.Dropdown(
+        label="Invitacion",
+        value=str(datos.get("invitacion_id") or ""),
+        disabled=is_saving or not can_manage or modo != "crear",
+        options=[
+            ft.DropdownOption(
+                key=str(item["invitacion_id"]),
+                text=f"{item['destinatario']}" + (f" ({item['codigo']})" if item.get("codigo") else ""),
+            )
+            for item in invitaciones
+        ],
+        hint_text="Selecciona una invitacion",
+    )
+
+    def collect_payload() -> dict[str, Any]:
+        return {
+            "invitacion_id": invitacion.value,
+            "nombre_completo": nombre.value,
+            "email": email.value,
+            "telefono": telefono.value,
+            "mesa_id": mesa.value,
+            "puesto_id": puesto.value,
+            "es_invitado_principal": principal.value,
+        }
+
+    controls: list[ft.Control] = [
+        ft.Row(
+            [
+                ft.Text(titulo, size=20, weight=ft.FontWeight.BOLD, expand=True),
+                _chip("Pre-evento" if can_manage else "Modo consulta"),
+            ]
+        ),
+        ft.Text("La cuenta y el evento se toman del evento activo; no son editables.", size=13, color=ft.Colors.ON_SURFACE_VARIANT),
+    ]
+    if form_message:
+        controls.append(ft.Text(form_message, size=13, color=ft.Colors.ERROR))
+
+    controls.extend(
+        [
+            ft.ResponsiveRow(
+                [
+                    ft.Container(invitacion, col={"xs": 12, "md": 6}),
+                    ft.Container(nombre, col={"xs": 12, "md": 6}),
+                    ft.Container(email, col={"xs": 12, "md": 6}),
+                    ft.Container(telefono, col={"xs": 12, "md": 6}),
+                    ft.Container(mesa, col={"xs": 12, "md": 4}),
+                    ft.Container(puesto, col={"xs": 12, "md": 4}),
+                    ft.Container(principal, col={"xs": 12, "md": 4}),
+                ],
+                spacing=12,
+                run_spacing=12,
+            ),
+            ft.Row(
+                [
+                    ft.ElevatedButton(
+                        content="Guardar" if modo == "crear" else "Guardar cambios",
+                        icon=ft.Icons.SAVE,
+                        disabled=is_saving or not can_manage,
+                        on_click=lambda e: on_save(collect_payload()),
+                    ),
+                    ft.OutlinedButton(
+                        content="Cancelar",
+                        icon=ft.Icons.CLOSE,
+                        disabled=is_saving,
+                        on_click=lambda e: on_cancel(),
+                    ),
+                    ft.ProgressRing(width=22, height=22, visible=is_saving),
+                ],
+                spacing=8,
+            ),
+        ]
+    )
+
+    return ft.Container(
+        content=ft.Column(controls, spacing=12),
+        padding=16,
+        border_radius=8,
+        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+        border=ft.Border.all(width=1, color=ft.Colors.OUTLINE_VARIANT),
+    )
+
+
 def invitados_view(
     contexto: dict[str, Any],
     estado: str,
@@ -187,6 +340,11 @@ def invitados_view(
     has_more: bool,
     is_loading: bool,
     invitado_detalle: dict[str, Any] | None,
+    can_manage_planned: bool,
+    invitaciones: list[dict[str, Any]],
+    form_state: dict[str, Any] | None,
+    form_message: str,
+    is_saving: bool,
     on_search: Any,
     on_clear: Any,
     on_filter: Any,
@@ -195,6 +353,10 @@ def invitados_view(
     on_detail: Any,
     on_close_detail: Any,
     on_go_dashboard: Any,
+    on_new_guest: Any,
+    on_edit_guest: Any,
+    on_save_guest: Any,
+    on_cancel_form: Any,
 ) -> ft.Control:
     evento = contexto.get("evento_actual") or {}
     if not evento:
@@ -251,6 +413,7 @@ def invitados_view(
                     expand=True,
                 ),
                 _chip(f"Mostrando {len(invitados)}"),
+                _chip("Edicion habilitada" if can_manage_planned else "Modo consulta"),
             ],
             vertical_alignment=ft.CrossAxisAlignment.START,
         ),
@@ -293,6 +456,33 @@ def invitados_view(
             )
         )
 
+    controls.append(
+        ft.Row(
+            [
+                ft.ElevatedButton(
+                    content="Agregar invitado",
+                    icon=ft.Icons.PERSON_ADD,
+                    disabled=(not can_manage_planned) or is_loading or is_saving,
+                    on_click=lambda e: on_new_guest(),
+                )
+            ],
+            alignment=ft.MainAxisAlignment.END,
+        )
+    )
+
+    if form_state:
+        controls.append(
+            _form_panel(
+                form_state,
+                invitaciones,
+                can_manage_planned,
+                is_saving,
+                form_message,
+                on_save_guest,
+                on_cancel_form,
+            )
+        )
+
     if estado == "loading":
         controls.append(
             ft.Container(
@@ -311,7 +501,15 @@ def invitados_view(
     else:
         controls.append(
             ft.Column(
-                [_invitado_card(invitado, on_detail) for invitado in invitados],
+                [
+                    _invitado_card_admin(
+                        invitado,
+                        on_detail,
+                        on_edit_guest,
+                        can_manage_planned,
+                    )
+                    for invitado in invitados
+                ],
                 spacing=10,
             )
         )

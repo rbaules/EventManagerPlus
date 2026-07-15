@@ -17,8 +17,12 @@ from services.evento_context_service import (
 from services.evento_service import obtener_eventos_disponibles
 from services.invitado_service import (
     INVITADOS_PAGE_SIZE,
+    actualizar_invitado_planificado,
+    crear_invitado_planificado,
+    listar_invitaciones_evento,
     listar_invitados,
     obtener_invitado_por_id,
+    puede_administrar_invitados_planificados,
 )
 from views.dashboard_view import dashboard_view
 from views.invitados_view import invitados_view
@@ -66,6 +70,10 @@ def build_home_view(
         "invitado_detalle": None,
         "invitados_request_id": 0,
         "invitados_event_key": None,
+        "invitaciones": [],
+        "invitado_form": None,
+        "invitado_form_message": "",
+        "invitado_saving": False,
     }
 
     def build_content() -> ft.Control:
@@ -80,6 +88,11 @@ def build_home_view(
                 has_more=state["invitados_has_more"],
                 is_loading=state["invitados_loading"],
                 invitado_detalle=state["invitado_detalle"],
+                can_manage_planned=puede_administrar_invitados_planificados(contexto_usuario),
+                invitaciones=state["invitaciones"],
+                form_state=state["invitado_form"],
+                form_message=state["invitado_form_message"],
+                is_saving=state["invitado_saving"],
                 on_search=buscar_invitados,
                 on_clear=limpiar_busqueda_invitados,
                 on_filter=filtrar_invitados,
@@ -88,6 +101,10 @@ def build_home_view(
                 on_detail=seleccionar_invitado_detalle,
                 on_close_detail=cerrar_detalle_invitado,
                 on_go_dashboard=go_dashboard,
+                on_new_guest=abrir_form_crear_invitado,
+                on_edit_guest=abrir_form_editar_invitado,
+                on_save_guest=guardar_form_invitado,
+                on_cancel_form=cancelar_form_invitado,
             )
 
         if state["selected"] == "arrivals":
@@ -148,6 +165,10 @@ def build_home_view(
         state["invitados_has_more"] = False
         state["invitados_loading"] = False
         state["invitado_detalle"] = None
+        state["invitaciones"] = []
+        state["invitado_form"] = None
+        state["invitado_form_message"] = ""
+        state["invitado_saving"] = False
         state["invitados_request_id"] += 1
         state["invitados_event_key"] = None
 
@@ -184,6 +205,7 @@ def build_home_view(
         filtro = str(state["invitados_filtro"])
         print("[INVITADOS][INFO] Entrada al modulo Invitados.")
         print("[INVITADOS][INFO] Evento activo utilizado:", active_key[0], active_key[1])
+        cargar_invitaciones()
         render()
 
         def worker() -> None:
@@ -224,6 +246,14 @@ def build_home_view(
                 render()
 
         page.run_thread(worker)
+
+    def cargar_invitaciones() -> None:
+        resultado = listar_invitaciones_evento(contexto_usuario.get("evento_actual"), supabase=supabase)
+        if resultado.ok:
+            state["invitaciones"] = resultado.invitaciones
+        else:
+            state["invitaciones"] = []
+            print("[INVITADOS][WARNING] No se pudieron cargar invitaciones:", resultado.estado)
 
     def buscar_invitados(texto: str) -> None:
         state["invitados_busqueda"] = (texto or "").strip()
@@ -271,8 +301,123 @@ def build_home_view(
             state["invitados_estado"] = "error" if resultado.estado == "connection_error" else state["invitados_estado"]
         render()
 
+    def abrir_form_crear_invitado() -> None:
+        print("[INVITADOS][INFO] Intento de abrir formulario: operacion=crear")
+        if not puede_administrar_invitados_planificados(contexto_usuario):
+            state["invitado_form_message"] = "No tienes permisos para modificar invitados planificados."
+            render()
+            return
+        cargar_invitaciones()
+        if not state["invitaciones"]:
+            state["invitado_form_message"] = "No hay invitaciones activas para agregar invitados."
+            render()
+            return
+        state["invitado_form"] = {
+            "modo": "crear",
+            "original": None,
+            "event_key": evento_activo_key(),
+            "datos": {
+                "invitacion_id": "",
+                "nombre_completo": "",
+                "email": "",
+                "telefono": "",
+                "mesa_id": "",
+                "puesto_id": "",
+                "es_invitado_principal": False,
+            },
+        }
+        state["invitado_form_message"] = ""
+        state["invitado_detalle"] = None
+        render()
+
+    def abrir_form_editar_invitado(invitado: dict[str, Any]) -> None:
+        print("[INVITADOS][INFO] Intento de abrir formulario: operacion=editar")
+        if not puede_administrar_invitados_planificados(contexto_usuario):
+            state["invitado_form_message"] = "No tienes permisos para modificar invitados planificados."
+            render()
+            return
+        resultado = obtener_invitado_por_id(
+            contexto_usuario.get("evento_actual"),
+            str(invitado.get("invitado_uuid", "")),
+            supabase=supabase,
+        )
+        if not resultado.ok or not resultado.invitado:
+            state["invitado_form_message"] = resultado.mensaje
+            render()
+            return
+        invitado_actual = resultado.invitado
+        if invitado_actual.get("es_invitado_imprevisto"):
+            state["invitado_form_message"] = "Solo se pueden editar invitados planificados en esta tarea."
+            render()
+            return
+        state["invitado_form"] = {
+            "modo": "editar",
+            "original": invitado_actual,
+            "event_key": evento_activo_key(),
+            "datos": {
+                "invitacion_id": invitado_actual.get("invitacion_id"),
+                "nombre_completo": invitado_actual.get("nombre_completo"),
+                "email": invitado_actual.get("email"),
+                "telefono": invitado_actual.get("telefono"),
+                "mesa_id": invitado_actual.get("mesa_id"),
+                "puesto_id": invitado_actual.get("puesto_id"),
+                "es_invitado_principal": invitado_actual.get("es_invitado_principal"),
+            },
+        }
+        state["invitado_form_message"] = ""
+        state["invitado_detalle"] = None
+        render()
+
+    def guardar_form_invitado(payload: dict[str, Any]) -> None:
+        form = state.get("invitado_form")
+        if not form:
+            return
+        if form.get("event_key") != evento_activo_key():
+            print("[INVITADOS][WARNING] Cambio de evento mientras el formulario estaba abierto.")
+            state["invitado_form_message"] = "El evento activo cambio. Vuelve a abrir el formulario."
+            render()
+            return
+        if state["invitado_saving"]:
+            return
+        state["invitado_saving"] = True
+        state["invitado_form_message"] = ""
+        render()
+
+        def worker() -> None:
+            try:
+                if form.get("modo") == "crear":
+                    resultado = crear_invitado_planificado(contexto_usuario, payload, supabase=supabase)
+                else:
+                    resultado = actualizar_invitado_planificado(
+                        contexto_usuario,
+                        form.get("original"),
+                        payload,
+                        supabase=supabase,
+                    )
+                if resultado.ok:
+                    state["invitado_form"] = None
+                    state["invitado_form_message"] = resultado.mensaje
+                    state["invitado_detalle"] = None
+                    print("[INVITADOS][INFO]", resultado.mensaje)
+                    cargar_invitados(reset=True)
+                    return
+                state["invitado_form_message"] = resultado.mensaje
+                print("[INVITADOS][WARNING] Guardado rechazado:", resultado.estado)
+            finally:
+                state["invitado_saving"] = False
+                render()
+
+        page.run_thread(worker)
+
+    def cancelar_form_invitado() -> None:
+        print("[INVITADOS][INFO] Formulario cancelado.")
+        state["invitado_form"] = None
+        state["invitado_form_message"] = ""
+        render()
+
     def cerrar_detalle_invitado() -> None:
         state["invitado_detalle"] = None
+        state["invitado_form"] = None
         render()
 
     def go_dashboard() -> None:

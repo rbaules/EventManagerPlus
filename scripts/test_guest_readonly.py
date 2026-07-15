@@ -189,19 +189,43 @@ def test_ui_builds() -> None:
     invitado = normalizar_invitado(ROWS[0])
     assert invitado
     controls = [
-        invitados_view(CONTEXTO, "loading", [], "Cargando", "", "todos", False, True, None, *callbacks()),
-        invitados_view(CONTEXTO, "ready", [invitado], "OK", "", "todos", False, False, invitado, *callbacks()),
-        invitados_view(CONTEXTO, "empty", [], "Este evento todavia no tiene invitados registrados.", "", "todos", False, False, None, *callbacks()),
-        invitados_view(CONTEXTO, "no_results", [], "No se encontraron invitados.", "x", "todos", False, False, None, *callbacks()),
-        invitados_view(CONTEXTO, "error", [], "No fue posible cargar los invitados.", "", "todos", False, False, None, *callbacks()),
-        invitados_view({"evento_actual": None}, "event_required", [], "Selecciona un evento.", "", "todos", False, False, None, *callbacks()),
+        build_view(CONTEXTO, "loading", [], "Cargando", "", "todos", False, True, None),
+        build_view(CONTEXTO, "ready", [invitado], "OK", "", "todos", False, False, invitado),
+        build_view(CONTEXTO, "empty", [], "Este evento todavia no tiene invitados registrados.", "", "todos", False, False, None),
+        build_view(CONTEXTO, "no_results", [], "No se encontraron invitados.", "x", "todos", False, False, None),
+        build_view(CONTEXTO, "error", [], "No fue posible cargar los invitados.", "", "todos", False, False, None),
+        build_view({"evento_actual": None}, "event_required", [], "Selecciona un evento.", "", "todos", False, False, None),
     ]
     for control in controls:
         assert control is not None
 
 
-def callbacks() -> tuple[Any, ...]:
-    return (
+def build_view(
+    contexto: dict[str, Any],
+    estado: str,
+    invitados: list[dict[str, Any]],
+    mensaje: str,
+    busqueda: str,
+    filtro: str,
+    has_more: bool,
+    is_loading: bool,
+    invitado_detalle: dict[str, Any] | None,
+) -> Any:
+    return invitados_view(
+        contexto,
+        estado,
+        invitados,
+        mensaje,
+        busqueda,
+        filtro,
+        has_more,
+        is_loading,
+        invitado_detalle,
+        False,
+        [],
+        None,
+        "",
+        False,
         lambda value=None: None,
         lambda: None,
         lambda value=None: None,
@@ -209,6 +233,10 @@ def callbacks() -> tuple[Any, ...]:
         lambda: None,
         lambda value=None: None,
         lambda: None,
+        lambda: None,
+        lambda: None,
+        lambda value=None: None,
+        lambda value=None: None,
         lambda: None,
     )
 
