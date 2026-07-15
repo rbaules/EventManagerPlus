@@ -47,6 +47,13 @@ def bottom_navigation(
                     lambda e: on_select("dashboard"),
                 ),
                 _nav_button(
+                    "Invitados",
+                    "PEOPLE",
+                    selected == "guests",
+                    not can_use_app,
+                    lambda e: on_select("guests"),
+                ),
+                _nav_button(
                     "Registrar llegadas",
                     "HOW_TO_REG",
                     selected == "arrivals",

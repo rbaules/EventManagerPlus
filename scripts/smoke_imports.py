@@ -12,6 +12,7 @@ MODULES = [
     "services.auth_service",
     "services.evento_context_service",
     "services.evento_service",
+    "services.invitado_service",
     "services.response_utils",
     "services.usuario_service",
     "components.app_shell",
@@ -20,6 +21,7 @@ MODULES = [
     "components.stat_card",
     "views.dashboard_view",
     "views.home_view",
+    "views.invitados_view",
     "views.login_view",
 ]
 
@@ -43,6 +45,7 @@ def main() -> int:
     from components.stat_card import stat_card
     from views.dashboard_view import dashboard_view
     from views.home_view import build_home_view
+    from views.invitados_view import invitados_view
 
     contexto = {
         "usr_nombre_usuario": "Usuario Demo",
@@ -64,6 +67,25 @@ def main() -> int:
         event_header(contexto),
         bottom_navigation("dashboard", True, True, lambda tab: None, lambda: None),
         dashboard_view(contexto),
+        invitados_view(
+            contexto,
+            "empty",
+            [],
+            "Este evento todavia no tiene invitados registrados.",
+            "",
+            "todos",
+            False,
+            False,
+            None,
+            lambda value=None: None,
+            lambda: None,
+            lambda value=None: None,
+            lambda: None,
+            lambda: None,
+            lambda value=None: None,
+            lambda: None,
+            lambda: None,
+        ),
         app_shell(
             contexto,
             "dashboard",
