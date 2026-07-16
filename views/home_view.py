@@ -18,11 +18,19 @@ from services.evento_service import obtener_eventos_disponibles
 from services.invitado_service import (
     INVITADOS_PAGE_SIZE,
     actualizar_invitado_planificado,
+    confirmar_llegada,
     crear_invitado_planificado,
+    crear_invitado_imprevisto,
+    eliminar_invitado_imprevisto,
     listar_invitaciones_evento,
     listar_invitados,
     obtener_invitado_por_id,
     puede_administrar_invitados_planificados,
+    puede_confirmar_llegada,
+    puede_eliminar_imprevisto,
+    puede_registrar_imprevisto,
+    puede_reversar_llegada,
+    reversar_llegada,
 )
 from views.dashboard_view import dashboard_view
 from views.invitados_view import invitados_view
@@ -89,6 +97,10 @@ def build_home_view(
                 is_loading=state["invitados_loading"],
                 invitado_detalle=state["invitado_detalle"],
                 can_manage_planned=puede_administrar_invitados_planificados(contexto_usuario),
+                can_confirm_arrival=puede_confirmar_llegada(contexto_usuario),
+                can_reverse_arrival=puede_reversar_llegada(contexto_usuario),
+                can_manage_unexpected=puede_registrar_imprevisto(contexto_usuario),
+                can_delete_unexpected=puede_eliminar_imprevisto(contexto_usuario),
                 invitaciones=state["invitaciones"],
                 form_state=state["invitado_form"],
                 form_message=state["invitado_form_message"],
@@ -102,9 +114,13 @@ def build_home_view(
                 on_close_detail=cerrar_detalle_invitado,
                 on_go_dashboard=go_dashboard,
                 on_new_guest=abrir_form_crear_invitado,
+                on_new_unexpected_guest=abrir_form_crear_imprevisto,
                 on_edit_guest=abrir_form_editar_invitado,
                 on_save_guest=guardar_form_invitado,
                 on_cancel_form=cancelar_form_invitado,
+                on_confirm_arrival=confirmar_llegada_invitado,
+                on_reverse_arrival=confirmar_reversion_llegada,
+                on_delete_unexpected=confirmar_eliminacion_imprevisto,
             )
 
         if state["selected"] == "arrivals":
@@ -330,6 +346,35 @@ def build_home_view(
         state["invitado_detalle"] = None
         render()
 
+    def abrir_form_crear_imprevisto() -> None:
+        print("[INVITADOS][INFO] Apertura del formulario imprevisto.")
+        if not puede_registrar_imprevisto(contexto_usuario):
+            state["invitado_form_message"] = "No tienes permisos para registrar invitados imprevistos en este evento."
+            render()
+            return
+        cargar_invitaciones()
+        if not state["invitaciones"]:
+            state["invitado_form_message"] = "No hay invitaciones activas para registrar invitados imprevistos."
+            render()
+            return
+        state["invitado_form"] = {
+            "modo": "imprevisto",
+            "original": None,
+            "event_key": evento_activo_key(),
+            "datos": {
+                "invitacion_id": "",
+                "nombre_completo": "",
+                "email": "",
+                "telefono": "",
+                "mesa_id": "",
+                "puesto_id": "",
+                "es_invitado_principal": False,
+            },
+        }
+        state["invitado_form_message"] = ""
+        state["invitado_detalle"] = None
+        render()
+
     def abrir_form_editar_invitado(invitado: dict[str, Any]) -> None:
         print("[INVITADOS][INFO] Intento de abrir formulario: operacion=editar")
         if not puede_administrar_invitados_planificados(contexto_usuario):
@@ -387,6 +432,8 @@ def build_home_view(
             try:
                 if form.get("modo") == "crear":
                     resultado = crear_invitado_planificado(contexto_usuario, payload, supabase=supabase)
+                elif form.get("modo") == "imprevisto":
+                    resultado = crear_invitado_imprevisto(contexto_usuario, payload, supabase=supabase)
                 else:
                     resultado = actualizar_invitado_planificado(
                         contexto_usuario,
@@ -408,6 +455,107 @@ def build_home_view(
                 render()
 
         page.run_thread(worker)
+
+    def ejecutar_operacion_invitado(
+        invitado: dict[str, Any],
+        operacion: Any,
+        etiqueta: str,
+        cerrar_detalle: bool = False,
+    ) -> None:
+        active_key = evento_activo_key()
+        invitado_key = (invitado.get("cuenta_id"), invitado.get("evento_id"))
+        if active_key is None or invitado_key != active_key:
+            print("[INVITADOS][WARNING] Cambio de evento antes de ejecutar operacion:", etiqueta)
+            state["invitado_form_message"] = "El evento activo cambio. Abre nuevamente la operacion."
+            render()
+            return
+        if state["invitado_saving"]:
+            return
+        state["invitado_saving"] = True
+        state["invitado_form_message"] = ""
+        print("[INVITADOS][INFO] Ejecutando operacion:", etiqueta)
+        render()
+
+        def worker() -> None:
+            try:
+                resultado = operacion(contexto_usuario, invitado, supabase=supabase)
+                state["invitado_form_message"] = resultado.mensaje
+                if resultado.ok:
+                    if cerrar_detalle:
+                        state["invitado_detalle"] = None
+                    elif resultado.invitado:
+                        state["invitado_detalle"] = resultado.invitado
+                    print("[INVITADOS][INFO]", resultado.mensaje)
+                    cargar_invitados(reset=True)
+                    return
+                if resultado.invitado and not cerrar_detalle:
+                    state["invitado_detalle"] = resultado.invitado
+                print("[INVITADOS][WARNING] Operacion rechazada:", resultado.estado)
+            finally:
+                state["invitado_saving"] = False
+                render()
+
+        page.run_thread(worker)
+
+    def confirmar_llegada_invitado(invitado: dict[str, Any]) -> None:
+        ejecutar_operacion_invitado(
+            invitado,
+            confirmar_llegada,
+            "confirmar_llegada",
+        )
+
+    def mostrar_dialogo_confirmacion(
+        titulo: str,
+        mensaje: str,
+        texto_confirmar: str,
+        on_confirm: Any,
+    ) -> None:
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(titulo),
+            content=ft.Text(mensaje),
+            actions=[
+                ft.TextButton(content="Cancelar", on_click=lambda e: cerrar_dialogo()),
+                ft.ElevatedButton(content=texto_confirmar, on_click=lambda e: aceptar_dialogo()),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+        def cerrar_dialogo() -> None:
+            dialog.open = False
+            page.update()
+
+        def aceptar_dialogo() -> None:
+            dialog.open = False
+            page.update()
+            on_confirm()
+
+        page.show_dialog(dialog)
+
+    def confirmar_reversion_llegada(invitado: dict[str, Any]) -> None:
+        mostrar_dialogo_confirmacion(
+            "Reversar llegada",
+            "Deseas reversar la llegada de este invitado? Esta accion modificara el estado registrado.",
+            "Reversar",
+            lambda: ejecutar_operacion_invitado(
+                invitado,
+                reversar_llegada,
+                "reversar_llegada",
+            ),
+        )
+
+    def confirmar_eliminacion_imprevisto(invitado: dict[str, Any]) -> None:
+        mostrar_dialogo_confirmacion(
+            "Eliminar invitado imprevisto",
+            "Deseas eliminar este invitado imprevisto? Se inactivara el registro en el evento actual.",
+            "Eliminar",
+            lambda: ejecutar_operacion_invitado(
+                invitado,
+                eliminar_invitado_imprevisto,
+                "eliminar_imprevisto",
+                cerrar_detalle=True,
+            ),
+        )
 
     def cancelar_form_invitado() -> None:
         print("[INVITADOS][INFO] Formulario cancelado.")

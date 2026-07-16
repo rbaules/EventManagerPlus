@@ -248,6 +248,10 @@ def test_invitaciones_y_ui_builds() -> None:
         False,
         None,
         True,
+        True,
+        True,
+        True,
+        True,
         invs.invitaciones,
         {"modo": "crear", "datos": payload(), "original": None},
         "",
@@ -264,6 +268,10 @@ def test_invitaciones_y_ui_builds() -> None:
         lambda value=None: None,
         lambda value=None: None,
         lambda: None,
+        lambda value=None: None,
+        lambda value=None: None,
+        lambda value=None: None,
+        lambda value=None: None,
     )
     assert control is not None
 

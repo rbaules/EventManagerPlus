@@ -164,33 +164,76 @@ def _detail_row(label: str, value: Any) -> ft.Control:
     )
 
 
-def _detail_panel(invitado: dict[str, Any] | None, on_close: Any) -> ft.Control:
+def _detail_panel(
+    invitado: dict[str, Any] | None,
+    can_confirm_arrival: bool,
+    can_reverse_arrival: bool,
+    can_delete_unexpected: bool,
+    is_saving: bool,
+    on_confirm_arrival: Any,
+    on_reverse_arrival: Any,
+    on_delete_unexpected: Any,
+    on_close: Any,
+) -> ft.Control:
     if not invitado:
         return ft.Container()
 
-    return ft.Container(
-        content=ft.Column(
+    llegada = bool(invitado.get("llegada_confirmada"))
+    imprevisto = bool(invitado.get("es_invitado_imprevisto"))
+    acciones: list[ft.Control] = []
+    if can_confirm_arrival and not llegada:
+        acciones.append(
+            ft.ElevatedButton(
+                content="Confirmar llegada",
+                icon=ft.Icons.CHECK,
+                disabled=is_saving,
+                on_click=lambda e: on_confirm_arrival(invitado),
+            )
+        )
+    if can_reverse_arrival and llegada:
+        acciones.append(
+            ft.OutlinedButton(
+                content="Reversar llegada",
+                icon=ft.Icons.UNDO,
+                disabled=is_saving,
+                on_click=lambda e: on_reverse_arrival(invitado),
+            )
+        )
+    if can_delete_unexpected and imprevisto:
+        acciones.append(
+            ft.TextButton(
+                content="Eliminar imprevisto",
+                icon=ft.Icons.DELETE,
+                disabled=is_saving,
+                on_click=lambda e: on_delete_unexpected(invitado),
+            )
+        )
+
+    detalles: list[ft.Control] = [
+        ft.Row(
             [
-                ft.Row(
-                    [
-                        ft.Text("Detalle del invitado", size=18, weight=ft.FontWeight.BOLD, expand=True),
-                        ft.TextButton(content="Cerrar", icon=ft.Icons.CLOSE, on_click=lambda e: on_close()),
-                    ],
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                _detail_row("Nombre", invitado.get("nombre_completo")),
-                _detail_row("Llegada", invitado.get("estado_llegada")),
-                _detail_row("Mesa", invitado.get("mesa_texto")),
-                _detail_row("Puesto", invitado.get("puesto_texto")),
-                _detail_row("Tipo", invitado.get("tipo_invitado")),
-                _detail_row("Origen", invitado.get("origen_invitado")),
-                _detail_row("Email", invitado.get("email")),
-                _detail_row("Telefono", invitado.get("telefono")),
-                _detail_row("Novedad", "Si" if invitado.get("tiene_novedad") else "No"),
-                _detail_row("Descripcion de novedad", invitado.get("descripcion_novedad")),
+                ft.Text("Detalle del invitado", size=18, weight=ft.FontWeight.BOLD, expand=True),
+                ft.TextButton(content="Cerrar", icon=ft.Icons.CLOSE, on_click=lambda e: on_close()),
             ],
-            spacing=4,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
+        _detail_row("Nombre", invitado.get("nombre_completo")),
+        _detail_row("Llegada", invitado.get("estado_llegada")),
+        _detail_row("Fecha de llegada", invitado.get("fecha_hora_conf_llegada")),
+        _detail_row("Mesa", invitado.get("mesa_texto")),
+        _detail_row("Puesto", invitado.get("puesto_texto")),
+        _detail_row("Tipo", invitado.get("tipo_invitado")),
+        _detail_row("Origen", invitado.get("origen_invitado")),
+        _detail_row("Email", invitado.get("email")),
+        _detail_row("Telefono", invitado.get("telefono")),
+        _detail_row("Novedad", "Si" if invitado.get("tiene_novedad") else "No"),
+        _detail_row("Descripcion de novedad", invitado.get("descripcion_novedad")),
+    ]
+    if acciones:
+        detalles.append(ft.Row(acciones, spacing=8, wrap=True))
+
+    return ft.Container(
+        content=ft.Column(detalles, spacing=4),
         padding=16,
         border_radius=8,
         bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
@@ -212,7 +255,7 @@ def _form_panel(
 
     modo = form_state.get("modo", "crear")
     datos = form_state.get("datos", {})
-    titulo = "Agregar invitado" if modo == "crear" else "Editar invitado"
+    titulo = "Agregar invitado imprevisto" if modo == "imprevisto" else ("Agregar invitado" if modo == "crear" else "Editar invitado")
 
     nombre = ft.TextField(
         label="Nombre",
@@ -303,7 +346,7 @@ def _form_panel(
             ft.Row(
                 [
                     ft.ElevatedButton(
-                        content="Guardar" if modo == "crear" else "Guardar cambios",
+                        content="Guardar" if modo in {"crear", "imprevisto"} else "Guardar cambios",
                         icon=ft.Icons.SAVE,
                         disabled=is_saving or not can_manage,
                         on_click=lambda e: on_save(collect_payload()),
@@ -341,6 +384,10 @@ def invitados_view(
     is_loading: bool,
     invitado_detalle: dict[str, Any] | None,
     can_manage_planned: bool,
+    can_confirm_arrival: bool,
+    can_reverse_arrival: bool,
+    can_manage_unexpected: bool,
+    can_delete_unexpected: bool,
     invitaciones: list[dict[str, Any]],
     form_state: dict[str, Any] | None,
     form_message: str,
@@ -354,9 +401,13 @@ def invitados_view(
     on_close_detail: Any,
     on_go_dashboard: Any,
     on_new_guest: Any,
+    on_new_unexpected_guest: Any,
     on_edit_guest: Any,
     on_save_guest: Any,
     on_cancel_form: Any,
+    on_confirm_arrival: Any,
+    on_reverse_arrival: Any,
+    on_delete_unexpected: Any,
 ) -> ft.Control:
     evento = contexto.get("evento_actual") or {}
     if not evento:
@@ -413,7 +464,7 @@ def invitados_view(
                     expand=True,
                 ),
                 _chip(f"Mostrando {len(invitados)}"),
-                _chip("Edicion habilitada" if can_manage_planned else "Modo consulta"),
+                _chip("Operacion habilitada" if (can_manage_planned or can_confirm_arrival or can_manage_unexpected or can_delete_unexpected) else "Modo consulta"),
             ],
             vertical_alignment=ft.CrossAxisAlignment.START,
         ),
@@ -460,13 +511,21 @@ def invitados_view(
         ft.Row(
             [
                 ft.ElevatedButton(
-                    content="Agregar invitado",
+                    content="Agregar planificado",
                     icon=ft.Icons.PERSON_ADD,
                     disabled=(not can_manage_planned) or is_loading or is_saving,
                     on_click=lambda e: on_new_guest(),
-                )
+                ),
+                ft.OutlinedButton(
+                    content="Agregar imprevisto",
+                    icon=ft.Icons.PERSON_ADD,
+                    disabled=(not can_manage_unexpected) or is_loading or is_saving,
+                    on_click=lambda e: on_new_unexpected_guest(),
+                ),
             ],
             alignment=ft.MainAxisAlignment.END,
+            spacing=8,
+            wrap=True,
         )
     )
 
@@ -482,6 +541,8 @@ def invitados_view(
                 on_cancel_form,
             )
         )
+    elif form_message:
+        controls.append(ft.Text(form_message, size=13, color=ft.Colors.ON_SURFACE_VARIANT))
 
     if estado == "loading":
         controls.append(
@@ -534,6 +595,18 @@ def invitados_view(
         )
 
     if invitado_detalle:
-        controls.append(_detail_panel(invitado_detalle, on_close_detail))
+        controls.append(
+            _detail_panel(
+                invitado_detalle,
+                can_confirm_arrival,
+                can_reverse_arrival,
+                can_delete_unexpected,
+                is_saving,
+                on_confirm_arrival,
+                on_reverse_arrival,
+                on_delete_unexpected,
+                on_close_detail,
+            )
+        )
 
     return ft.ListView(controls=controls, spacing=16, expand=True)

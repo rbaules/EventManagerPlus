@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import unicodedata
 from typing import Any
 
@@ -26,6 +27,7 @@ SELECT_INVITADO = (
     "ivt_puesto_id,"
     "ivt_llegada_confirmada,"
     "ivt_fecha_hora_conf_llegada,"
+    "ivt_usuario_conf_llegada,"
     "ivt_tiene_novedad,"
     "ivt_descripcion_novedad,"
     "ivt_estado"
@@ -151,6 +153,7 @@ def normalizar_invitado(row: dict[str, Any]) -> dict[str, Any] | None:
         "llegada_confirmada": llegada_confirmada,
         "estado_llegada": _estado_llegada(llegada_confirmada),
         "fecha_hora_conf_llegada": safe_get(row, "ivt_fecha_hora_conf_llegada"),
+        "usuario_conf_llegada": _texto(safe_get(row, "ivt_usuario_conf_llegada")),
         "tiene_novedad": _normalizar_bool(safe_get(row, "ivt_tiene_novedad")),
         "descripcion_novedad": _texto(safe_get(row, "ivt_descripcion_novedad")),
         "estado": _texto(safe_get(row, "ivt_estado")) or "Sin estado",
@@ -216,6 +219,67 @@ def puede_administrar_invitados_planificados(contexto: dict[str, Any] | None) ->
     return permitido
 
 
+def _puede_operar_evento_en_proceso(
+    contexto: dict[str, Any] | None,
+    roles_permitidos: set[str],
+    etiqueta: str,
+) -> bool:
+    if not contexto or not contexto.get("usr_usuario_id"):
+        return False
+    evento = contexto.get("evento_actual") or {}
+    rol = _rol_evento(contexto)
+    fase = str(evento.get("fase_evento") or "")
+    estado = str(evento.get("estado") or "")
+    permitido = (
+        rol in roles_permitidos
+        and fase == "En_proceso"
+        and estado == "Activo"
+        and _evento_autorizado(contexto)
+        and _evento_activo_valido(evento) is not None
+    )
+    print(
+        "[INVITADOS][INFO] Autorizacion operativa:",
+        f"accion={etiqueta}",
+        f"rol={rol or 'Sin rol'}",
+        f"fase={fase or 'Sin fase'}",
+        f"estado={estado or 'Sin estado'}",
+        f"permitido={permitido}",
+    )
+    return permitido
+
+
+def puede_confirmar_llegada(contexto: dict[str, Any] | None) -> bool:
+    return _puede_operar_evento_en_proceso(
+        contexto,
+        {"Master", "Administrador", "Operador"},
+        "confirmar_llegada",
+    )
+
+
+def puede_reversar_llegada(contexto: dict[str, Any] | None) -> bool:
+    return _puede_operar_evento_en_proceso(
+        contexto,
+        {"Master", "Administrador"},
+        "reversar_llegada",
+    )
+
+
+def puede_registrar_imprevisto(contexto: dict[str, Any] | None) -> bool:
+    return _puede_operar_evento_en_proceso(
+        contexto,
+        {"Master", "Administrador", "Operador"},
+        "registrar_imprevisto",
+    )
+
+
+def puede_eliminar_imprevisto(contexto: dict[str, Any] | None) -> bool:
+    return _puede_operar_evento_en_proceso(
+        contexto,
+        {"Master", "Administrador", "Operador"},
+        "eliminar_imprevisto",
+    )
+
+
 def _resultado_operacion(estado: str, mensaje: str, invitado: dict[str, Any] | None = None) -> ResultadoOperacionInvitado:
     return ResultadoOperacionInvitado(ok=estado == "success", estado=estado, mensaje=mensaje, invitado=invitado)
 
@@ -236,6 +300,61 @@ def _validar_contexto_escritura(contexto: dict[str, Any] | None) -> ResultadoOpe
         )
     if str((contexto.get("evento_actual") or {}).get("estado") or "Activo") != "Activo":
         return _resultado_operacion("event_inactive", "El evento activo no esta disponible para modificar invitados.")
+    return None
+
+
+def _validar_contexto_operativo(
+    contexto: dict[str, Any] | None,
+    roles_permitidos: set[str],
+) -> ResultadoOperacionInvitado | None:
+    if not contexto or not contexto.get("usr_usuario_id"):
+        return _resultado_operacion("session_invalid", "La sesion no es valida. Inicia sesion nuevamente.")
+    if _evento_activo_valido(contexto.get("evento_actual")) is None:
+        return _resultado_operacion("event_required", "Selecciona un evento valido antes de administrar invitados.")
+    if not _evento_autorizado(contexto):
+        return _resultado_operacion("event_not_allowed", "No tienes acceso al evento activo.")
+    if _rol_evento(contexto) not in roles_permitidos:
+        return _resultado_operacion("role_denied", "No tienes permisos para realizar esta accion.")
+    evento = contexto.get("evento_actual") or {}
+    if str(evento.get("fase_evento") or "") != "En_proceso":
+        return _resultado_operacion("phase_denied", "El evento ya no esta en fase Evento en proceso.")
+    if str(evento.get("estado") or "") != "Activo":
+        return _resultado_operacion("event_inactive", "El evento activo no esta disponible para esta accion.")
+    return None
+
+
+def _validar_evento_real_operativo(
+    evento_activo: dict[str, Any] | None,
+    supabase: Any,
+) -> ResultadoOperacionInvitado | None:
+    key = _evento_activo_valido(evento_activo)
+    if key is None:
+        return _resultado_operacion("event_required", "Selecciona un evento valido antes de administrar invitados.")
+    try:
+        response = (
+            supabase
+            .table("evp_eve_evento")
+            .select("eve_cuenta_id,eve_evento_id,eve_fase_evento,eve_estado")
+            .eq("eve_cuenta_id", key[0])
+            .eq("eve_evento_id", key[1])
+            .limit(1)
+            .execute()
+        )
+    except Exception as ex:
+        print("[INVITADOS][ERROR] Error al validar fase real:", type(ex).__name__, str(ex))
+        return _resultado_error_operacion(ex)
+
+    data = extract_data(response)
+    if not data:
+        return _resultado_operacion("event_not_allowed", "El evento activo ya no esta disponible.")
+    row = to_dict(data[0]) or {}
+    fase = _texto(safe_get(row, "eve_fase_evento"))
+    estado = _texto(safe_get(row, "eve_estado"))
+    if fase != "En_proceso":
+        print("[INVITADOS][WARNING] Cambio de fase detectado:", fase or "Sin fase")
+        return _resultado_operacion("phase_denied", "El evento ya no esta en fase Evento en proceso.")
+    if estado != "Activo":
+        return _resultado_operacion("event_inactive", "El evento activo no esta disponible para esta accion.")
     return None
 
 
@@ -318,12 +437,16 @@ def _resultado_error_consulta(ex: Exception, limit: int, offset: int) -> Resulta
 
 def _resultado_error_operacion(ex: Exception) -> ResultadoOperacionInvitado:
     detalle = str(ex)
-    estado = "permission_denied" if "permission" in detalle.lower() or "42501" in detalle else "connection_error"
-    mensaje = (
-        "No tienes permisos para guardar invitados en este evento."
-        if estado == "permission_denied"
-        else "No fue posible guardar el invitado. Verifica la conexion e intentalo nuevamente."
-    )
+    detalle_lower = detalle.lower()
+    if "permission" in detalle_lower or "42501" in detalle_lower:
+        estado = "permission_denied"
+        mensaje = "No tienes permisos para guardar invitados en este evento."
+    elif "duplicate" in detalle_lower or "23505" in detalle_lower or "unique" in detalle_lower:
+        estado = "duplicate"
+        mensaje = "Ya existe un invitado con esos datos en este evento. Agrega un diferenciador para identificarlo."
+    else:
+        estado = "connection_error"
+        mensaje = "No fue posible guardar el invitado. Verifica la conexion e intentalo nuevamente."
     return ResultadoOperacionInvitado(ok=False, estado=estado, mensaje=mensaje)
 
 
@@ -689,6 +812,295 @@ def actualizar_invitado_planificado(
         return _resultado_operacion("unexpected_response", "El invitado fue actualizado, pero no pudimos leer el registro resultante.")
     print("[INVITADOS][INFO] Actualizacion satisfactoria.")
     return _resultado_operacion("success", "Invitado actualizado correctamente.", invitado)
+
+
+def _validar_invitado_mismo_evento(
+    evento_activo: dict[str, Any] | None,
+    invitado: dict[str, Any] | None,
+) -> tuple[tuple[int, int] | None, ResultadoOperacionInvitado | None]:
+    key = _evento_activo_valido(evento_activo)
+    if key is None:
+        return None, _resultado_operacion("event_required", "Selecciona un evento valido antes de administrar invitados.")
+    if not invitado:
+        return key, _resultado_operacion("not_found", "El invitado seleccionado ya no esta disponible.")
+    invitado_key = (
+        _normalizar_id(invitado.get("cuenta_id")),
+        _normalizar_id(invitado.get("evento_id")),
+    )
+    if invitado_key != key:
+        print("[INVITADOS][WARNING] Invitado de otro evento rechazado.")
+        return key, _resultado_operacion("event_changed", "El evento activo cambio. Abre nuevamente la operacion.")
+    return key, None
+
+
+def confirmar_llegada(
+    contexto: dict[str, Any] | None,
+    invitado_original: dict[str, Any] | None,
+    supabase: Any = None,
+) -> ResultadoOperacionInvitado:
+    bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador", "Operador"})
+    if bloqueo:
+        return bloqueo
+    evento_activo = contexto.get("evento_actual") if contexto else None
+    key, error = _validar_invitado_mismo_evento(evento_activo, invitado_original)
+    if error:
+        return error
+    assert key is not None
+    supabase = supabase or get_supabase_client()
+
+    bloqueo_real = _validar_evento_real_operativo(evento_activo, supabase)
+    if bloqueo_real:
+        return bloqueo_real
+
+    try:
+        actual = _obtener_invitado_por_clave(
+            evento_activo,
+            invitado_original.get("invitacion_id"),
+            invitado_original.get("invitado_id"),
+            supabase,
+        )
+    except Exception as ex:
+        print("[INVITADOS][ERROR] Error al verificar invitado antes de confirmar llegada:", type(ex).__name__, str(ex))
+        return _resultado_error_operacion(ex)
+
+    if not actual:
+        return _resultado_operacion("not_found", "El invitado ya no existe o no tienes acceso.")
+    if actual.get("llegada_confirmada"):
+        print("[INVITADOS][INFO] Llegada ya estaba confirmada.")
+        return _resultado_operacion("already_confirmed", "La llegada de este invitado ya fue confirmada.", actual)
+
+    print("[INVITADOS][INFO] Intento de confirmar llegada:", f"cuenta={key[0]}", f"evento={key[1]}")
+    update_data = {
+        "ivt_llegada_confirmada": True,
+        "ivt_fecha_hora_conf_llegada": datetime.now(timezone.utc).isoformat(),
+        "ivt_usuario_conf_llegada": contexto.get("usr_usuario_id") if contexto else None,
+    }
+    try:
+        response = (
+            supabase
+            .table("evp_ivt_invitado")
+            .update(update_data)
+            .eq("ivt_cuenta_id", key[0])
+            .eq("ivt_evento_id", key[1])
+            .eq("ivt_invitacion_id", actual["invitacion_id"])
+            .eq("ivt_invitado_id", actual["invitado_id"])
+            .eq("ivt_estado", "Activo")
+            .eq("ivt_llegada_confirmada", False)
+            .execute()
+        )
+    except Exception as ex:
+        print("[INVITADOS][ERROR] Error al confirmar llegada:", type(ex).__name__, str(ex))
+        return _resultado_error_operacion(ex)
+
+    data = extract_data(response)
+    invitado = normalizar_invitado(to_dict(data[0]) or {}) if data else None
+    if not invitado:
+        invitado = _obtener_invitado_por_clave(evento_activo, actual["invitacion_id"], actual["invitado_id"], supabase)
+        if invitado and invitado.get("llegada_confirmada"):
+            return _resultado_operacion("already_confirmed", "La llegada de este invitado ya fue confirmada.", invitado)
+        print("[INVITADOS][WARNING] Conflicto de concurrencia al confirmar llegada.")
+        return _resultado_operacion("conflict", "No fue posible confirmar la llegada porque el registro cambio. Intenta nuevamente.", invitado)
+
+    print("[INVITADOS][INFO] Llegada confirmada.")
+    return _resultado_operacion("success", "Llegada confirmada correctamente.", invitado)
+
+
+def reversar_llegada(
+    contexto: dict[str, Any] | None,
+    invitado_original: dict[str, Any] | None,
+    supabase: Any = None,
+) -> ResultadoOperacionInvitado:
+    bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador"})
+    if bloqueo:
+        return bloqueo
+    evento_activo = contexto.get("evento_actual") if contexto else None
+    key, error = _validar_invitado_mismo_evento(evento_activo, invitado_original)
+    if error:
+        return error
+    assert key is not None
+    supabase = supabase or get_supabase_client()
+
+    bloqueo_real = _validar_evento_real_operativo(evento_activo, supabase)
+    if bloqueo_real:
+        return bloqueo_real
+
+    try:
+        actual = _obtener_invitado_por_clave(
+            evento_activo,
+            invitado_original.get("invitacion_id"),
+            invitado_original.get("invitado_id"),
+            supabase,
+        )
+    except Exception as ex:
+        print("[INVITADOS][ERROR] Error al verificar invitado antes de reversar llegada:", type(ex).__name__, str(ex))
+        return _resultado_error_operacion(ex)
+
+    if not actual:
+        return _resultado_operacion("not_found", "El invitado ya no existe o no tienes acceso.")
+    if not actual.get("llegada_confirmada"):
+        return _resultado_operacion("arrival_not_confirmed", "La llegada de este invitado no esta confirmada.", actual)
+
+    print("[INVITADOS][INFO] Intento de reversar llegada:", f"cuenta={key[0]}", f"evento={key[1]}")
+    update_data = {
+        "ivt_llegada_confirmada": False,
+        "ivt_fecha_hora_conf_llegada": None,
+        "ivt_usuario_conf_llegada": None,
+    }
+    try:
+        response = (
+            supabase
+            .table("evp_ivt_invitado")
+            .update(update_data)
+            .eq("ivt_cuenta_id", key[0])
+            .eq("ivt_evento_id", key[1])
+            .eq("ivt_invitacion_id", actual["invitacion_id"])
+            .eq("ivt_invitado_id", actual["invitado_id"])
+            .eq("ivt_estado", "Activo")
+            .eq("ivt_llegada_confirmada", True)
+            .execute()
+        )
+    except Exception as ex:
+        print("[INVITADOS][ERROR] Error al reversar llegada:", type(ex).__name__, str(ex))
+        return _resultado_error_operacion(ex)
+
+    data = extract_data(response)
+    invitado = normalizar_invitado(to_dict(data[0]) or {}) if data else None
+    if not invitado:
+        invitado = _obtener_invitado_por_clave(evento_activo, actual["invitacion_id"], actual["invitado_id"], supabase)
+        if invitado and not invitado.get("llegada_confirmada"):
+            return _resultado_operacion("arrival_not_confirmed", "La llegada de este invitado no esta confirmada.", invitado)
+        print("[INVITADOS][WARNING] Conflicto de concurrencia al reversar llegada.")
+        return _resultado_operacion("conflict", "No fue posible reversar la llegada porque el registro cambio. Intenta nuevamente.", invitado)
+
+    print("[INVITADOS][INFO] Reversion satisfactoria.")
+    return _resultado_operacion("success", "La llegada fue reversada correctamente.", invitado)
+
+
+def crear_invitado_imprevisto(
+    contexto: dict[str, Any] | None,
+    payload: dict[str, Any],
+    supabase: Any = None,
+) -> ResultadoOperacionInvitado:
+    bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador", "Operador"})
+    if bloqueo:
+        return bloqueo
+    datos, error = _validar_formulario(payload, requiere_invitacion=True)
+    if error:
+        print("[INVITADOS][WARNING] Validacion fallida al crear imprevisto.")
+        return _resultado_operacion("invalid_data", error)
+
+    evento_activo = contexto.get("evento_actual") if contexto else None
+    supabase = supabase or get_supabase_client()
+    bloqueo_real = _validar_evento_real_operativo(evento_activo, supabase)
+    if bloqueo_real:
+        return bloqueo_real
+
+    duplicado = validar_duplicado_invitado(evento_activo, datos["nombre_completo"], supabase=supabase)
+    if not duplicado.ok:
+        return duplicado
+
+    key = _evento_activo_valido(evento_activo)
+    assert key is not None
+    print("[INVITADOS][INFO] Insercion de invitado imprevisto:", f"cuenta={key[0]}", f"evento={key[1]}")
+    insert_data = {
+        "ivt_cuenta_id": key[0],
+        "ivt_evento_id": key[1],
+        "ivt_invitacion_id": datos["invitacion_id"],
+        "ivt_nombre_invitado": datos["nombre_completo"],
+        "ivt_es_invitado_principal": False,
+        "ivt_es_invitado_imprevisto": True,
+        "ivt_email": datos["email"],
+        "ivt_telefono": datos["telefono"],
+        "ivt_mesa_id": datos["mesa_id"],
+        "ivt_puesto_id": datos["puesto_id"],
+        "ivt_llegada_confirmada": False,
+        "ivt_estado": "Activo",
+    }
+    try:
+        response = supabase.table("evp_ivt_invitado").insert(insert_data).execute()
+    except Exception as ex:
+        print("[INVITADOS][ERROR] Error al crear invitado imprevisto:", type(ex).__name__, str(ex))
+        return _resultado_error_operacion(ex)
+
+    data = extract_data(response)
+    invitado = normalizar_invitado(to_dict(data[0]) or {}) if data else None
+    if not invitado:
+        return _resultado_operacion("unexpected_response", "El invitado fue guardado, pero no pudimos leer el registro resultante.")
+    print("[INVITADOS][INFO] Invitado imprevisto agregado.")
+    return _resultado_operacion("success", "Invitado imprevisto agregado correctamente.", invitado)
+
+
+def eliminar_invitado_imprevisto(
+    contexto: dict[str, Any] | None,
+    invitado_original: dict[str, Any] | None,
+    supabase: Any = None,
+) -> ResultadoOperacionInvitado:
+    bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador", "Operador"})
+    if bloqueo:
+        return bloqueo
+    evento_activo = contexto.get("evento_actual") if contexto else None
+    key, error = _validar_invitado_mismo_evento(evento_activo, invitado_original)
+    if error:
+        return error
+    assert key is not None
+    supabase = supabase or get_supabase_client()
+
+    bloqueo_real = _validar_evento_real_operativo(evento_activo, supabase)
+    if bloqueo_real:
+        return bloqueo_real
+
+    try:
+        actual = _obtener_invitado_por_clave(
+            evento_activo,
+            invitado_original.get("invitacion_id"),
+            invitado_original.get("invitado_id"),
+            supabase,
+        )
+    except Exception as ex:
+        print("[INVITADOS][ERROR] Error al verificar invitado antes de eliminar imprevisto:", type(ex).__name__, str(ex))
+        return _resultado_error_operacion(ex)
+
+    if not actual:
+        return _resultado_operacion("not_found", "El invitado ya no existe o no tienes acceso.")
+    if not actual.get("es_invitado_imprevisto"):
+        return _resultado_operacion("not_unexpected", "Solo se pueden eliminar invitados imprevistos desde esta accion.", actual)
+    if actual.get("llegada_confirmada"):
+        return _resultado_operacion(
+            "arrival_confirmed",
+            "No se puede eliminar un invitado cuya llegada ya fue confirmada sin una regla de negocio explicita.",
+            actual,
+        )
+
+    print("[INVITADOS][INFO] Intento de eliminar invitado imprevisto:", f"cuenta={key[0]}", f"evento={key[1]}")
+    try:
+        response = (
+            supabase
+            .table("evp_ivt_invitado")
+            .update({"ivt_estado": "Inactivo"})
+            .eq("ivt_cuenta_id", key[0])
+            .eq("ivt_evento_id", key[1])
+            .eq("ivt_invitacion_id", actual["invitacion_id"])
+            .eq("ivt_invitado_id", actual["invitado_id"])
+            .eq("ivt_es_invitado_imprevisto", True)
+            .eq("ivt_llegada_confirmada", False)
+            .eq("ivt_estado", "Activo")
+            .execute()
+        )
+    except Exception as ex:
+        print("[INVITADOS][ERROR] Error al eliminar invitado imprevisto:", type(ex).__name__, str(ex))
+        return _resultado_error_operacion(ex)
+
+    data = extract_data(response)
+    invitado = normalizar_invitado(to_dict(data[0]) or {}) if data else None
+    if not invitado:
+        nuevo_estado = _obtener_invitado_por_clave(evento_activo, actual["invitacion_id"], actual["invitado_id"], supabase)
+        if nuevo_estado is None:
+            return _resultado_operacion("success", "Invitado imprevisto eliminado correctamente.")
+        print("[INVITADOS][WARNING] Conflicto de concurrencia al eliminar imprevisto.")
+        return _resultado_operacion("conflict", "No fue posible eliminar el invitado porque el registro cambio. Intenta nuevamente.", nuevo_estado)
+
+    print("[INVITADOS][INFO] Inactivacion satisfactoria.")
+    return _resultado_operacion("success", "Invitado imprevisto eliminado correctamente.", invitado)
 
 
 def obtener_invitado_por_id(
