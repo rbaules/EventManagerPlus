@@ -5,7 +5,6 @@ from typing import Any
 
 import flet as ft
 
-from components.bottom_navigation import bottom_navigation
 from components.event_header import event_header
 
 
@@ -15,28 +14,22 @@ def app_shell(
     content: ft.Control,
     on_select: Callable[[str], None],
     on_logout: Callable[[], None],
+    on_change_context: Callable[[], None] | None = None,
 ) -> ft.Control:
-    can_use_app = bool(
-        contexto.get("cuenta_actual")
-        and (contexto.get("evento_actual") or contexto.get("eventos_permitidos"))
-    )
-    can_register_arrivals = bool(contexto.get("puede_registrar_llegadas"))
-
     return ft.SafeArea(
         content=ft.Column(
             [
-                event_header(contexto),
+                event_header(
+                    contexto,
+                    on_preferences=lambda: on_select("preferences"),
+                    on_logout=on_logout,
+                    on_change_context=on_change_context,
+                ),
                 ft.Container(
                     content=content,
                     expand=True,
                     padding=16,
-                ),
-                bottom_navigation(
-                    selected=selected,
-                    can_use_app=can_use_app,
-                    can_register_arrivals=can_register_arrivals,
-                    on_select=on_select,
-                    on_logout=on_logout,
+                    clip_behavior=ft.ClipBehavior.HARD_EDGE,
                 ),
             ],
             expand=True,

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import flet as ft
+
+from config import is_checkin_mode
 
 
 def _get(source: dict[str, Any] | None, key: str, default: str = "-") -> Any:
@@ -12,7 +15,76 @@ def _get(source: dict[str, Any] | None, key: str, default: str = "-") -> Any:
     return default if value in (None, "") else value
 
 
-def event_header(contexto: dict[str, Any]) -> ft.Container:
+def calcular_iniciales_usuario(nombre: Any) -> str:
+    texto = " ".join(str(nombre or "").strip().split())
+    if not texto:
+        return "US"
+    partes = texto.split()
+    if len(partes) == 1:
+        candidato = partes[0][:2]
+    else:
+        candidato = f"{partes[0][:1]}{partes[-1][:1]}"
+    iniciales = "".join(char for char in candidato.upper() if char.isalpha())
+    return (iniciales + "US")[:2]
+
+
+def _avatar_menu(
+    contexto: dict[str, Any],
+    on_preferences: Callable[[], None],
+    on_logout: Callable[[], None],
+    on_change_context: Callable[[], None] | None = None,
+) -> ft.Control:
+    nombre = _get(contexto, "usr_nombre_usuario", "Usuario")
+    iniciales = calcular_iniciales_usuario(nombre)
+    avatar = ft.Container(
+        content=ft.Text(iniciales, size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_PRIMARY),
+        width=44,
+        height=44,
+        border_radius=22,
+        bgcolor=ft.Colors.PRIMARY,
+        alignment=ft.Alignment.CENTER,
+        tooltip="Menu de usuario",
+    )
+    if is_checkin_mode():
+        items = [
+            ft.PopupMenuItem(
+                content="Cambiar cuenta/evento",
+                icon=ft.Icons.EVENT_REPEAT,
+                on_click=lambda e: on_change_context() if on_change_context else on_preferences(),
+            ),
+            ft.PopupMenuItem(
+                content="Salir",
+                icon=ft.Icons.LOGOUT,
+                on_click=lambda e: on_logout(),
+            ),
+        ]
+    else:
+        items = [
+            ft.PopupMenuItem(
+                content="Preferencias",
+                icon=ft.Icons.SETTINGS,
+                on_click=lambda e: on_preferences(),
+            ),
+            ft.PopupMenuItem(
+                content="Salir",
+                icon=ft.Icons.LOGOUT,
+                on_click=lambda e: on_logout(),
+            ),
+        ]
+
+    return ft.PopupMenuButton(
+        content=avatar,
+        tooltip="Menu de usuario",
+        items=items,
+    )
+
+
+def event_header(
+    contexto: dict[str, Any],
+    on_preferences: Callable[[], None],
+    on_logout: Callable[[], None],
+    on_change_context: Callable[[], None] | None = None,
+) -> ft.Container:
     cuenta = contexto.get("cuenta_actual") or {}
     evento = contexto.get("evento_actual") or {}
     fase = _get(evento, "fase_evento", "")
@@ -62,23 +134,32 @@ def event_header(contexto: dict[str, Any]) -> ft.Container:
                     col={"xs": 12, "sm": 8, "md": 5},
                 ),
                 ft.Container(
-                    content=ft.Column(
+                    content=ft.Row(
                         [
-                            ft.Text(
-                                _get(contexto, "usr_nombre_usuario", "Usuario"),
-                                size=14,
-                                weight=ft.FontWeight.W_600,
-                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ft.Column(
+                                [
+                                    ft.Text(
+                                        _get(contexto, "usr_nombre_usuario", "Usuario"),
+                                        size=14,
+                                        weight=ft.FontWeight.W_600,
+                                        overflow=ft.TextOverflow.ELLIPSIS,
+                                    ),
+                                    ft.Text(
+                                        _get(contexto, "rol_global_calculado", "Sin rol"),
+                                        size=13,
+                                        color=ft.Colors.ON_SURFACE_VARIANT,
+                                    ),
+                                ],
+                                horizontal_alignment=ft.CrossAxisAlignment.END,
+                                spacing=4,
+                                tight=True,
+                                expand=True,
                             ),
-                            ft.Text(
-                                _get(contexto, "rol_global_calculado", "Sin rol"),
-                                size=13,
-                                color=ft.Colors.ON_SURFACE_VARIANT,
-                            ),
+                            _avatar_menu(contexto, on_preferences, on_logout, on_change_context),
                         ],
-                        horizontal_alignment=ft.CrossAxisAlignment.END,
-                        spacing=4,
-                        tight=True,
+                        alignment=ft.MainAxisAlignment.END,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=10,
                     ),
                     col={"xs": 12, "md": 4},
                     alignment=ft.Alignment.CENTER_RIGHT,

@@ -6,7 +6,7 @@ import webbrowser
 
 import flet as ft
 
-from config import SUPABASE_OAUTH_REDIRECT_URL
+from config import APP_VERSION, SUPABASE_OAUTH_REDIRECT_URL, is_checkin_mode
 from services.auth_service import (
     exchange_code_for_session,
     get_current_user,
@@ -54,20 +54,24 @@ def formato_resumen_contexto(contexto: dict) -> str:
 
 
 def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
-    status = ft.Text(initial_message or "Listo para iniciar prueba.", size=16, selectable=True)
+    page.navigation_bar = None
+    status = ft.Text(initial_message or "Listo para iniciar sesion.", size=14, selectable=True, text_align=ft.TextAlign.CENTER)
+    progress = ft.ProgressRing(width=22, height=22, visible=False)
 
     result_box = ft.TextField(
-        label="Resultado de la prueba",
+        label="Diagnostico",
         multiline=True,
-        min_lines=22,
-        max_lines=30,
+        min_lines=5,
+        max_lines=8,
         read_only=True,
         value="",
+        visible=False,
     )
 
     login_button = ft.ElevatedButton(
-        "Iniciar sesion con Google",
+        "Continuar con Google",
         icon=ft.Icons.LOGIN,
+        height=48,
     )
 
     logout_button = ft.OutlinedButton(
@@ -82,12 +86,16 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
 
     def set_result(message: str) -> None:
         result_box.value = message
+        result_box.visible = bool(message)
         page.update()
 
     def run_login_flow() -> None:
         fase = "inicio"
         try:
             login_button.disabled = True
+            progress.visible = True
+            if is_checkin_mode():
+                print("[CHECKIN][INFO] Inicio de sesion en modo Check-in.")
             fase = "oauth_url"
             set_status("Solicitando URL OAuth a Supabase...")
 
@@ -298,6 +306,7 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
             )
         finally:
             login_button.disabled = False
+            progress.visible = False
             page.update()
 
     def login_click(e: ft.ControlEvent) -> None:
@@ -316,41 +325,57 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
     login_button.on_click = login_click
     logout_button.on_click = logout_click
 
+    modo_texto = "Modo Check-in" if is_checkin_mode() else "Modo completo"
     instructions = ft.Container(
         content=ft.Column(
             [
                 ft.Image(
                     src="brand/EventPlus_logo_v2.1_stacked.png",
-                    width=240,
+                    width=220,
                     fit=ft.BoxFit.CONTAIN,
                 ),
                 ft.Text(
-                    "Prueba basica Google OAuth + Supabase Auth",
-                    size=24,
+                    "EventPlus",
+                    size=28,
                     weight=ft.FontWeight.BOLD,
+                    text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Text(
-                    "Antes de probar, preregistra en evp_usr_usuario el mismo email "
-                    "de Google que usaras para iniciar sesion, con usr_estado='Preregistrado' "
-                    "y usr_usuario_auth_uuid=NULL.",
-                    size=14,
+                    "Control de acceso y consulta de invitados",
+                    size=15,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                    text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Text(
-                    f"Redirect URL usada por esta prueba: {SUPABASE_OAUTH_REDIRECT_URL}",
-                    size=14,
-                    selectable=True,
+                    f"Beta interna - {APP_VERSION} - {modo_texto}",
+                    size=12,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                    text_align=ft.TextAlign.CENTER,
                 ),
+                ft.Row([login_button, progress], alignment=ft.MainAxisAlignment.CENTER, spacing=12),
+                logout_button,
+                status,
+                result_box,
             ],
-            spacing=8,
+            spacing=12,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         ),
-        padding=16,
+        padding=24,
         border_radius=12,
-        bgcolor=ft.Colors.with_opacity(0.04, ft.Colors.PRIMARY),
+        bgcolor=ft.Colors.SURFACE,
+        border=ft.Border.all(width=1, color=ft.Colors.OUTLINE_VARIANT),
+        width=460,
     )
 
     page.add(
-        instructions,
-        ft.Row([login_button, logout_button], spacing=12),
-        status,
-        result_box,
+        ft.SafeArea(
+            content=ft.Container(
+                content=instructions,
+                alignment=ft.Alignment.CENTER,
+                expand=True,
+                padding=ft.Padding.symmetric(horizontal=16, vertical=24),
+                bgcolor=ft.Colors.with_opacity(0.04, ft.Colors.PRIMARY),
+            ),
+            expand=True,
+        )
     )

@@ -51,6 +51,10 @@ class FakeQuery:
         self.filters.append(("ilike", column, value.replace("%", "").lower()))
         return self
 
+    def in_(self, column: str, values: list[Any]) -> "FakeQuery":
+        self.filters.append(("in", column, values))
+        return self
+
     def is_(self, column: str, value: str) -> "FakeQuery":
         self.filters.append(("is", column, value))
         return self
@@ -76,6 +80,8 @@ class FakeQuery:
                 data = [row for row in data if row.get(column) == value]
             elif op == "ilike":
                 data = [row for row in data if value in str(row.get(column) or "").lower()]
+            elif op == "in":
+                data = [row for row in data if row.get(column) in value]
             elif op == "is":
                 data = [row for row in data if row.get(column) is None]
             elif op == "not_is":
@@ -158,6 +164,15 @@ def test_listados_busqueda_filtros_y_paginas() -> None:
     combinado = listar_invitados(EVENTO, busqueda="maria", filtro="imprevistos", supabase=FakeSupabase(ROWS), limit=10)
     assert len(combinado.invitados) == 1
 
+    mesa = listar_invitados(EVENTO, busqueda="mesa 5", tipo_busqueda="mesa", supabase=FakeSupabase(ROWS), limit=10)
+    assert mesa.ok and mesa.mesas_coincidentes == 1 and len(mesa.invitados) == 1
+
+    mesa_parcial = listar_invitados(EVENTO, busqueda="2", tipo_busqueda="mesa", supabase=FakeSupabase(ROWS), limit=10)
+    assert mesa_parcial.ok and len(mesa_parcial.invitados) == 1
+
+    mesa_sin = listar_invitados(EVENTO, busqueda="vip", tipo_busqueda="mesa", supabase=FakeSupabase(ROWS), limit=10)
+    assert mesa_sin.ok and mesa_sin.estado == "no_results"
+
     primera = listar_invitados(EVENTO, supabase=FakeSupabase(ROWS), limit=2, offset=0)
     assert len(primera.invitados) == 2 and primera.has_more
 
@@ -216,6 +231,7 @@ def build_view(
         estado,
         invitados,
         mensaje,
+        "invitado",
         busqueda,
         filtro,
         has_more,
@@ -230,6 +246,7 @@ def build_view(
         None,
         "",
         False,
+        lambda value=None: None,
         lambda value=None: None,
         lambda: None,
         lambda value=None: None,

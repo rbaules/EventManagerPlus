@@ -199,7 +199,7 @@ def test_autorizacion_operativa() -> None:
     assert not puede_confirmar_llegada(contexto("Administrador", "En_proceso", "Activo", autorizado=False))
     assert puede_reversar_llegada(contexto("Administrador"))
     assert puede_reversar_llegada(contexto("Master"))
-    assert not puede_reversar_llegada(contexto("Operador"))
+    assert puede_reversar_llegada(contexto("Operador"))
     assert puede_registrar_imprevisto(contexto("Operador"))
     assert puede_eliminar_imprevisto(contexto("Operador"))
 
@@ -225,8 +225,11 @@ def test_reversar_llegada() -> None:
     rows = [invitado_row(1, "Ana Perez", llegada=True)]
     db = FakeSupabase(rows)
     operador = reversar_llegada(contexto("Operador"), invitado(rows), supabase=db)
-    assert not operador.ok and operador.estado == "role_denied"
+    assert operador.ok and rows[0]["ivt_llegada_confirmada"] is False
 
+    rows[0]["ivt_llegada_confirmada"] = True
+    rows[0]["ivt_fecha_hora_conf_llegada"] = "2026-07-15T20:00:00+00:00"
+    rows[0]["ivt_usuario_conf_llegada"] = "user-1"
     admin = reversar_llegada(contexto("Administrador"), invitado(rows), supabase=db)
     assert admin.ok and rows[0]["ivt_llegada_confirmada"] is False
     assert rows[0]["ivt_fecha_hora_conf_llegada"] is None
@@ -274,6 +277,7 @@ def test_errores_controlados_y_ui() -> None:
         "ready",
         [invitado(rows)],
         "",
+        "invitado",
         "",
         "todos",
         False,
@@ -288,6 +292,7 @@ def test_errores_controlados_y_ui() -> None:
         {"modo": "imprevisto", "datos": payload(), "original": None},
         "",
         False,
+        lambda value=None: None,
         lambda value=None: None,
         lambda: None,
         lambda value=None: None,

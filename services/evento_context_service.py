@@ -44,6 +44,7 @@ def establecer_evento_activo(
     contexto["puede_registrar_llegadas"] = bool(
         evento_activo.get("rol") in {"Master", "Administrador", "Operador"}
         and evento_activo.get("fase_evento") == "En_proceso"
+        and evento_activo.get("estado") == "Activo"
     )
     contexto["puede_administrar_usuarios"] = (
         contexto.get("rol_global_calculado") in {"Master", "Administrador"}

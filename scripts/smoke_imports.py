@@ -19,11 +19,17 @@ MODULES = [
     "components.bottom_navigation",
     "components.event_header",
     "components.stat_card",
+    "views.arrivals_view",
     "views.dashboard_view",
     "views.home_view",
     "views.invitados_view",
     "views.login_view",
 ]
+
+
+class DummyPage:
+    def __init__(self) -> None:
+        self.navigation_bar = None
 
 
 def main() -> int:
@@ -43,6 +49,7 @@ def main() -> int:
     from components.bottom_navigation import bottom_navigation
     from components.event_header import event_header
     from components.stat_card import stat_card
+    from views.arrivals_view import arrivals_view
     from views.dashboard_view import dashboard_view
     from views.home_view import build_home_view
     from views.invitados_view import invitados_view
@@ -64,14 +71,36 @@ def main() -> int:
 
     controls: list[ft.Control] = [
         stat_card("Estado", "OK"),
-        event_header(contexto),
-        bottom_navigation("dashboard", True, True, lambda tab: None, lambda: None),
+        event_header(contexto, lambda: None, lambda: None),
+        bottom_navigation("dashboard", True, True, lambda tab: None),
+        arrivals_view(
+            contexto,
+            "idle",
+            "",
+            "",
+            [],
+            None,
+            [],
+            set(),
+            True,
+            False,
+            False,
+            lambda value=None: None,
+            lambda: None,
+            lambda value=None: None,
+            lambda item=None, selected=False: None,
+            lambda: None,
+            lambda: None,
+            lambda value=None: None,
+            lambda: None,
+        ),
         dashboard_view(contexto),
         invitados_view(
             contexto,
             "empty",
             [],
             "Este evento todavia no tiene invitados registrados.",
+            "invitado",
             "",
             "todos",
             False,
@@ -86,6 +115,7 @@ def main() -> int:
             None,
             "",
             False,
+            lambda value=None: None,
             lambda value=None: None,
             lambda: None,
             lambda value=None: None,
@@ -110,7 +140,7 @@ def main() -> int:
             lambda tab: None,
             lambda: None,
         ),
-        build_home_view(object(), contexto),
+        build_home_view(DummyPage(), contexto),
     ]
 
     for control in controls:

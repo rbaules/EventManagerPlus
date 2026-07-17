@@ -15,6 +15,15 @@ FILTRO_LABELS = {
     "imprevistos": "Imprevistos",
 }
 
+TIPO_BUSQUEDA_LABELS = {
+    "invitado": "Invitado",
+    "mesa": "Mesa",
+}
+
+
+def _tipo_busqueda_valido(tipo_busqueda: str | None) -> str:
+    return tipo_busqueda if tipo_busqueda in TIPO_BUSQUEDA_LABELS else "invitado"
+
 
 def _get(source: dict[str, Any] | None, key: str, default: str = "-") -> Any:
     if not source:
@@ -62,67 +71,59 @@ def _chip(text: str, bgcolor: Any = ft.Colors.SURFACE_CONTAINER) -> ft.Control:
 def _invitado_card(invitado: dict[str, Any], on_detail: Any) -> ft.Control:
     llegada = bool(invitado.get("llegada_confirmada"))
     return ft.Container(
-        content=ft.Column(
+        content=ft.ResponsiveRow(
             [
-                ft.Row(
-                    [
-                        ft.Text(
-                            str(_get(invitado, "nombre_completo", "Invitado sin nombre")),
-                            size=16,
-                            weight=ft.FontWeight.BOLD,
-                            expand=True,
-                            overflow=ft.TextOverflow.ELLIPSIS,
-                        ),
-                        _chip(
-                            str(_get(invitado, "estado_llegada")),
-                            ft.Colors.PRIMARY_CONTAINER if llegada else ft.Colors.SECONDARY_CONTAINER,
-                        ),
-                    ],
-                    spacing=8,
-                    vertical_alignment=ft.CrossAxisAlignment.START,
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                str(_get(invitado, "nombre_completo", "Invitado sin nombre")),
+                                size=15,
+                                weight=ft.FontWeight.W_600,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                            ft.Text(
+                                str(_get(invitado, "mesa_texto", "Sin mesa")),
+                                size=12,
+                                color=ft.Colors.ON_SURFACE_VARIANT,
+                            ),
+                        ],
+                        spacing=2,
+                    ),
+                    col={"xs": 12, "sm": 6, "md": 6},
                 ),
-                ft.ResponsiveRow(
-                    [
-                        ft.Container(
-                            ft.Text(str(_get(invitado, "mesa_texto")), size=13),
-                            col={"xs": 6, "md": 3},
-                        ),
-                        ft.Container(
-                            ft.Text(str(_get(invitado, "puesto_texto")), size=13),
-                            col={"xs": 6, "md": 3},
-                        ),
-                        ft.Container(
-                            ft.Text(str(_get(invitado, "origen_invitado")), size=13),
-                            col={"xs": 6, "md": 3},
-                        ),
-                        ft.Container(
-                            ft.Text(str(_get(invitado, "tipo_invitado")), size=13),
-                            col={"xs": 6, "md": 3},
-                        ),
-                    ],
-                    spacing=8,
-                    run_spacing=4,
+                ft.Container(
+                    content=_chip(
+                        "Llego" if llegada else "Pendiente",
+                        ft.Colors.PRIMARY_CONTAINER if llegada else ft.Colors.SECONDARY_CONTAINER,
+                    ),
+                    col={"xs": 6, "sm": 2, "md": 2},
                 ),
-                ft.Row(
-                    [
-                        ft.Text(
-                            "Con novedad" if invitado.get("tiene_novedad") else "Sin novedad",
-                            size=12,
-                            color=ft.Colors.ON_SURFACE_VARIANT,
-                            expand=True,
-                        ),
-                        ft.OutlinedButton(
-                            content="Ver detalle",
-                            icon=ft.Icons.PERSON,
-                            on_click=lambda e: on_detail(invitado),
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ft.Container(
+                    content=ft.Text(
+                        "Con novedad" if invitado.get("tiene_novedad") else "Sin novedad",
+                        size=12,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                    col={"xs": 6, "sm": 2, "md": 2},
+                ),
+                ft.Container(
+                    content=ft.OutlinedButton(
+                        content="Detalle",
+                        icon=ft.Icons.PERSON,
+                        height=44,
+                        on_click=lambda e: on_detail(invitado),
+                    ),
+                    alignment=ft.Alignment.CENTER_RIGHT,
+                    col={"xs": 12, "sm": 2, "md": 2},
                 ),
             ],
+            columns=12,
             spacing=8,
+            run_spacing=4,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
-        padding=16,
+        padding=ft.Padding.symmetric(horizontal=12, vertical=8),
         border_radius=8,
         bgcolor=ft.Colors.SURFACE,
         border=ft.Border.all(width=1, color=ft.Colors.OUTLINE_VARIANT),
@@ -134,17 +135,17 @@ def _invitado_card_admin(invitado: dict[str, Any], on_detail: Any, on_edit: Any,
     if not can_manage or invitado.get("es_invitado_imprevisto"):
         return card
     content = card.content
-    if isinstance(content, ft.Column):
+    if isinstance(content, ft.ResponsiveRow):
         content.controls.append(
-            ft.Row(
-                [
-                    ft.OutlinedButton(
-                        content="Editar",
-                        icon=ft.Icons.EDIT,
-                        on_click=lambda e: on_edit(invitado),
-                    )
-                ],
-                alignment=ft.MainAxisAlignment.END,
+            ft.Container(
+                content=ft.OutlinedButton(
+                    content="Editar",
+                    icon=ft.Icons.EDIT,
+                    height=44,
+                    on_click=lambda e: on_edit(invitado),
+                ),
+                alignment=ft.Alignment.CENTER_RIGHT,
+                col={"xs": 12, "sm": 2, "md": 2},
             )
         )
     return card
@@ -166,39 +167,16 @@ def _detail_row(label: str, value: Any) -> ft.Control:
 
 def _detail_panel(
     invitado: dict[str, Any] | None,
-    can_confirm_arrival: bool,
-    can_reverse_arrival: bool,
     can_delete_unexpected: bool,
     is_saving: bool,
-    on_confirm_arrival: Any,
-    on_reverse_arrival: Any,
     on_delete_unexpected: Any,
     on_close: Any,
 ) -> ft.Control:
     if not invitado:
         return ft.Container()
 
-    llegada = bool(invitado.get("llegada_confirmada"))
     imprevisto = bool(invitado.get("es_invitado_imprevisto"))
     acciones: list[ft.Control] = []
-    if can_confirm_arrival and not llegada:
-        acciones.append(
-            ft.ElevatedButton(
-                content="Confirmar llegada",
-                icon=ft.Icons.CHECK,
-                disabled=is_saving,
-                on_click=lambda e: on_confirm_arrival(invitado),
-            )
-        )
-    if can_reverse_arrival and llegada:
-        acciones.append(
-            ft.OutlinedButton(
-                content="Reversar llegada",
-                icon=ft.Icons.UNDO,
-                disabled=is_saving,
-                on_click=lambda e: on_reverse_arrival(invitado),
-            )
-        )
     if can_delete_unexpected and imprevisto:
         acciones.append(
             ft.TextButton(
@@ -320,7 +298,7 @@ def _form_panel(
         ft.Row(
             [
                 ft.Text(titulo, size=20, weight=ft.FontWeight.BOLD, expand=True),
-                _chip("Pre-evento" if can_manage else "Modo consulta"),
+                _chip("Evento en proceso" if modo == "imprevisto" and can_manage else ("Pre-evento" if can_manage else "Modo consulta")),
             ]
         ),
         ft.Text("La cuenta y el evento se toman del evento activo; no son editables.", size=13, color=ft.Colors.ON_SURFACE_VARIANT),
@@ -378,6 +356,7 @@ def invitados_view(
     estado: str,
     invitados: list[dict[str, Any]],
     mensaje: str,
+    tipo_busqueda: str,
     busqueda: str,
     filtro: str,
     has_more: bool,
@@ -393,6 +372,7 @@ def invitados_view(
     form_message: str,
     is_saving: bool,
     on_search: Any,
+    on_search_type_change: Any,
     on_clear: Any,
     on_filter: Any,
     on_retry: Any,
@@ -429,12 +409,32 @@ def invitados_view(
             expand=True,
         )
 
+    tipo_busqueda = _tipo_busqueda_valido(tipo_busqueda)
+    tipo_es_mesa = tipo_busqueda == "mesa"
+    search_label = "Buscar mesa" if tipo_es_mesa else "Buscar invitado"
+    search_hint = "Escribe parte del nombre o numero de la mesa" if tipo_es_mesa else "Escribe parte del nombre del invitado"
+    helper_text = (
+        "Se mostraran todos los invitados asignados a la mesa encontrada."
+        if tipo_es_mesa
+        else "La busqueda se realizara por nombre."
+    )
     search_field = ft.TextField(
-        label="Buscar invitado",
-        hint_text="Nombre del invitado",
+        label=search_label,
+        hint_text=search_hint,
         value=busqueda,
-        prefix_icon=ft.Icons.SEARCH,
+        prefix_icon=ft.Icons.TABLE_RESTAURANT if tipo_es_mesa else ft.Icons.PERSON_SEARCH,
         on_submit=lambda e: on_search(e.control.value),
+        disabled=is_loading,
+    )
+    tipo_dropdown = ft.Dropdown(
+        label="Buscar por",
+        value=tipo_busqueda,
+        options=[
+            ft.DropdownOption(key="invitado", text="Invitado"),
+            ft.DropdownOption(key="mesa", text="Mesa"),
+        ],
+        leading_icon=ft.Icons.FILTER_ALT,
+        on_select=lambda e: on_search_type_change(e.control.value),
         disabled=is_loading,
     )
     filtro_dropdown = ft.Dropdown(
@@ -470,7 +470,8 @@ def invitados_view(
         ),
         ft.ResponsiveRow(
             [
-                ft.Container(search_field, col={"xs": 12, "md": 6}),
+                ft.Container(tipo_dropdown, col={"xs": 12, "md": 2}),
+                ft.Container(search_field, col={"xs": 12, "md": 4}),
                 ft.Container(filtro_dropdown, col={"xs": 12, "md": 3}),
                 ft.Container(
                     ft.Row(
@@ -489,6 +490,7 @@ def invitados_view(
                             ),
                         ],
                         spacing=8,
+                        wrap=True,
                     ),
                     col={"xs": 12, "md": 3},
                 ),
@@ -496,45 +498,55 @@ def invitados_view(
             spacing=12,
             run_spacing=12,
         ),
+        ft.Text(helper_text, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
     ]
 
     if busqueda.strip() or filtro != "todos":
+        criterio = (
+            f"Invitados de mesas que coinciden con: \"{busqueda.strip()}\"."
+            if tipo_es_mesa and busqueda.strip()
+            else f"Invitados que coinciden con: \"{busqueda.strip()}\"."
+            if busqueda.strip()
+            else "Listado general."
+        )
         controls.append(
             ft.Text(
-                f"Criterio activo: busqueda {'si' if busqueda.strip() else 'no'}; filtro {FILTRO_LABELS.get(filtro, 'Todos')}.",
+                f"{criterio} {len(invitados)} invitados encontrados. Filtro: {FILTRO_LABELS.get(filtro, 'Todos')}.",
                 size=12,
                 color=ft.Colors.ON_SURFACE_VARIANT,
             )
         )
 
-    controls.append(
-        ft.Row(
-            [
-                ft.ElevatedButton(
-                    content="Agregar planificado",
-                    icon=ft.Icons.PERSON_ADD,
-                    disabled=(not can_manage_planned) or is_loading or is_saving,
-                    on_click=lambda e: on_new_guest(),
-                ),
-                ft.OutlinedButton(
-                    content="Agregar imprevisto",
-                    icon=ft.Icons.PERSON_ADD,
-                    disabled=(not can_manage_unexpected) or is_loading or is_saving,
-                    on_click=lambda e: on_new_unexpected_guest(),
-                ),
-            ],
-            alignment=ft.MainAxisAlignment.END,
-            spacing=8,
-            wrap=True,
+    if can_manage_planned or can_manage_unexpected:
+        controls.append(
+            ft.Row(
+                [
+                    ft.ElevatedButton(
+                        content="Agregar planificado",
+                        icon=ft.Icons.PERSON_ADD,
+                        disabled=(not can_manage_planned) or is_loading or is_saving,
+                        on_click=lambda e: on_new_guest(),
+                    ),
+                    ft.OutlinedButton(
+                        content="Agregar imprevisto",
+                        icon=ft.Icons.PERSON_ADD,
+                        disabled=(not can_manage_unexpected) or is_loading or is_saving,
+                        on_click=lambda e: on_new_unexpected_guest(),
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.END,
+                spacing=8,
+                wrap=True,
+            )
         )
-    )
 
     if form_state:
+        form_can_manage = can_manage_unexpected if form_state.get("modo") == "imprevisto" else can_manage_planned
         controls.append(
             _form_panel(
                 form_state,
                 invitaciones,
-                can_manage_planned,
+                form_can_manage,
                 is_saving,
                 form_message,
                 on_save_guest,
@@ -558,7 +570,14 @@ def invitados_view(
         controls.append(_state_card("Error", mensaje, ft.Icons.ERROR_OUTLINE, on_retry))
     elif estado in {"empty", "no_results"} and not invitados:
         title = "Sin resultados" if estado == "no_results" else "Sin invitados"
-        controls.append(_state_card(title, mensaje, ft.Icons.PEOPLE_OUTLINE, on_clear if estado == "no_results" else None))
+        empty_message = mensaje
+        if estado == "no_results" and tipo_es_mesa:
+            empty_message = "No se encontraron mesas o invitados con ese patron."
+        elif estado == "no_results":
+            empty_message = "No se encontraron invitados con ese nombre."
+        controls.append(_state_card(title, empty_message, ft.Icons.PEOPLE_OUTLINE, on_clear if estado == "no_results" else None))
+    elif estado == "idle":
+        controls.append(_state_card("Busqueda pendiente", mensaje or "Presiona Buscar para consultar los invitados.", ft.Icons.SEARCH))
     else:
         controls.append(
             ft.Column(
@@ -571,7 +590,7 @@ def invitados_view(
                     )
                     for invitado in invitados
                 ],
-                spacing=10,
+                spacing=6,
             )
         )
         controls.append(
@@ -598,12 +617,8 @@ def invitados_view(
         controls.append(
             _detail_panel(
                 invitado_detalle,
-                can_confirm_arrival,
-                can_reverse_arrival,
                 can_delete_unexpected,
                 is_saving,
-                on_confirm_arrival,
-                on_reverse_arrival,
                 on_delete_unexpected,
                 on_close_detail,
             )

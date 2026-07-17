@@ -415,6 +415,7 @@ def cargar_contexto_usuario(auth_user_id: str) -> dict[str, Any]:
         evento_actual
         and evento_actual["rol"] in {"Master", "Administrador", "Operador"}
         and evento_actual["fase_evento"] == "En_proceso"
+        and evento_actual["estado"] == "Activo"
     )
 
     return {

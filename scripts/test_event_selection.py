@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from components.event_header import event_header
+from components.event_header import calcular_iniciales_usuario, event_header
 from services.evento_context_service import (
     evento_key,
     limpiar_evento_activo,
@@ -179,12 +179,19 @@ def assert_ui_builds() -> None:
         dashboard_view(contexto, eventos_estado="ready", eventos=[evento] if evento else []),
         dashboard_view(contexto, eventos_estado="loading", eventos=[]),
         dashboard_view(contexto, eventos_estado="error", eventos_mensaje="Error controlado"),
-        event_header(base_context([])),
-        event_header(contexto),
+        event_header(base_context([]), lambda: None, lambda: None),
+        event_header(contexto, lambda: None, lambda: None),
         build_home_view(DummyPage(), contexto),
     ]
     for control in controls:
         assert control is not None
+
+
+def assert_user_initials() -> None:
+    assert calcular_iniciales_usuario("Roberto Baules") == "RB"
+    assert calcular_iniciales_usuario("Ana Maria Solis") == "AS"
+    assert calcular_iniciales_usuario("Operador") == "OP"
+    assert calcular_iniciales_usuario("") == "US"
 
 
 def main() -> int:
@@ -193,6 +200,7 @@ def main() -> int:
     assert_null_normalization()
     assert_active_event_context()
     assert_ui_builds()
+    assert_user_initials()
     print("OK - event selection service, context, and UI construction tests passed.")
     return 0
 

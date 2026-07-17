@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import unicodedata
 from typing import Any
 
+from config import is_checkin_mode
 from db import get_supabase_client
 from services.evento_context_service import evento_key
 from services.response_utils import extract_data, safe_get, to_dict
@@ -43,6 +44,10 @@ FILTROS_INVITADOS = {
     "imprevistos",
 }
 
+TIPO_BUSQUEDA_INVITADO = "invitado"
+TIPO_BUSQUEDA_MESA = "mesa"
+TIPOS_BUSQUEDA_INVITADOS = {TIPO_BUSQUEDA_INVITADO, TIPO_BUSQUEDA_MESA}
+
 
 @dataclass(frozen=True)
 class ResultadoInvitados:
@@ -54,6 +59,7 @@ class ResultadoInvitados:
     limit: int
     offset: int
     has_more: bool
+    mesas_coincidentes: int = 0
 
 
 @dataclass(frozen=True)
@@ -78,6 +84,25 @@ class ResultadoInvitaciones:
     estado: str
     mensaje: str
     invitaciones: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class ResultadoGrupoInvitacion:
+    ok: bool
+    estado: str
+    mensaje: str
+    invitacion: dict[str, Any] | None
+    invitados: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class ResultadoConfirmacionGrupo:
+    ok: bool
+    estado: str
+    mensaje: str
+    confirmados: int
+    omitidos: int
+    invitados: list[dict[str, Any]]
 
 
 def _normalizar_texto_formulario(value: Any) -> str:
@@ -259,7 +284,7 @@ def puede_confirmar_llegada(contexto: dict[str, Any] | None) -> bool:
 def puede_reversar_llegada(contexto: dict[str, Any] | None) -> bool:
     return _puede_operar_evento_en_proceso(
         contexto,
-        {"Master", "Administrador"},
+        {"Master", "Administrador", "Operador"},
         "reversar_llegada",
     )
 
@@ -282,6 +307,13 @@ def puede_eliminar_imprevisto(contexto: dict[str, Any] | None) -> bool:
 
 def _resultado_operacion(estado: str, mensaje: str, invitado: dict[str, Any] | None = None) -> ResultadoOperacionInvitado:
     return ResultadoOperacionInvitado(ok=estado == "success", estado=estado, mensaje=mensaje, invitado=invitado)
+
+
+def _bloquear_operacion_checkin(operacion: str) -> ResultadoOperacionInvitado | None:
+    if not is_checkin_mode():
+        return None
+    print("[CHECKIN][WARN] Operacion bloqueada en modo CHECKIN:", operacion)
+    return _resultado_operacion("checkin_blocked", "Esta operacion no esta disponible en modo Check-in.")
 
 
 def _validar_contexto_escritura(contexto: dict[str, Any] | None) -> ResultadoOperacionInvitado | None:
@@ -415,6 +447,49 @@ def _aplicar_filtro(query: Any, filtro: str) -> Any:
     return query
 
 
+def _normalizar_tipo_busqueda(tipo_busqueda: str | None) -> str:
+    tipo = _normalizar_busqueda(tipo_busqueda)
+    if tipo in TIPOS_BUSQUEDA_INVITADOS:
+        return tipo
+    print("[INVITADOS][WARNING] Tipo de busqueda invalido; usando invitado:", tipo_busqueda)
+    return TIPO_BUSQUEDA_INVITADO
+
+
+def _mesa_visible_normalizada(mesa_id: int) -> str:
+    return _normalizar_busqueda(f"Mesa {mesa_id}")
+
+
+def _mesa_coincide(mesa_id: int, patron: str) -> bool:
+    if not patron:
+        return True
+    mesa_texto = _mesa_visible_normalizada(mesa_id)
+    mesa_numero = _normalizar_busqueda(str(mesa_id))
+    return patron in mesa_texto or patron in mesa_numero
+
+
+def _obtener_mesas_coincidentes(
+    supabase: Any,
+    key: tuple[int, int],
+    patron: str,
+) -> list[int]:
+    response = (
+        supabase
+        .table("evp_ivt_invitado")
+        .select("ivt_mesa_id")
+        .eq("ivt_cuenta_id", key[0])
+        .eq("ivt_evento_id", key[1])
+        .eq("ivt_estado", "Activo")
+        .not_.is_("ivt_mesa_id", "null")
+        .execute()
+    )
+    mesas: set[int] = set()
+    for row in extract_data(response):
+        mesa_id = _normalizar_id(safe_get(to_dict(row) or {}, "ivt_mesa_id"))
+        if mesa_id is not None and _mesa_coincide(mesa_id, patron):
+            mesas.add(mesa_id)
+    return sorted(mesas)
+
+
 def _resultado_error_consulta(ex: Exception, limit: int, offset: int) -> ResultadoInvitados:
     detalle = str(ex)
     estado = "permission_denied" if "permission" in detalle.lower() or "42501" in detalle else "connection_error"
@@ -453,6 +528,7 @@ def _resultado_error_operacion(ex: Exception) -> ResultadoOperacionInvitado:
 def listar_invitados(
     evento_activo: dict[str, Any] | None,
     busqueda: str = "",
+    tipo_busqueda: str = TIPO_BUSQUEDA_INVITADO,
     filtro: str = "todos",
     limit: int = INVITADOS_PAGE_SIZE,
     offset: int = 0,
@@ -476,19 +552,40 @@ def listar_invitados(
     limit = max(1, min(int(limit or INVITADOS_PAGE_SIZE), 100))
     offset = max(0, int(offset or 0))
     busqueda_normalizada = _normalizar_busqueda(busqueda)
+    tipo_busqueda = _normalizar_tipo_busqueda(tipo_busqueda)
 
     print(
-        "[INVITADOS][INFO] Consultando invitados:",
+        "[INVITADOS][INFO] Consulta iniciada:",
         f"cuenta={key[0]}",
         f"evento={key[1]}",
+        f"tipo={tipo_busqueda}",
+        f"patron='{busqueda_normalizada}'",
         f"filtro={filtro}",
-        f"busqueda={'si' if busqueda_normalizada else 'no'}",
         f"offset={offset}",
         f"limit={limit}",
     )
 
     supabase = supabase or get_supabase_client()
+    mesas_coincidentes = 0
     try:
+        mesas_filtradas: list[int] = []
+        if tipo_busqueda == TIPO_BUSQUEDA_MESA and busqueda_normalizada:
+            mesas_filtradas = _obtener_mesas_coincidentes(supabase, key, busqueda_normalizada)
+            mesas_coincidentes = len(mesas_filtradas)
+            print("[INVITADOS][INFO] Mesas coincidentes:", mesas_coincidentes)
+            if not mesas_filtradas:
+                return ResultadoInvitados(
+                    ok=True,
+                    estado="no_results",
+                    mensaje="No se encontraron mesas o invitados con ese patron.",
+                    invitados=[],
+                    total_recibidos=0,
+                    limit=limit,
+                    offset=offset,
+                    has_more=False,
+                    mesas_coincidentes=0,
+                )
+
         query = (
             supabase
             .table("evp_ivt_invitado")
@@ -497,8 +594,10 @@ def listar_invitados(
             .eq("ivt_evento_id", key[1])
             .eq("ivt_estado", "Activo")
         )
-        if busqueda_normalizada:
+        if tipo_busqueda == TIPO_BUSQUEDA_INVITADO and busqueda_normalizada:
             query = query.ilike("ivt_nombre_invitado_normalizado", f"%{busqueda_normalizada}%")
+        if tipo_busqueda == TIPO_BUSQUEDA_MESA and busqueda_normalizada:
+            query = query.in_("ivt_mesa_id", mesas_filtradas)
         query = _aplicar_filtro(query, filtro)
         response = (
             query
@@ -518,16 +617,30 @@ def listar_invitados(
     has_more = len(invitados) > limit
     invitados = invitados[:limit]
     estado = "ready" if invitados else ("no_results" if busqueda_normalizada or filtro != "todos" else "empty")
+    if estado == "no_results" and tipo_busqueda == TIPO_BUSQUEDA_MESA and busqueda_normalizada:
+        mensaje_no_results = "No se encontraron mesas o invitados con ese patron."
+    else:
+        mensaje_no_results = "No se encontraron invitados con ese nombre." if tipo_busqueda == TIPO_BUSQUEDA_INVITADO else "No se encontraron invitados con los criterios seleccionados."
     mensaje = (
         "Invitados cargados correctamente."
         if invitados
         else (
-            "No se encontraron invitados con los criterios seleccionados."
+            mensaje_no_results
             if estado == "no_results"
             else "Este evento todavia no tiene invitados registrados."
         )
     )
-    print("[INVITADOS][INFO] Invitados recibidos:", len(invitados), "has_more=", has_more)
+    if tipo_busqueda == TIPO_BUSQUEDA_MESA:
+        print(
+            "[INVITADOS][INFO] Mesas coincidentes:",
+            mesas_coincidentes if busqueda_normalizada else "sin_patron",
+            "invitados_recibidos=",
+            len(invitados),
+            "has_more=",
+            has_more,
+        )
+    else:
+        print("[INVITADOS][INFO] Invitados recibidos:", len(invitados), "has_more=", has_more)
 
     return ResultadoInvitados(
         ok=True,
@@ -538,6 +651,7 @@ def listar_invitados(
         limit=limit,
         offset=offset,
         has_more=has_more,
+        mesas_coincidentes=mesas_coincidentes,
     )
 
 
@@ -684,6 +798,9 @@ def crear_invitado_planificado(
     payload: dict[str, Any],
     supabase: Any = None,
 ) -> ResultadoOperacionInvitado:
+    bloqueo_checkin = _bloquear_operacion_checkin("crear_invitado_planificado")
+    if bloqueo_checkin:
+        return bloqueo_checkin
     bloqueo = _validar_contexto_escritura(contexto)
     if bloqueo:
         return bloqueo
@@ -735,6 +852,9 @@ def actualizar_invitado_planificado(
     payload: dict[str, Any],
     supabase: Any = None,
 ) -> ResultadoOperacionInvitado:
+    bloqueo_checkin = _bloquear_operacion_checkin("actualizar_invitado_planificado")
+    if bloqueo_checkin:
+        return bloqueo_checkin
     bloqueo = _validar_contexto_escritura(contexto)
     if bloqueo:
         return bloqueo
@@ -905,12 +1025,203 @@ def confirmar_llegada(
     return _resultado_operacion("success", "Llegada confirmada correctamente.", invitado)
 
 
+def cargar_grupo_invitacion(
+    evento_activo: dict[str, Any] | None,
+    invitado_base: dict[str, Any] | None,
+    supabase: Any = None,
+) -> ResultadoGrupoInvitacion:
+    key, error = _validar_invitado_mismo_evento(evento_activo, invitado_base)
+    if error:
+        return ResultadoGrupoInvitacion(False, error.estado, error.mensaje, None, [])
+    assert key is not None
+    invitacion_id = _normalizar_id(invitado_base.get("invitacion_id") if invitado_base else None)
+    if invitacion_id is None:
+        return ResultadoGrupoInvitacion(
+            ok=False,
+            estado="invitation_invalid",
+            mensaje="El invitado seleccionado no tiene una invitacion valida.",
+            invitacion=None,
+            invitados=[],
+        )
+
+    print(
+        "[INVITADOS][INFO] Cargando grupo de invitacion:",
+        f"cuenta={key[0]}",
+        f"evento={key[1]}",
+        f"invitacion={invitacion_id}",
+    )
+    supabase = supabase or get_supabase_client()
+    try:
+        invitacion_response = (
+            supabase
+            .table("evp_inv_invitacion")
+            .select(
+                "inv_cuenta_id,inv_evento_id,inv_invitacion_id,"
+                "inv_cod_abrev_invitacion,inv_destinatario_invitacion,inv_estado"
+            )
+            .eq("inv_cuenta_id", key[0])
+            .eq("inv_evento_id", key[1])
+            .eq("inv_invitacion_id", invitacion_id)
+            .eq("inv_estado", "Activo")
+            .limit(1)
+            .execute()
+        )
+        invitados_response = (
+            supabase
+            .table("evp_ivt_invitado")
+            .select(SELECT_INVITADO)
+            .eq("ivt_cuenta_id", key[0])
+            .eq("ivt_evento_id", key[1])
+            .eq("ivt_invitacion_id", invitacion_id)
+            .eq("ivt_estado", "Activo")
+            .order("ivt_puesto_id")
+            .execute()
+        )
+    except Exception as ex:
+        print("[INVITADOS][ERROR] Error al cargar grupo de invitacion:", type(ex).__name__, str(ex))
+        err = _resultado_error_operacion(ex)
+        return ResultadoGrupoInvitacion(False, err.estado, "No fue posible cargar la invitacion seleccionada.", None, [])
+
+    invitacion_data = extract_data(invitacion_response)
+    invitacion = normalizar_invitacion(to_dict(invitacion_data[0]) or {}) if invitacion_data else None
+    invitados = [
+        invitado
+        for row in extract_data(invitados_response)
+        if (invitado := normalizar_invitado(to_dict(row) or {})) is not None
+    ]
+    if not invitados:
+        print("[INVITADOS][WARNING] Invitacion sin integrantes recuperables.")
+        return ResultadoGrupoInvitacion(
+            ok=False,
+            estado="empty",
+            mensaje="No se encontraron integrantes activos para esta invitacion.",
+            invitacion=invitacion,
+            invitados=[],
+        )
+
+    print("[INVITADOS][INFO] Integrantes recuperados:", len(invitados))
+    return ResultadoGrupoInvitacion(
+        ok=True,
+        estado="ready",
+        mensaje="Invitacion cargada correctamente.",
+        invitacion=invitacion
+        or {
+            "cuenta_id": key[0],
+            "evento_id": key[1],
+            "invitacion_id": invitacion_id,
+            "destinatario": f"Invitacion {invitacion_id}",
+            "codigo": "",
+            "estado": "Activo",
+        },
+        invitados=invitados,
+    )
+
+
+def confirmar_llegadas_invitados(
+    contexto: dict[str, Any] | None,
+    invitacion: dict[str, Any] | None,
+    invitados_seleccionados: list[dict[str, Any]],
+    supabase: Any = None,
+) -> ResultadoConfirmacionGrupo:
+    bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador", "Operador"})
+    if bloqueo:
+        return ResultadoConfirmacionGrupo(False, bloqueo.estado, bloqueo.mensaje, 0, 0, [])
+    evento_activo = contexto.get("evento_actual") if contexto else None
+    key = _evento_activo_valido(evento_activo)
+    invitacion_id = _normalizar_id((invitacion or {}).get("invitacion_id"))
+    invitacion_key = (
+        _normalizar_id((invitacion or {}).get("cuenta_id")),
+        _normalizar_id((invitacion or {}).get("evento_id")),
+    )
+    if key is None or invitacion_id is None or invitacion_key != key:
+        return ResultadoConfirmacionGrupo(
+            False,
+            "event_changed",
+            "El evento activo cambio. Vuelve a cargar la invitacion.",
+            0,
+            0,
+            [],
+        )
+    if not invitados_seleccionados:
+        return ResultadoConfirmacionGrupo(
+            False,
+            "empty_selection",
+            "Selecciona al menos un invitado pendiente para confirmar.",
+            0,
+            0,
+            [],
+        )
+
+    supabase = supabase or get_supabase_client()
+    bloqueo_real = _validar_evento_real_operativo(evento_activo, supabase)
+    if bloqueo_real:
+        return ResultadoConfirmacionGrupo(False, bloqueo_real.estado, bloqueo_real.mensaje, 0, 0, [])
+
+    confirmados = 0
+    omitidos = 0
+    actualizados: list[dict[str, Any]] = []
+    print("[INVITADOS][INFO] Llegadas solicitadas:", len(invitados_seleccionados))
+    for invitado in invitados_seleccionados:
+        invitado_key = (
+            _normalizar_id(invitado.get("cuenta_id")),
+            _normalizar_id(invitado.get("evento_id")),
+        )
+        if invitado_key != key or _normalizar_id(invitado.get("invitacion_id")) != invitacion_id:
+            omitidos += 1
+            print("[INVITADOS][WARNING] Invitado fuera de invitacion rechazado.")
+            continue
+        resultado = confirmar_llegada(contexto, invitado, supabase=supabase)
+        if resultado.ok:
+            confirmados += 1
+        else:
+            omitidos += 1
+        if resultado.invitado:
+            actualizados.append(resultado.invitado)
+
+    grupo = cargar_grupo_invitacion(
+        evento_activo,
+        {
+            "cuenta_id": key[0],
+            "evento_id": key[1],
+            "invitacion_id": invitacion_id,
+            "invitado_id": invitados_seleccionados[0].get("invitado_id"),
+        },
+        supabase=supabase,
+    )
+    invitados_actuales = grupo.invitados if grupo.ok else actualizados
+    if confirmados == 0:
+        return ResultadoConfirmacionGrupo(
+            ok=False,
+            estado="no_updates",
+            mensaje="No se confirmaron nuevas llegadas. El estado fue actualizado para revisar la invitacion.",
+            confirmados=0,
+            omitidos=omitidos,
+            invitados=invitados_actuales,
+        )
+    mensaje = (
+        f"Se confirmo correctamente {confirmados} llegada."
+        if confirmados == 1
+        else f"Se confirmaron correctamente {confirmados} llegadas."
+    )
+    if omitidos:
+        mensaje = f"{mensaje} {omitidos} seleccion no requirio actualizacion."
+    print("[INVITADOS][INFO] Llegadas confirmadas:", confirmados, "omitidas:", omitidos)
+    return ResultadoConfirmacionGrupo(
+        ok=True,
+        estado="success",
+        mensaje=mensaje,
+        confirmados=confirmados,
+        omitidos=omitidos,
+        invitados=invitados_actuales,
+    )
+
+
 def reversar_llegada(
     contexto: dict[str, Any] | None,
     invitado_original: dict[str, Any] | None,
     supabase: Any = None,
 ) -> ResultadoOperacionInvitado:
-    bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador"})
+    bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador", "Operador"})
     if bloqueo:
         return bloqueo
     evento_activo = contexto.get("evento_actual") if contexto else None
@@ -981,6 +1292,9 @@ def crear_invitado_imprevisto(
     payload: dict[str, Any],
     supabase: Any = None,
 ) -> ResultadoOperacionInvitado:
+    bloqueo_checkin = _bloquear_operacion_checkin("crear_invitado_imprevisto")
+    if bloqueo_checkin:
+        return bloqueo_checkin
     bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador", "Operador"})
     if bloqueo:
         return bloqueo
@@ -1035,6 +1349,9 @@ def eliminar_invitado_imprevisto(
     invitado_original: dict[str, Any] | None,
     supabase: Any = None,
 ) -> ResultadoOperacionInvitado:
+    bloqueo_checkin = _bloquear_operacion_checkin("eliminar_invitado_imprevisto")
+    if bloqueo_checkin:
+        return bloqueo_checkin
     bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador", "Operador"})
     if bloqueo:
         return bloqueo
