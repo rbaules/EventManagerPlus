@@ -1,0 +1,674 @@
+# Diagnóstico técnico para migración web de EventPlus
+
+Fecha de auditoría: 25 de julio de 2026  
+Repositorio auditado: `C:\WORKSPACE\EVENTPLUS`  
+Entorno validado: Python 3.14.6, Flet 0.85.3, Supabase 2.31.0  
+Alcance: auditoría estática y pruebas controladas, sin modificar código, configuración ni dependencias.
+
+## 1. Resumen ejecutivo
+
+EventPlus es una aplicación Flet funcional y modular, con dos modos de ejecución (`FULL` y `CHECKIN`), autenticación Google OAuth mediante Supabase, selección de cuenta/evento, Dashboard, consulta y mantenimiento de invitados y registro/reversión de llegadas. La aplicación ya puede levantarse localmente como sitio web dinámico con el CLI de Flet.
+
+Sin embargo, **no debe desplegarse todavía como aplicación web multiusuario**. El bloqueo principal es que `db.py` crea y conserva un único `supabase.Client` global mediante `@lru_cache(maxsize=1)`. El estado de autenticación (access token y refresh token mantenidos internamente por `supabase-py`) queda ligado a ese cliente compartido por todo el proceso. En un servidor web, el login o logout de una persona puede sustituir o invalidar la sesión de otra y todas las consultas podrían ejecutarse con la identidad equivocada.
+
+El segundo bloqueo es el flujo OAuth actual. Para escritorio inicia un `HTTPServer` local en `127.0.0.1:8765`, abre el navegador del sistema con `webbrowser.open()` y entrega el resultado mediante una cola estática de proceso. Este diseño no es apto para Internet, contenedores, varios workers, varios usuarios ni múltiples intentos simultáneos. En navegador, `localhost` identifica el dispositivo del usuario, no necesariamente el servidor desplegado.
+
+Flet 0.85.3 sí ofrece exportación ASGI directamente: `ft.run(..., export_asgi_app=True)` devuelve una aplicación FastAPI. El repositorio aún no exporta ese objeto y `requirements.txt` no declara explícitamente un servidor ASGI. El entorno local auditado sí contiene `fastapi` y `uvicorn` como dependencias transitivas, pero para despliegue reproducible deben declararse según la estrategia elegida.
+
+La interfaz tiene una buena base responsive (`ResponsiveRow`, columnas por breakpoint, `ListView`, `SafeArea`, navegación inferior y controles expansibles), aunque requiere validación real en anchos móviles. El ancho fijo de 460 px en login, los encabezados y algunos grupos de acciones merecen ajustes o pruebas específicas. Las dimensiones de `page.window` son exclusivas del modo escritorio y deben aplicarse condicionalmente o eliminarse para web.
+
+La seguridad depende hoy en gran medida de filtros y comprobaciones de Python/UI. Los documentos del proyecto indican expresamente que RLS no está activado. Aunque las consultas incluyen `cuenta_id` y `evento_id`, sin RLS una publishable key permite que un cliente autenticado intente consultar o modificar directamente tablas fuera de la aplicación. Este riesgo es crítico antes de exponer el sistema a Internet.
+
+## 2. Arquitectura actual
+
+### 2.1 Capas
+
+- **Entrada y configuración:** `app.py`, `main_checkin.py`, `config.py`, `db.py`.
+- **Presentación:** `views/` y `components/`.
+- **Servicios y acceso a datos:** `services/`.
+- **Pruebas de regresión:** scripts ejecutables en `scripts/`; no existe una suite formal bajo `tests/` ni configuración visible de pytest.
+- **Documentación funcional y de esquema:** archivos `EVENTPLUS_*.md` y `docs/`.
+- **Activos:** logos e imágenes en `assets/`.
+
+### 2.2 Archivos de entrada
+
+1. `app.py`
+   - Entrada principal.
+   - Define `main(page: ft.Page)`.
+   - Configura título, dimensiones de ventana, scroll y modo adaptativo.
+   - Construye directamente la vista de login.
+   - Ejecuta `ft.run(main, assets_dir="assets")` dentro del guard `if __name__ == "__main__"`.
+   - Por defecto usa `EVENTPLUS_MODE=FULL`.
+
+2. `main_checkin.py`
+   - Entrada alternativa para el modo operativo de check-in.
+   - Fija `EVENTPLUS_MODE=CHECKIN` antes de importar `main` desde `app.py`.
+   - Ejecuta igualmente `ft.run(main, assets_dir="assets")`.
+
+3. `app_publishable_key_v4.py`
+   - Prototipo/diagnóstico OAuth autónomo, no integrado en la entrada productiva.
+   - Duplica configuración, cliente Supabase, servidor callback y una UI de prueba.
+   - Ejecuta `ft.run(main)` sin `assets_dir`.
+   - No debería tratarse como entrada de producción.
+
+### 2.3 Inicio de Flet
+
+Se usa la API vigente `ft.run()` de Flet 0.85.3. En esta versión su firma incluye `view`, `host`, `port`, `assets_dir` y `export_asgi_app`. `ft.app()` existe por compatibilidad, pero el proyecto no lo usa.
+
+Sin `view` explícito, ejecutar `env\Scripts\python.exe app.py` solicita la vista `FLET_APP`, normalmente escritorio. El CLI `flet run --web` cambia la presentación a sitio dinámico.
+
+### 2.4 Navegación
+
+La navegación no está modelada como rutas URL salvo el listener de deep links Android:
+
+- `app.py` muestra login.
+- `views/login_view.py` limpia la página y monta `build_home_view()` después del login.
+- `views/home_view.py` conserva la pestaña activa en un diccionario local `state`.
+- `components/bottom_navigation.py` selecciona Dashboard, Invitados o Registrar llegadas.
+- En modo `CHECKIN` solo muestra Invitados y Registrar llegadas.
+- `page.clean()` y reconstrucción de controles sustituyen la vista actual.
+- `page.on_route_change` se usa únicamente para detectar el callback Android `eventplusbeta://auth-callback`.
+
+No hay rutas web como `/login`, `/dashboard` o `/auth/callback`, historial de navegador, guards de ruta ni soporte explícito para deep links web. Recargar la página no reconstruye una ruta funcional autenticada.
+
+### 2.5 Estado y sesiones
+
+Hay tres niveles de estado:
+
+- **Estado de UI por página:** el diccionario `state` se crea dentro de `build_home_view()`. Por estar dentro del handler de una página, se aísla razonablemente entre conexiones Flet mientras la página permanezca activa.
+- **Store de sesión Flet:** `page.session.store` guarda `usuario_contexto`, `eventos_disponibles` y `diagnostico_login`. Se limpia en logout. Su alcance es la sesión Flet del servidor; no constituye por sí mismo persistencia segura tras recarga, nueva pestaña, reinicio o cambio de worker.
+- **Estado Supabase global:** `get_supabase_client()` está cacheado globalmente. Es el problema crítico: Auth, tokens, cabeceras y cliente Realtime pertenecen a un único objeto compartido por el proceso.
+
+No se encontró recuperación de sesión al iniciar la página (`auth.get_session()`, restauración de refresh token o equivalente). Cada nueva conexión vuelve al login. Una pestaña nueva crea otra sesión Flet, pero reutiliza el mismo cliente Supabase global. El logout llama `supabase.auth.sign_out()` sobre ese cliente y puede afectar a todas las pestañas y usuarios del proceso.
+
+## 3. Inventario de archivos relevantes
+
+| Archivo/directorio | Responsabilidad | Observaciones |
+|---|---|---|
+| `app.py` | Entrada principal FULL | Usa `ft.run`; aplica propiedades de ventana de escritorio; no exporta ASGI. |
+| `main_checkin.py` | Entrada CHECKIN | Modifica una variable de entorno al importar; no exporta ASGI. |
+| `app_publishable_key_v4.py` | Prototipo OAuth | Código duplicado, cliente y callback globales; no es apto para producción. |
+| `config.py` | Configuración, modos y URLs OAuth | Lee `.env` y configuración pública empaquetada; callback web/local por defecto en `localhost:8765`. |
+| `db.py` | Creación de cliente Supabase | Cliente global cacheado; riesgo crítico multiusuario. |
+| `.env` | Valores locales | Ignorado por Git; contiene las tres variables esperadas. No se revelaron valores durante la auditoría. |
+| `app_public_config.py` | Configuración pública empaquetada | Ignorado por Git; pensado para Android. Una publishable key no es secreto, pero RLS debe proteger los datos. |
+| `app_public_config.example.py` | Plantilla pública | Correctamente advierte no usar service role ni secretos. |
+| `requirements.txt` | Dependencias directas | Solo fija Flet, Supabase y python-dotenv. |
+| `services/auth_service.py` | OAuth, sesión y logout | HTTP callback local, cola global, intercambio de code y acceso al cliente global. |
+| `services/usuario_service.py` | Usuario, cuentas, eventos y roles | Construye el contexto operativo desde tablas Supabase. |
+| `services/evento_context_service.py` | Contexto y store de sesión | Selección/limpieza de evento y persistencia en `page.session.store`. |
+| `services/evento_service.py` | Consulta de eventos | Restringe consultas según el contexto calculado. |
+| `services/invitado_service.py` | Invitados, invitaciones y llegadas | Núcleo de reglas, paginación, búsquedas, altas, edición, llegadas, reversión e imprevistos. |
+| `services/response_utils.py` | Normalización de respuestas | Utilidades robustas para objetos/diccionarios de Supabase. |
+| `views/login_view.py` | Login y transición al Home | Usa hilos, callback local, deep link Android y session store. |
+| `views/home_view.py` | Orquestación de módulos | Estado por página, navegación, workers, contexto y logout. |
+| `views/dashboard_view.py` | Dashboard y selección de evento | Estados loading/empty/error y layout responsive. |
+| `views/invitados_view.py` | Consulta y formularios de invitados | Responsive, filtros, paginación, detalle y acciones según permisos. |
+| `views/arrivals_view.py` | Registro de llegadas | Búsqueda, selección grupal, confirmación y reversión. |
+| `components/app_shell.py` | Estructura visual común | `SafeArea`, header y contenido expandible. |
+| `components/bottom_navigation.py` | Navegación principal | Permisos visuales y variantes FULL/CHECKIN. |
+| `components/event_header.py` | Encabezado y menú | Usa `ResponsiveRow`; logout/cambio de evento. |
+| `components/stat_card.py` | Tarjeta estadística | Componente del Dashboard. |
+| `scripts/*.py` | Pruebas y verificaciones | Pruebas con dobles/mocks, smoke imports y baseline del entorno. |
+| `scripts/build_android_checkin.ps1` | Build Android | Específico de Windows/desarrollo; no forma parte del runtime web. |
+| `docs/ANDROID_*.md` | Guías Android | Relevantes al modo móvil empaquetado, no al despliegue web. |
+| `EVENTPLUS_SCHEMA_CONTEXT_v1_1.md` | Contrato de esquema | Confirma que RLS aún no está activado y describe Realtime futuro. |
+
+## 4. Inventario funcional
+
+| Módulo/capacidad | Estado | Archivo principal | Observaciones y riesgos |
+|---|---|---|---|
+| Arranque FULL | Implementado | `app.py` | Orientado por defecto a escritorio. |
+| Arranque CHECKIN | Implementado | `main_checkin.py` | Modo decidido mediante variable global de entorno al importar. |
+| Login Google OAuth/Supabase | Parcialmente implementado para web | `views/login_view.py`, `services/auth_service.py` | Funciona en escritorio/Android; callback local y cliente global impiden uso web concurrente. |
+| Logout | Implementado, no aislado | `views/home_view.py`, `services/auth_service.py` | Limpia store Flet, pero hace sign-out sobre cliente global. |
+| Recuperación de sesión | No implementado | — | No se encontró restauración de tokens o sesión al reconectar. |
+| Contexto de usuario/cuenta/evento | Implementado | `services/usuario_service.py` | Buena validación en aplicación; depende de RLS para seguridad real. |
+| Selección/cambio de evento | Implementado | `services/evento_context_service.py`, `views/home_view.py` | Estado por sesión Flet; no persistente entre pestañas/recargas. |
+| Dashboard | Implementado | `views/dashboard_view.py` | Estados y tarjetas responsive; verificar datos reales y móviles. |
+| Navegación | Implementado | `views/home_view.py`, `components/bottom_navigation.py` | Navegación interna por estado, sin rutas URL web. |
+| Consulta paginada de invitados | Implementado | `services/invitado_service.py`, `views/invitados_view.py` | Usa filtros de cuenta/evento y `INVITADOS_PAGE_SIZE`; sin RLS el aislamiento no es garantizado. |
+| Búsqueda por invitado | Implementado | `services/invitado_service.py` | Normalización y búsqueda parcial. |
+| Búsqueda por mesa | Implementado | `services/invitado_service.py` | Consulta mesas coincidentes y filtra invitados. |
+| Detalle de invitado | Implementado | `views/invitados_view.py`, `services/invitado_service.py` | Incluye clave compuesta de cuenta/evento/invitación/invitado. |
+| Crear invitado planificado | Implementado | `services/invitado_service.py` | Control Master/Administrador en Python; requiere política DB. |
+| Editar invitado planificado | Implementado | `services/invitado_service.py` | Revalida evento y existencia antes de actualizar. |
+| Invitado imprevisto | Implementado en FULL | `services/invitado_service.py` | Bloqueado en CHECKIN por código; permisos de DB no verificados. |
+| Eliminar invitado imprevisto | Implementado en FULL | `services/invitado_service.py` | Operación sensible protegida solo por contexto de app sin evidencia de RLS. |
+| Registro de llegada individual | Implementado | `services/invitado_service.py` | Revalida rol/fase y claves del evento. |
+| Registro grupal por invitación | Implementado | `services/invitado_service.py`, `views/arrivals_view.py` | Tiene pruebas con dobles; no se observó transacción/RPC atómica. |
+| Reversión de llegada | Implementado | `services/invitado_service.py` | Permite Master/Administrador/Operador según reglas actuales. |
+| Permisos por rol | Implementado en app | Servicios y vistas | Master, Administrador y Operador; no equivalen a autorización server-side sin RLS. |
+| Preferencias | No implementado | `views/home_view.py` | Muestra placeholder en FULL. |
+| Realtime | No implementado en código | — | Documentación lo contempla, pero no hay `channel()`, `subscribe()` ni lifecycle de WebSocket. |
+| Rutas web/deep links web | No implementado | — | Solo callback Android en `on_route_change`. |
+| ASGI exportable | Parcialmente disponible | `app.py` | La versión instalada lo soporta, pero el repositorio no exporta un objeto ASGI. |
+| Responsive | Parcialmente implementado | Vistas y componentes | Buena base; faltan pruebas sistemáticas y ajustes de anchos/acciones. |
+| Pruebas automatizadas | Parcialmente implementado | `scripts/` | Scripts directos, sin runner unificado, cobertura ni pruebas de concurrencia/OAuth web. |
+
+## 5. Situación actual de ejecución web
+
+### 5.1 ¿Puede ejecutarse hoy como web?
+
+**Sí, localmente como sitio dinámico de Flet**, porque Flet 0.85.3 incluye el servidor web dinámico y el CLI reconoce `--web`. Esto permite renderizar y usar la UI desde un navegador.
+
+No significa que sea segura o funcionalmente correcta para varios usuarios. El flujo OAuth actual puede funcionar en una prueba local de un solo usuario porque navegador y callback comparten la misma máquina, pero presenta colisiones y problemas de sesión aun en varias pestañas.
+
+### 5.2 Comando actual de escritorio
+
+Modo completo:
+
+```powershell
+env\Scripts\python.exe app.py
+```
+
+Modo check-in:
+
+```powershell
+env\Scripts\python.exe main_checkin.py
+```
+
+### 5.3 Comando exacto para prueba web local actual
+
+Modo completo, en un puerto determinista:
+
+```powershell
+env\Scripts\flet.exe run --web --host 127.0.0.1 --port 8550 app.py
+```
+
+Modo check-in:
+
+```powershell
+env\Scripts\flet.exe run --web --host 127.0.0.1 --port 8550 main_checkin.py
+```
+
+Abrir `http://127.0.0.1:8550`. Para probar desde otro dispositivo de la LAN se puede usar `--host "*"`, sujeto al firewall, pero no se recomienda exponerlo a Internet en el estado actual.
+
+### 5.4 ASGI actual
+
+No existe hoy una variable de módulo como `asgi_app` o `app` que un servidor ASGI pueda importar. Flet 0.85.3 permite crearla conceptualmente así:
+
+```python
+asgi_app = ft.run(
+    main,
+    assets_dir="assets",
+    export_asgi_app=True,
+)
+```
+
+Después podría servirse, por ejemplo, con:
+
+```powershell
+env\Scripts\python.exe -m uvicorn app:asgi_app --host 0.0.0.0 --port 8000
+```
+
+Ese es el **comando web ASGI recomendado como objetivo**, no un comando operativo todavía: fallará mientras `app.py` no exporte `asgi_app`, y no debe añadirse antes de resolver el aislamiento de sesión y OAuth.
+
+## 6. Dependencias y compatibilidad
+
+### 6.1 Dependencias directas
+
+```text
+flet==0.85.3
+supabase==2.31.0
+python-dotenv==1.2.2
+```
+
+Las versiones instaladas coinciden con el baseline del proyecto. `flet-web`, `fastapi` y `uvicorn` están presentes en el entorno auditado, pero no todos están declarados directamente en `requirements.txt`. Depender de paquetes transitivos hace menos reproducible un despliegue Linux/ASGI.
+
+### 6.2 Compatibilidad Flet 0.85.3 validada
+
+Se comprobó en la instalación real:
+
+- `ft.run()` existe.
+- `ft.run(..., export_asgi_app=True)` está soportado y devuelve una aplicación FastAPI.
+- `page.session`, `page.launch_url()` y `page.run_thread()` existen.
+- Los controles importan y se construyen en las pruebas existentes.
+
+`page.window.width` y `page.window.height` están orientados a una ventana nativa. En web no aportan control del viewport y deben evitarse o protegerse por plataforma. La API se resuelve en la instancia de Page, aunque no aparece como atributo de clase en la introspección simple.
+
+### 6.3 Linux y servidor web
+
+El runtime principal usa módulos estándar portables y clientes HTTP de Supabase. No se encontraron lecturas/escrituras de archivos de negocio, rutas absolutas Windows ni dependencias `win32` en el código de ejecución.
+
+Elementos no adecuados para servidor:
+
+- `webbrowser.open()` intenta abrir un navegador en la máquina del servidor.
+- `HTTPServer(("127.0.0.1", 8765), ...)` crea un listener adicional por intento.
+- Threads manuales y una cola estática complican el lifecycle y la concurrencia.
+- `scripts/build_android_checkin.ps1` es exclusivo de Windows, pero no participa en runtime.
+- `.env` se lee desde el directorio de trabajo; en producción conviene inyección de variables del entorno/plataforma.
+
+No hay escritura local de usuarios o uploads. Los únicos artefactos locales observados son assets, documentación, scripts y logs de build Android.
+
+## 7. Análisis de sesiones
+
+### 7.1 Aislamiento Flet
+
+Cada conexión a `main(page)` recibe un `Page`. El estado cerrado dentro de `build_home_view()` se crea por página. `page.session.store` también está asociado a la sesión Flet. Esta parte es compatible con sesiones independientes mientras no se introduzcan objetos globales mutables.
+
+### 7.2 Ruptura por cliente Supabase global
+
+`db.get_supabase_client()` devuelve siempre el mismo objeto. `exchange_code_for_session()`, `get_current_user()` y `sign_out()` actúan sobre él. Consecuencias:
+
+1. Usuario A inicia sesión y el cliente guarda sus tokens.
+2. Usuario B inicia sesión y sobrescribe la sesión Auth del mismo cliente.
+3. Una acción posterior de A puede ejecutarse con la identidad de B.
+4. El logout de cualquier usuario invalida/borra la sesión compartida.
+5. Si se activa Realtime sobre el mismo cliente, canales y JWT también quedarían mezclados.
+
+Este riesgo existe incluso con un solo worker. Varios workers no lo solucionan: solo crean grupos de usuarios que comparten un cliente por proceso.
+
+### 7.3 Tokens
+
+No se encontraron tokens impresos ni guardados explícitamente en archivos, globals o `page.session.store`. Los tokens quedan dentro del objeto Auth de `supabase-py`. Eso reduce exposición accidental, pero el objeto global vuelve inseguro su alcance.
+
+Para web debe existir un cliente Supabase por sesión de usuario o un diseño explícito stateless que aplique el JWT de cada sesión en cada operación. Los refresh tokens deben persistirse con una estrategia segura, nunca en logs ni en un diccionario global. Si se usan cookies, deben ser `Secure`, `HttpOnly` y con `SameSite` apropiado, y el callback debe validar `state`/PKCE según lo provisto por Supabase.
+
+### 7.4 Recarga, pestañas y desconexión
+
+- Una recarga o nueva pestaña no restaura el contexto operativo.
+- Dos pestañas tienen stores Flet distintos, pero comparten Auth global.
+- No hay sincronización de logout entre pestañas.
+- No hay manejo explícito de expiración/refresco de sesión.
+- No hay callback de desconexión que cierre potenciales suscripciones Realtime.
+
+## 8. Análisis de autenticación
+
+### 8.1 Flujo actual
+
+1. `get_oauth_url()` pide a Supabase una URL Google OAuth.
+2. Escritorio usa `webbrowser.open()`.
+3. Android usa `page.launch_url()` con deep link `eventplusbeta://auth-callback`.
+4. Escritorio inicia un `HTTPServer` en `127.0.0.1:8765`.
+5. El callback coloca `code/error` en una cola estática.
+6. `exchange_code_for_session({"auth_code": code})` establece la sesión en el cliente global.
+7. Se consulta el usuario Auth y se construye su contexto EventPlus.
+8. Se guarda contexto en `page.session.store` y se monta Home.
+
+El uso de `{"auth_code": code}` es compatible con Supabase 2.31.0 según el propio baseline del proyecto.
+
+### 8.2 Problemas web
+
+- `SUPABASE_OAUTH_REDIRECT_URL` por defecto es `http://localhost:8765/auth/callback`, no una URL HTTPS pública.
+- En producción, Google/Supabase redirigirían al `localhost` del usuario.
+- El callback no es una ruta del ASGI/Flet principal.
+- Todos los intentos compiten por el mismo puerto 8765.
+- `OAuthCallbackHandler.result_queue` es compartida: un callback puede entregarse al flujo equivocado.
+- No hay correlación visible entre intento, Page y callback más allá de lo que pueda manejar internamente Supabase.
+- `webbrowser.open()` es incorrecto en un servidor remoto.
+- No existe navegación web post-login basada en URL.
+
+### 8.3 Diseño requerido
+
+- Callback público HTTPS, por ejemplo `https://app.example.com/auth/callback`, registrado en Supabase.
+- El navegador cliente debe navegar a la URL OAuth; el servidor no debe abrir su propio navegador.
+- Ruta ASGI de callback o flujo compatible con las rutas de Flet que asocie de manera segura el `code` con la sesión original.
+- Cliente Supabase por sesión.
+- Restauración/refresco de sesión.
+- Logout de la sesión concreta y limpieza de contexto.
+- Pruebas con dos navegadores, dos pestañas, callback cancelado, callback duplicado y expiración.
+
+## 9. Uso de WebSockets y Realtime
+
+Flet dinámico usa una conexión persistente entre navegador y servidor (normalmente WebSocket), por lo que el proxy/reverse proxy debe permitir upgrades WebSocket, timeouts largos y afinidad si el backend de Flet la requiere.
+
+Supabase Realtime está descrito en la documentación y la tabla de invitados aparece preparada, pero no se encontró código que cree canales, se suscriba o desuscriba. Por tanto:
+
+- No existe actualización automática entre operadores hoy.
+- No hay riesgo actual de fuga por canales, pero debe diseñarse con filtros por cuenta/evento.
+- Cada sesión deberá tener su propio canal/JWT.
+- Toda suscripción debe cerrarse al cambiar evento, hacer logout o desconectarse.
+- RLS y políticas Realtime deben estar activas antes de confiar en filtros del cliente.
+
+## 10. Análisis responsive
+
+### Fortalezas
+
+- `page.adaptive = True`.
+- `SafeArea` en login y shell.
+- `ResponsiveRow` con breakpoints `xs`, `sm`, `md`, `lg` y `xl`.
+- `ListView(expand=True)` para contenido largo.
+- Barra de navegación inferior apropiada para móvil.
+- Tarjetas y formularios pasan a una columna en anchos pequeños.
+- Textos importantes usan ellipsis.
+
+### Riesgos y pruebas pendientes
+
+- Login fija `width=460`; debe comprobarse overflow en viewport menor que 460 px más padding.
+- `page.window.width/height` no tiene sentido operativo en navegador.
+- El header coloca logo, evento y usuario en varias filas en móvil; puede ocupar demasiado alto.
+- Filas de botones y diálogos pueden desbordarse con textos largos o accesibilidad/font scaling.
+- No se encontraron handlers de resize ni pruebas visuales automatizadas.
+- Deben probarse 320, 360, 390, 768, 1024 y 1440 px, orientación vertical/horizontal, teclado móvil y zoom 200%.
+- Deben probarse touch targets, scroll anidado y mantenimiento del foco después de re-render completo.
+
+## 11. Análisis de seguridad
+
+### 11.1 Claves y secretos
+
+- `.env` está ignorado por Git.
+- `app_public_config.py` está ignorado por Git.
+- No se encontró `SUPABASE_SERVICE_ROLE_KEY`, `service_role`, bearer token ni secreto real versionado.
+- Solo se usa `SUPABASE_PUBLISHABLE_KEY`, que es apropiada para cliente público **si y solo si RLS protege todas las tablas y operaciones**.
+- La auditoría no reveló ni copió valores de `.env`.
+
+### 11.2 RLS
+
+Los documentos `EVENTPLUS_CONTEXT.md` y `EVENTPLUS_SCHEMA_CONTEXT_v1_1.md` indican explícitamente que RLS no está activado. Para una aplicación accesible por Internet, esto es crítico. Los roles y filtros Python no impiden que alguien use la publishable key y su JWT para llamar directamente a la API REST de Supabase.
+
+Debe verificarse y activar RLS en todas las tablas expuestas, como mínimo:
+
+- usuarios;
+- cuentas y relaciones usuario-cuenta;
+- eventos y relaciones usuario-evento;
+- invitados;
+- invitaciones;
+- mesas y entidades relacionadas;
+- cualquier tabla publicada a Realtime.
+
+Las políticas deben derivar acceso desde `auth.uid()` y las relaciones internas, no desde IDs enviados por la interfaz.
+
+### 11.3 Autorización
+
+Los servicios realizan buenas defensas locales:
+
+- verifican rol;
+- verifican evento activo;
+- comparan claves de cuenta/evento del registro;
+- reconsultan fase/estado antes de operaciones;
+- filtran updates por clave compuesta.
+
+Estas defensas son útiles para UX y defensa en profundidad, pero no sustituyen autorización en la base. Un contexto es un diccionario mutable en memoria y no debe considerarse una credencial.
+
+### 11.4 Aislamiento entre cuentas/eventos
+
+Las consultas auditadas suelen incluir `cuenta_id` y `evento_id`, lo que reduce errores accidentales. Persisten riesgos:
+
+- ausencia de RLS;
+- cliente Auth compartido;
+- contextos mutables;
+- políticas no verificadas desde el repositorio;
+- potencial falta de atomicidad en confirmación grupal.
+
+### 11.5 Logs y errores
+
+No se encontraron tokens impresos. Sí se imprimen:
+
+- IDs de cuenta/evento;
+- IDs/cantidades de invitados;
+- mensajes de excepciones Supabase;
+- tracebacks completos durante login;
+- diagnóstico de usuario Auth (ID y email) en la UI/prototipo.
+
+En producción deben usarse logs estructurados con redacción. Los mensajes de excepciones de proveedores pueden contener datos sensibles. `diagnostico_login` guarda traceback en el store de sesión y el prototipo muestra email/UUID; esto debe deshabilitarse o limitarse fuera de desarrollo.
+
+## 12. Riesgos clasificados
+
+### Críticos
+
+1. **Cliente Supabase autenticado global compartido entre sesiones.**
+   - Impacto: suplantación o mezcla de identidades y logout cruzado.
+2. **RLS documentada como desactivada.**
+   - Impacto: acceso directo a datos entre cuentas/eventos con la API pública.
+
+### Altos
+
+1. **OAuth basado en callback localhost, puerto y cola globales.**
+   - Impacto: login no funcional en Internet y callbacks cruzados/concurrentes.
+2. **No existe recuperación/aislamiento persistente de tokens por sesión.**
+   - Impacto: recargas fallidas, pestañas inconsistentes y expiración no controlada.
+3. **Autorización crítica principalmente en Python/UI.**
+   - Impacto: bypass llamando directamente a Supabase.
+4. **No hay ruta ASGI exportada ni estrategia de workers/WebSocket.**
+   - Impacto: despliegue no reproducible y fallos de conexión.
+5. **Diagnósticos y tracebacks demasiado detallados para producción.**
+   - Impacto: exposición de PII o detalles internos.
+
+### Medios
+
+1. Navegación sin rutas URL ni guards.
+2. Multi-pestaña y logout sincronizado no implementados.
+3. Dependencias ASGI no declaradas directamente.
+4. Realtime todavía no implementado.
+5. Confirmaciones grupales aparentemente compuestas por varias operaciones, sin evidencia de transacción atómica.
+6. Hilos manuales y re-render de página completa requieren pruebas de concurrencia/desconexión.
+7. Prototipo OAuth duplicado puede confundirse con código productivo.
+8. Falta una suite de integración contra un entorno Supabase de pruebas.
+
+### Bajos
+
+1. Dimensiones `page.window` específicas de escritorio.
+2. Ancho fijo del login y posibles overflows móviles.
+3. Logs de IDs y cantidades demasiado verbosos.
+4. Scripts de prueba no integrados a un runner estándar.
+5. `EVENTPLUS_MODE` se decide globalmente al importar, impidiendo servir FULL y CHECKIN desde el mismo proceso sin separar módulos/apps.
+
+## 13. Pruebas existentes
+
+| Script | Cobertura principal |
+|---|---|
+| `scripts/verify_environment.py` | Python exacto, versiones instaladas, imports y APIs Flet básicas. |
+| `scripts/smoke_imports.py` | Importación de módulos y construcción de controles. |
+| `scripts/test_session_initialization.py` | Contexto con cero/uno/varios eventos y errores controlados. |
+| `scripts/test_event_selection.py` | Selección y sincronización de evento. |
+| `scripts/test_guest_readonly.py` | Consulta, filtros, búsqueda, paginación y UI de solo lectura. |
+| `scripts/test_guest_write.py` | Creación/edición planificada, autorización, validación y duplicados. |
+| `scripts/test_guest_arrival_operations.py` | Llegadas, reversión e invitados imprevistos. |
+| `scripts/test_arrivals_by_invitation.py` | Flujo grupal por invitación. |
+
+Son pruebas valiosas con dobles locales. Faltan pruebas de:
+
+- dos sesiones simultáneas;
+- OAuth web real;
+- recuperación/refresh de sesión;
+- logout entre pestañas;
+- RLS/políticas con usuarios de cuentas distintas;
+- ASGI y WebSocket detrás de proxy;
+- responsive visual;
+- Realtime y limpieza de suscripciones.
+
+## 14. Plan incremental propuesto
+
+### Tarea 1. Aislar el cliente Supabase por sesión Flet
+
+**Objetivo:** eliminar el singleton autenticado y hacer explícita la dependencia de un cliente por `Page`/sesión.
+
+**Archivos probables:** `db.py`, `services/auth_service.py`, `views/login_view.py`, `views/home_view.py`, servicios que hoy llaman `get_supabase_client()`, y nuevos tests bajo `scripts/`.
+
+**Criterios de aceptación:**
+
+- Dos páginas simuladas reciben instancias diferentes de `supabase.Client`.
+- Login/logout de una no cambia `auth.get_session()` de la otra.
+- Ningún cliente autenticado queda en un global, caché de módulo o clase estática.
+- Todos los servicios reciben explícitamente el cliente de la sesión o un contexto tipado equivalente.
+- Las funciones actuales de invitados/eventos siguen pasando.
+
+**Regresión:** ejecutar todos los scripts existentes, `pip check`, compilación y smoke controlado.
+
+### Tarea 2. Añadir pruebas de concurrencia y aislamiento
+
+**Objetivo:** fijar contractualmente el comportamiento multiusuario antes de tocar OAuth.
+
+**Archivos probables:** nuevos `scripts/test_multi_session_isolation.py` y utilidades de dobles.
+
+**Criterios de aceptación:**
+
+- Dos sesiones con usuarios/cuentas distintos no comparten cliente, contexto ni tokens.
+- Logout A no altera B.
+- Cambiar evento en A no altera B.
+- Una operación con registro de otro evento se rechaza.
+
+**Regresión:** suite existente completa.
+
+### Tarea 3. Diseñar callback OAuth web sobre HTTPS/ASGI
+
+**Objetivo:** sustituir `HTTPServer`, cola global y `webbrowser.open()` en modo web por un callback público asociado a sesión.
+
+**Archivos probables:** `services/auth_service.py`, `views/login_view.py`, `config.py`, nuevo módulo ASGI/rutas y documentación de entorno.
+
+**Criterios de aceptación:**
+
+- Redirect URL configurable como HTTPS pública.
+- No se abre navegador en el servidor.
+- Dos logins simultáneos reciben su propio callback.
+- Callback cancelado/duplicado/expirado se maneja sin filtrar datos.
+- Escritorio y Android conservan su flujo mediante adaptadores separados.
+
+**Regresión:** login escritorio controlado, deep link Android simulado y flujos funcionales existentes.
+
+### Tarea 4. Recuperación, refresco y logout de sesión
+
+**Objetivo:** definir ciclo de vida completo de Auth por sesión/pestaña.
+
+**Archivos probables:** `services/auth_service.py`, `views/login_view.py`, módulo de sesión y tests.
+
+**Criterios de aceptación:**
+
+- Recarga restaura una sesión válida según estrategia aprobada.
+- Token expirado se refresca o conduce a login seguro.
+- Logout elimina tokens/contexto solo de la sesión correspondiente.
+- Cookies/almacenamiento no exponen refresh tokens a JavaScript si se adopta backend session.
+
+**Regresión:** navegación y operaciones después de sesión restaurada.
+
+### Tarea 5. Implementar y probar RLS antes de Internet
+
+**Objetivo:** mover la autoridad real a Supabase.
+
+**Archivos probables:** migraciones SQL nuevas (no existen actualmente en el repo), documentación y pruebas de integración.
+
+**Criterios de aceptación:**
+
+- RLS activa en todas las tablas expuestas.
+- Usuario de cuenta A no puede leer/escribir cuenta B usando REST directo.
+- Operador no puede realizar acciones de Administrador/Master.
+- Policies usan `auth.uid()` y relaciones activas.
+- Realtime respeta las mismas políticas.
+
+**Regresión:** casos positivos de cada rol y función vigente.
+
+### Tarea 6. Exportar la aplicación ASGI
+
+**Objetivo:** publicar una factoría/variable ASGI sin cambiar la entrada local actual.
+
+**Archivos probables:** `app.py` o nuevo `asgi.py`, `requirements.txt`, configuración de despliegue.
+
+**Criterios de aceptación:**
+
+- `uvicorn ...` inicia sin ejecutar una ventana desktop.
+- `/` carga assets y establece WebSocket.
+- Health check separado no crea una sesión Flet innecesaria.
+- Apagado limpia recursos.
+- Entrada desktop sigue funcionando.
+
+**Regresión:** arranque desktop, CLI web y ASGI.
+
+### Tarea 7. Rutas y navegación web
+
+**Objetivo:** soportar login/callback/home, recargas y guards coherentes.
+
+**Archivos probables:** `app.py`, `views/login_view.py`, `views/home_view.py`, nuevo router.
+
+**Criterios de aceptación:**
+
+- Recargar Dashboard no deja pantalla vacía.
+- Usuario no autenticado vuelve a login.
+- Callback navega al destino correcto.
+- Back/forward no rompe el estado.
+
+**Regresión:** navegación inferior y selección de evento.
+
+### Tarea 8. Hardening de logs y errores
+
+**Objetivo:** retirar PII, tracebacks y detalles del proveedor de la UI/producción.
+
+**Archivos probables:** `views/login_view.py`, servicios y configuración de logging.
+
+**Criterios de aceptación:**
+
+- Ningún log contiene tokens, códigos OAuth, email completo o payload sensible.
+- Usuario recibe mensaje corto con ID de correlación.
+- Tracebacks quedan solo en logging protegido de servidor.
+
+**Regresión:** errores controlados siguen siendo accionables.
+
+### Tarea 9. Validación responsive
+
+**Objetivo:** asegurar usabilidad real en móvil y escritorio.
+
+**Archivos probables:** vistas/componentes; pruebas visuales.
+
+**Criterios de aceptación:**
+
+- Sin overflow a 320/360/390 px.
+- Login, formularios, diálogos y navegación utilizables con touch.
+- Zoom 200% y teclado móvil no ocultan acciones críticas.
+- Desktop conserva densidad y legibilidad.
+
+**Regresión:** smoke de construcción y capturas comparativas.
+
+### Tarea 10. Realtime por evento
+
+**Objetivo:** actualizar llegadas entre operadores conectados.
+
+**Archivos probables:** nuevo servicio Realtime, `views/home_view.py`, tests.
+
+**Criterios de aceptación:**
+
+- Suscripción filtrada al evento autorizado.
+- Cambio de evento y logout cancelan la suscripción anterior.
+- Dos operadores ven la llegada sin recarga.
+- Reconexión no duplica eventos.
+
+**Regresión:** búsquedas, paginación y operaciones manuales siguen funcionando.
+
+### Tarea 11. Empaquetado y despliegue Linux
+
+**Objetivo:** definir build reproducible, reverse proxy, variables y observabilidad.
+
+**Archivos probables:** `requirements.txt`, manifiesto/contenedor, documentación y CI.
+
+**Criterios de aceptación:**
+
+- Instalación limpia con Python 3.14.6.
+- `pip check`, compilación y suite completa pasan.
+- WebSocket funciona detrás de HTTPS.
+- Secrets se inyectan, no se empaquetan.
+- Reinicio/escala no mezcla sesiones.
+
+**Regresión:** arranque local FULL/CHECKIN y ASGI.
+
+## 15. Primera modificación recomendada
+
+La primera modificación debe ser **eliminar el cliente Supabase autenticado global y establecer un cliente aislado por sesión Flet**.
+
+No se recomienda empezar exportando ASGI: hacerlo haría accesible una aplicación cuyo estado Auth se comparte entre usuarios. El aislamiento es una precondición de seguridad y también simplifica el rediseño posterior del callback OAuth.
+
+### Contenido preciso de la primera tarea
+
+1. Reemplazar el `@lru_cache(maxsize=1)` de `db.py` por una factoría que cree clientes independientes.
+2. Crear un contenedor/contexto de sesión que pertenezca a una sola `Page`.
+3. Crear el cliente cuando se inicializa esa página.
+4. Inyectar ese cliente en Auth, usuario, evento e invitado; no recuperarlo desde globals.
+5. Mantener el contexto operativo en el store Flet, pero no almacenar ahí un objeto cliente no serializable.
+6. Hacer logout únicamente sobre el cliente de esa Page.
+7. Añadir una prueba específica con dos sesiones/clientes y usuarios distintos.
+8. Mantener compatibilidad funcional con FULL y CHECKIN.
+
+### Criterios de aceptación de la primera tarea
+
+- No existe un `supabase.Client` autenticado en scope global ni cacheado.
+- Cada invocación de `main(page)` obtiene un cliente exclusivo.
+- Dos sesiones concurrentes mantienen usuarios y tokens diferentes.
+- Logout de A no cambia la sesión de B.
+- Todos los accesos a Supabase usan el cliente inyectado de la sesión.
+- Contexto, evento seleccionado y estado UI siguen aislados.
+- Pasan `scripts/verify_environment.py`, todos los `scripts/test_*.py`, `scripts/smoke_imports.py`, `pip check`, compilación y una prueba controlada FULL/CHECKIN.
+- No se cambia todavía el flujo OAuth, las URLs, RLS ni el comportamiento funcional visible salvo lo indispensable para inyección de dependencias.
+
+## 16. Conclusión
+
+EventPlus no necesita reconstruirse. La separación entre vistas, componentes y servicios permite una migración incremental. La interfaz y la lógica funcional existente pueden conservarse. El orden seguro es: aislamiento de cliente/sesión, pruebas concurrentes, OAuth web, recuperación/logout, RLS, exportación ASGI, rutas, hardening, responsive y Realtime.
+
+La aplicación puede probarse hoy en navegador local con el CLI de Flet, pero **no está lista para exponerse a Internet** hasta resolver los dos riesgos críticos: cliente Supabase global y ausencia de RLS.

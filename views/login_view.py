@@ -6,11 +6,19 @@ import webbrowser
 
 import flet as ft
 
-from config import APP_VERSION, SUPABASE_OAUTH_REDIRECT_URL, is_checkin_mode
+from config import (
+    ANDROID_OAUTH_REDIRECT_URL,
+    APP_VERSION,
+    SUPABASE_OAUTH_REDIRECT_URL,
+    get_oauth_redirect_url,
+    is_android_platform,
+    is_checkin_mode,
+)
 from services.auth_service import (
     exchange_code_for_session,
     get_current_user,
     get_oauth_url,
+    parse_oauth_callback_url,
     sign_out_local_session,
     wait_for_oauth_callback,
 )
@@ -55,6 +63,7 @@ def formato_resumen_contexto(contexto: dict) -> str:
 
 def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
     page.navigation_bar = None
+    print("[APP][INFO] Plataforma detectada:", page.platform)
     status = ft.Text(initial_message or "Listo para iniciar sesion.", size=14, selectable=True, text_align=ft.TextAlign.CENTER)
     progress = ft.ProgressRing(width=22, height=22, visible=False)
 
@@ -89,44 +98,16 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
         result_box.visible = bool(message)
         page.update()
 
-    def run_login_flow() -> None:
-        fase = "inicio"
+    def set_loading(is_loading: bool) -> None:
+        login_button.disabled = is_loading
+        progress.visible = is_loading
+        page.update()
+
+    processed_callbacks: set[str] = set()
+
+    def completar_login_con_code(code: str, fase_inicial: str = "obtener_sesion") -> None:
+        fase = fase_inicial
         try:
-            login_button.disabled = True
-            progress.visible = True
-            if is_checkin_mode():
-                print("[CHECKIN][INFO] Inicio de sesion en modo Check-in.")
-            fase = "oauth_url"
-            set_status("Solicitando URL OAuth a Supabase...")
-
-            oauth_url = get_oauth_url()
-
-            fase = "abrir_navegador"
-            set_status(
-                "Se abrira el navegador para iniciar sesion con Google. "
-                "Despues del login, vuelve a esta ventana."
-            )
-
-            webbrowser.open(oauth_url)
-
-            fase = "esperar_callback"
-            set_status(f"Esperando callback OAuth en {SUPABASE_OAUTH_REDIRECT_URL} ...")
-
-            callback_result = wait_for_oauth_callback(timeout_seconds=180)
-
-            if safe_get(callback_result, "error"):
-                raise RuntimeError(
-                    f"OAuth error: {safe_get(callback_result, 'error')} - "
-                    f"{safe_get(callback_result, 'error_description')}"
-                )
-
-            code = safe_get(callback_result, "code")
-            if not code:
-                raise RuntimeError(
-                    "No se recibio el parametro 'code' en el callback.\n"
-                    f"Callback recibido:\n{pretty(callback_result)}"
-                )
-
             set_status("Callback recibido. Intercambiando code por sesion Supabase...")
 
             fase = "obtener_sesion"
@@ -264,7 +245,6 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
                     initial_message="No fue posible abrir la pantalla principal.",
                 )
                 page.update()
-
         except Exception as ex:
             print(
                 "[LOGIN][ERROR]",
@@ -305,9 +285,88 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
                 "6. Que ninguna otra aplicacion este usando el puerto 8765.\n"
             )
         finally:
-            login_button.disabled = False
-            progress.visible = False
-            page.update()
+            set_loading(False)
+
+    def procesar_deep_link_android(url: str) -> None:
+        if url in processed_callbacks:
+            print("[LOGIN][WARNING] Callback OAuth duplicado ignorado.")
+            return
+        processed_callbacks.add(url)
+        print("[LOGIN][INFO] Deep link OAuth recibido.")
+        callback_result = parse_oauth_callback_url(url)
+        if safe_get(callback_result, "error"):
+            set_status("No pudimos completar el inicio de sesion con Google.")
+            set_result("El inicio de sesion fue cancelado o no pudo completarse. Intenta nuevamente.")
+            set_loading(False)
+            return
+        code = safe_get(callback_result, "code")
+        if not code:
+            set_status("No recibimos una respuesta valida del inicio de sesion.")
+            set_result("No fue posible completar el inicio de sesion. Intenta nuevamente.")
+            set_loading(False)
+            return
+        threading.Thread(target=lambda: completar_login_con_code(str(code), "obtener_sesion"), daemon=True).start()
+
+    def route_change(e: ft.RouteChangeEvent) -> None:
+        route = str(getattr(e, "route", "") or page.route or "")
+        is_android_callback = route.startswith(ANDROID_OAUTH_REDIRECT_URL) or (
+            "auth-callback" in route and ("code=" in route or "error=" in route)
+        )
+        if is_android_callback:
+            procesar_deep_link_android(route)
+
+    page.on_route_change = route_change
+
+    def run_login_flow() -> None:
+        fase = "inicio"
+        try:
+            set_loading(True)
+            if is_checkin_mode():
+                print("[CHECKIN][INFO] Inicio de sesion en modo Check-in.")
+            fase = "oauth_url"
+            set_status("Solicitando URL OAuth a Supabase...")
+
+            redirect_url = get_oauth_redirect_url(page.platform)
+            oauth_url = get_oauth_url(redirect_url=redirect_url)
+
+            fase = "abrir_navegador"
+            set_status(
+                "Se abrira el navegador para iniciar sesion con Google. "
+                "Despues del login, vuelve a EventPlus."
+            )
+
+            if is_android_platform(page.platform):
+                page.launch_url(oauth_url)
+                set_status("Completa el inicio de sesion en el navegador. Volveremos automaticamente a EventPlus.")
+                return
+
+            webbrowser.open(oauth_url)
+
+            fase = "esperar_callback"
+            set_status(f"Esperando callback OAuth en {SUPABASE_OAUTH_REDIRECT_URL} ...")
+
+            callback_result = wait_for_oauth_callback(timeout_seconds=180)
+
+            if safe_get(callback_result, "error"):
+                raise RuntimeError(
+                    f"OAuth error: {safe_get(callback_result, 'error')} - "
+                    f"{safe_get(callback_result, 'error_description')}"
+                )
+
+            code = safe_get(callback_result, "code")
+            if not code:
+                raise RuntimeError(
+                    "No se recibio el parametro 'code' en el callback.\n"
+                    f"Callback recibido:\n{pretty(callback_result)}"
+                )
+
+            completar_login_con_code(str(code), "obtener_sesion")
+        except Exception as ex:
+            print("[LOGIN][ERROR]", f"fase={fase}", f"tipo={type(ex).__name__}", f"mensaje={ex}")
+            traceback.print_exc()
+            set_status("No pudimos iniciar sesion.")
+            set_result("No fue posible abrir o completar el inicio de sesion con Google. Intenta nuevamente.")
+            set_loading(False)
 
     def login_click(e: ft.ControlEvent) -> None:
         threading.Thread(target=run_login_flow, daemon=True).start()

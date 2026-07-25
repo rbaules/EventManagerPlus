@@ -7,8 +7,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()
+try:
+    from app_public_config import (  # type: ignore
+        SUPABASE_PUBLISHABLE_KEY as PUBLIC_SUPABASE_PUBLISHABLE_KEY,
+        SUPABASE_URL as PUBLIC_SUPABASE_URL,
+    )
+except ImportError:
+    PUBLIC_SUPABASE_URL = ""
+    PUBLIC_SUPABASE_PUBLISHABLE_KEY = ""
+
+
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or PUBLIC_SUPABASE_URL or "").strip()
+SUPABASE_PUBLISHABLE_KEY = (
+    os.getenv("SUPABASE_PUBLISHABLE_KEY") or PUBLIC_SUPABASE_PUBLISHABLE_KEY or ""
+).strip()
 SUPABASE_OAUTH_REDIRECT_URL = os.getenv(
     "SUPABASE_OAUTH_REDIRECT_URL",
     "http://localhost:8765/auth/callback",
@@ -18,6 +30,13 @@ APP_MODE_FULL = "FULL"
 APP_MODE_CHECKIN = "CHECKIN"
 APP_MODES = {APP_MODE_FULL, APP_MODE_CHECKIN}
 APP_VERSION = os.getenv("EVENTPLUS_VERSION", "0.1.0-checkin").strip() or "0.1.0-checkin"
+ANDROID_PACKAGE_ID = "com.eventplus.beta.checkin"
+ANDROID_PRODUCT_NAME = "EventPlus Beta"
+ANDROID_BUILD_VERSION = "0.1.0"
+ANDROID_BUILD_NUMBER = "1"
+ANDROID_DEEP_LINK_SCHEME = "eventplusbeta"
+ANDROID_DEEP_LINK_HOST = "auth-callback"
+ANDROID_OAUTH_REDIRECT_URL = f"{ANDROID_DEEP_LINK_SCHEME}://{ANDROID_DEEP_LINK_HOST}"
 
 
 def get_app_mode() -> str:
@@ -37,6 +56,16 @@ def is_checkin_mode() -> bool:
 CALLBACK_HOST = "127.0.0.1"
 CALLBACK_PORT = 8765
 CALLBACK_PATH = "/auth/callback"
+
+
+def is_android_platform(platform: object) -> bool:
+    return str(platform).lower().endswith("android")
+
+
+def get_oauth_redirect_url(platform: object | None = None) -> str:
+    if platform is not None and is_android_platform(platform):
+        return ANDROID_OAUTH_REDIRECT_URL
+    return SUPABASE_OAUTH_REDIRECT_URL
 
 
 def validate_config() -> None:

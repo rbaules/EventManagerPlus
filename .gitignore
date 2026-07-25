@@ -6,3 +6,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .env
+app_public_config.py
+build/
+dist/
+*.apk
+*.aab
+*.jks
+*.keystore

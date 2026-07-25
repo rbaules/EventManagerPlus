@@ -11,6 +11,7 @@ from config import (
     CALLBACK_PATH,
     CALLBACK_PORT,
     SUPABASE_OAUTH_REDIRECT_URL,
+    get_oauth_redirect_url,
 )
 from db import get_supabase_client
 from services.response_utils import pretty, safe_get, to_dict
@@ -93,12 +94,27 @@ def wait_for_oauth_callback(timeout_seconds: int = 180) -> dict[str, Any]:
         server.server_close()
 
 
-def get_oauth_url() -> str:
+def parse_oauth_callback_url(url: str) -> dict[str, Any]:
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    return {
+        "code": params["code"][0] if "code" in params and params["code"] else None,
+        "error": params["error"][0] if "error" in params and params["error"] else None,
+        "error_description": (
+            params["error_description"][0]
+            if "error_description" in params and params["error_description"]
+            else None
+        ),
+    }
+
+
+def get_oauth_url(redirect_url: str | None = None) -> str:
     supabase = get_supabase_client()
+    redirect_to = redirect_url or get_oauth_redirect_url()
     response = supabase.auth.sign_in_with_oauth(
         {
             "provider": "google",
-            "options": {"redirect_to": SUPABASE_OAUTH_REDIRECT_URL},
+            "options": {"redirect_to": redirect_to},
         }
     )
 
