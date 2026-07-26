@@ -74,18 +74,19 @@ def restore(originals: dict[str, Any]) -> None:
 
 
 def run_with(cuentas: list[dict[str, Any]], eventos_por_cuenta: dict[int, list[dict[str, Any]]]) -> dict[str, Any]:
+    supabase = object()
     originals = patch(
         {
-            "buscar_usuario_eventplus_por_auth_uuid": lambda auth: dict(USUARIO),
-            "_consultar_cuentas_vinculadas": lambda user_id: list(cuentas),
-            "_consultar_eventos_por_cuenta": lambda cuenta_id, rol: [
+            "buscar_usuario_eventplus_por_auth_uuid": lambda client, auth: dict(USUARIO),
+            "_consultar_cuentas_vinculadas": lambda client, user_id: list(cuentas),
+            "_consultar_eventos_por_cuenta": lambda client, cuenta_id, rol: [
                 dict(evento, rol=rol) for evento in eventos_por_cuenta.get(cuenta_id, [])
             ],
-            "_consultar_eventos_asignados_operador": lambda user_id, cuenta_id: [],
+            "_consultar_eventos_asignados_operador": lambda client, user_id, cuenta_id: [],
         }
     )
     try:
-        return cargar_contexto_usuario("auth-1")
+        return cargar_contexto_usuario(supabase, "auth-1")
     finally:
         restore(originals)
 
@@ -116,13 +117,13 @@ def test_usuario_con_varias_cuentas_y_eventos_parciales() -> None:
 def test_error_al_cargar_cuentas_es_controlado() -> None:
     originals = patch(
         {
-            "buscar_usuario_eventplus_por_auth_uuid": lambda auth: dict(USUARIO),
-            "_consultar_cuentas_vinculadas": lambda user_id: (_ for _ in ()).throw(RuntimeError("permission denied")),
+            "buscar_usuario_eventplus_por_auth_uuid": lambda client, auth: dict(USUARIO),
+            "_consultar_cuentas_vinculadas": lambda client, user_id: (_ for _ in ()).throw(RuntimeError("permission denied")),
         }
     )
     try:
         try:
-            cargar_contexto_usuario("auth-1")
+            cargar_contexto_usuario(object(), "auth-1")
         except UsuarioContextoError as ex:
             assert "cuentas disponibles" in str(ex)
         else:
@@ -134,14 +135,14 @@ def test_error_al_cargar_cuentas_es_controlado() -> None:
 def test_error_al_cargar_eventos_es_controlado() -> None:
     originals = patch(
         {
-            "buscar_usuario_eventplus_por_auth_uuid": lambda auth: dict(USUARIO),
-            "_consultar_cuentas_vinculadas": lambda user_id: [CUENTA_1],
-            "_consultar_eventos_por_cuenta": lambda cuenta_id, rol: (_ for _ in ()).throw(RuntimeError("network down")),
+            "buscar_usuario_eventplus_por_auth_uuid": lambda client, auth: dict(USUARIO),
+            "_consultar_cuentas_vinculadas": lambda client, user_id: [CUENTA_1],
+            "_consultar_eventos_por_cuenta": lambda client, cuenta_id, rol: (_ for _ in ()).throw(RuntimeError("network down")),
         }
     )
     try:
         try:
-            cargar_contexto_usuario("auth-1")
+            cargar_contexto_usuario(object(), "auth-1")
         except UsuarioContextoError as ex:
             assert "eventos disponibles" in str(ex)
         else:

@@ -672,3 +672,91 @@ No se recomienda empezar exportando ASGI: hacerlo haría accesible una aplicaci�
 EventPlus no necesita reconstruirse. La separación entre vistas, componentes y servicios permite una migración incremental. La interfaz y la lógica funcional existente pueden conservarse. El orden seguro es: aislamiento de cliente/sesión, pruebas concurrentes, OAuth web, recuperación/logout, RLS, exportación ASGI, rutas, hardening, responsive y Realtime.
 
 La aplicación puede probarse hoy en navegador local con el CLI de Flet, pero **no está lista para exponerse a Internet** hasta resolver los dos riesgos críticos: cliente Supabase global y ausencia de RLS.
+
+## Resultado de la Tarea 1 — Aislamiento del cliente Supabase
+
+**Fecha:** 25 de julio de 2026.
+
+### Archivos modificados
+
+- `app.py`
+- `app_publishable_key_v4.py`
+- `db.py`
+- `services/auth_service.py`
+- `services/evento_service.py`
+- `services/invitado_service.py`
+- `services/usuario_service.py`
+- `views/login_view.py`
+- `views/home_view.py`
+- `scripts/test_session_initialization.py`
+- `DIAGNOSTICO_WEB_EVENTPLUS.md`
+
+### Archivo creado
+
+- `scripts/test_multi_session_isolation.py`
+
+### Arquitectura adoptada
+
+`db.py` expone `create_supabase_client()` como factoría sin caché. Cada invocación de `main(page)` crea exactamente una instancia nueva de `supabase.Client`. Esa instancia pertenece a la Page y acompaña su ciclo de vida mediante closures e inyección explícita por parámetros.
+
+La función `get_supabase_client()` se conserva únicamente como factoría de compatibilidad: no usa caché, no guarda referencias y devuelve una instancia nueva en cada llamada. Ningún servicio productivo la importa o utiliza.
+
+El cliente no se guarda en `page.session.store`. El store conserva solamente contexto y datos serializables de la sesión. Auth, usuario, eventos, invitados, Home y logout reciben el cliente de la Page actual.
+
+El prototipo `app_publishable_key_v4.py` también crea su cliente dentro de `main(page)` para que no quede un cliente autenticable global, sin alterar su callback ni su flujo OAuth.
+
+### Mecanismo de inyección
+
+- `app.main(page)` crea el cliente.
+- `build_login_view(page, supabase)` lo captura durante login.
+- Las funciones de `auth_service` reciben `supabase` explícitamente.
+- `usuario_service` recibe y propaga el cliente a todas sus consultas auxiliares.
+- `build_home_view(..., supabase)` conserva el mismo cliente en sus closures.
+- `evento_service` e `invitado_service` requieren el cliente inyectado antes de acceder a datos.
+- Logout ejecuta `sign_out()` solo en el cliente recibido por la Page actual.
+
+### Prueba de aislamiento creada
+
+`scripts/test_multi_session_isolation.py` valida con dobles, sin login real:
+
+- un cliente distinto por cada Page;
+- exactamente una creación por ejecución de `main(page)`;
+- identidades y tokens simulados independientes;
+- logout aislado;
+- contextos de cuenta/evento independientes;
+- uso del cliente correcto por `usuario_service`;
+- factoría sin caché;
+- ausencia de clientes autenticados globales en los módulos auditados.
+
+### Validaciones ejecutadas y resultados
+
+| Validación | Resultado |
+|---|---|
+| `env\Scripts\python.exe -m pip check` | OK — no hay dependencias rotas. |
+| `env\Scripts\python.exe -m compileall app.py main_checkin.py config.py db.py services views components scripts` | OK. |
+| `scripts/verify_environment.py` | OK — Python 3.14.6, Flet 0.85.3 y Supabase 2.31.0. |
+| `scripts/smoke_imports.py` | OK — imports y construcción de controles. |
+| `scripts/test_session_initialization.py` | OK. |
+| `scripts/test_event_selection.py` | OK. |
+| `scripts/test_guest_readonly.py` | OK. |
+| `scripts/test_guest_write.py` | OK. |
+| `scripts/test_guest_arrival_operations.py` | OK. |
+| `scripts/test_arrivals_by_invitation.py` | OK. |
+| `scripts/test_multi_session_isolation.py` | OK. |
+| FULL escritorio: `env\Scripts\python.exe app.py` | OK — inicio controlado sin salida inmediata ni traceback. |
+| CHECKIN escritorio: `env\Scripts\python.exe main_checkin.py` | OK — inicio controlado sin salida inmediata ni traceback. |
+| FULL web: puerto 8550 | OK — servidor disponible en `http://127.0.0.1:8550`, detenido de forma controlada. |
+| CHECKIN web: puerto 8551 | OK — servidor disponible en `http://127.0.0.1:8551`, detenido de forma controlada. |
+
+### Resultado
+
+No queda `@lru_cache` en la creación del cliente ni un `supabase.Client` autenticable global en las entradas o servicios de EventPlus. Cada Page obtiene una instancia independiente y logout actúa solamente sobre esa instancia. FULL, CHECKIN, escritorio y web local conservan su arranque y no se modificó el comportamiento visual.
+
+### Limitaciones pendientes
+
+- El callback OAuth local, `HTTPServer`, deep link Android y sus mecanismos de concurrencia no se cambiaron.
+- No se implementó recuperación de sesión ni OAuth web.
+- No se exportó ASGI.
+- RLS continúa pendiente.
+- Realtime continúa pendiente.
+- La función de compatibilidad `get_supabase_client()` debe retirarse cuando no existan consumidores externos; actualmente siempre crea un cliente nuevo y no es usada por los servicios productivos.

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from db import get_supabase_client
 from services.response_utils import extract_data, safe_get, to_dict
 
 
@@ -23,8 +22,10 @@ class UsuarioContextoError(RuntimeError):
     """Error controlado al cargar permisos y contexto del usuario."""
 
 
-def buscar_usuario_eventplus_por_auth_uuid(auth_user_id: str) -> dict[str, Any] | None:
-    supabase = get_supabase_client()
+def buscar_usuario_eventplus_por_auth_uuid(
+    supabase: Any,
+    auth_user_id: str,
+) -> dict[str, Any] | None:
     response = (
         supabase
         .table("evp_usr_usuario")
@@ -141,8 +142,7 @@ def _dedupe_eventos(eventos: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(por_id.values())
 
 
-def _consultar_cuentas_master() -> list[dict[str, Any]]:
-    supabase = get_supabase_client()
+def _consultar_cuentas_master(supabase: Any) -> list[dict[str, Any]]:
     response = (
         supabase
         .table("evp_cta_cuenta")
@@ -160,11 +160,11 @@ def _consultar_cuentas_master() -> list[dict[str, Any]]:
 
 
 def _consultar_eventos_por_cuenta(
+    supabase: Any,
     cuenta_id: int,
     rol: str,
     solo_activos: bool = True,
 ) -> list[dict[str, Any]]:
-    supabase = get_supabase_client()
     query = (
         supabase
         .table("evp_eve_evento")
@@ -186,8 +186,12 @@ def _consultar_eventos_por_cuenta(
     ]
 
 
-def _consultar_evento_activo(cuenta_id: int, evento_id: int, rol: str) -> dict[str, Any] | None:
-    supabase = get_supabase_client()
+def _consultar_evento_activo(
+    supabase: Any,
+    cuenta_id: int,
+    evento_id: int,
+    rol: str,
+) -> dict[str, Any] | None:
     response = (
         supabase
         .table("evp_eve_evento")
@@ -208,8 +212,10 @@ def _consultar_evento_activo(cuenta_id: int, evento_id: int, rol: str) -> dict[s
     return _evento_desde_row(data[0], rol)
 
 
-def _consultar_cuentas_vinculadas(usr_usuario_id: str) -> list[dict[str, Any]]:
-    supabase = get_supabase_client()
+def _consultar_cuentas_vinculadas(
+    supabase: Any,
+    usr_usuario_id: str,
+) -> list[dict[str, Any]]:
     response = (
         supabase
         .table("evp_ucu_usuario_cuenta")
@@ -235,8 +241,11 @@ def _consultar_cuentas_vinculadas(usr_usuario_id: str) -> list[dict[str, Any]]:
     return _dedupe_cuentas(cuentas)
 
 
-def _consultar_eventos_asignados_operador(usr_usuario_id: str, cuenta_id: int) -> list[dict[str, Any]]:
-    supabase = get_supabase_client()
+def _consultar_eventos_asignados_operador(
+    supabase: Any,
+    usr_usuario_id: str,
+    cuenta_id: int,
+) -> list[dict[str, Any]]:
     response = (
         supabase
         .table("evp_uev_usuario_evento")
@@ -254,7 +263,7 @@ def _consultar_eventos_asignados_operador(usr_usuario_id: str, cuenta_id: int) -
         evento_id = _normalizar_id(safe_get(row, "uev_evento_id"))
         if evento_id is None:
             continue
-        evento = _consultar_evento_activo(cuenta_id, evento_id, "Operador")
+        evento = _consultar_evento_activo(supabase, cuenta_id, evento_id, "Operador")
         if evento:
             eventos.append(evento)
     return eventos
@@ -302,9 +311,9 @@ def _seleccionar_evento_actual(
     return eventos_de_cuenta[0] if eventos_de_cuenta else None
 
 
-def cargar_contexto_usuario(auth_user_id: str) -> dict[str, Any]:
+def cargar_contexto_usuario(supabase: Any, auth_user_id: str) -> dict[str, Any]:
     try:
-        usuario = buscar_usuario_eventplus_por_auth_uuid(auth_user_id)
+        usuario = buscar_usuario_eventplus_por_auth_uuid(supabase, auth_user_id)
     except Exception as ex:
         _trazar_error("cargar_usuario", ex)
         raise UsuarioContextoError(
@@ -331,7 +340,7 @@ def cargar_contexto_usuario(auth_user_id: str) -> dict[str, Any]:
 
     if es_master:
         try:
-            cuentas_permitidas = _consultar_cuentas_master()
+            cuentas_permitidas = _consultar_cuentas_master(supabase)
         except Exception as ex:
             _trazar_error("cargar_cuentas_master", ex)
             raise UsuarioContextoError(
@@ -343,6 +352,7 @@ def cargar_contexto_usuario(auth_user_id: str) -> dict[str, Any]:
             for cuenta in cuentas_permitidas:
                 eventos_permitidos.extend(
                     _consultar_eventos_por_cuenta(
+                        supabase,
                         cuenta["cuenta_id"],
                         "Master",
                         solo_activos=False,
@@ -356,7 +366,7 @@ def cargar_contexto_usuario(auth_user_id: str) -> dict[str, Any]:
         rol_global_calculado = "Master"
     else:
         try:
-            cuentas_permitidas = _consultar_cuentas_vinculadas(usr_usuario_id)
+            cuentas_permitidas = _consultar_cuentas_vinculadas(supabase, usr_usuario_id)
         except Exception as ex:
             _trazar_error("cargar_cuentas_usuario", ex)
             raise UsuarioContextoError(
@@ -373,11 +383,16 @@ def cargar_contexto_usuario(auth_user_id: str) -> dict[str, Any]:
             for cuenta in cuentas_permitidas:
                 if cuenta["rol"] in {"Administrador", "Consulta"}:
                     eventos_permitidos.extend(
-                        _consultar_eventos_por_cuenta(cuenta["cuenta_id"], cuenta["rol"])
+                        _consultar_eventos_por_cuenta(
+                            supabase,
+                            cuenta["cuenta_id"],
+                            cuenta["rol"],
+                        )
                     )
                 elif cuenta["rol"] == "Operador":
                     eventos_permitidos.extend(
                         _consultar_eventos_asignados_operador(
+                            supabase,
                             usr_usuario_id,
                             cuenta["cuenta_id"],
                         )
@@ -438,8 +453,10 @@ def cargar_contexto_usuario(auth_user_id: str) -> dict[str, Any]:
     }
 
 
-def buscar_usuario_eventplus_por_email(email: str) -> dict[str, Any] | None:
-    supabase = get_supabase_client()
+def buscar_usuario_eventplus_por_email(
+    supabase: Any,
+    email: str,
+) -> dict[str, Any] | None:
     response = (
         supabase
         .table("evp_usr_usuario")

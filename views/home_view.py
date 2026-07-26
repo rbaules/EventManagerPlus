@@ -1067,7 +1067,7 @@ def build_home_view(
     def logout() -> None:
         print("[EVENTOS][INFO] Cierre de sesion solicitado desde menu de usuario.")
         try:
-            sign_out_local_session()
+            sign_out_local_session(supabase)
         except Exception:
             pass
         try:
@@ -1079,7 +1079,7 @@ def build_home_view(
         page.clean()
         from views.login_view import build_login_view
 
-        build_login_view(page)
+        build_login_view(page, supabase)
         page.update()
 
     configure_navigation_bar()

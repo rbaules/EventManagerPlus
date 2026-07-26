@@ -61,7 +61,11 @@ def formato_resumen_contexto(contexto: dict) -> str:
     )
 
 
-def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
+def build_login_view(
+    page: ft.Page,
+    supabase: Any,
+    initial_message: str | None = None,
+) -> None:
     page.navigation_bar = None
     print("[APP][INFO] Plataforma detectada:", page.platform)
     status = ft.Text(initial_message or "Listo para iniciar sesion.", size=14, selectable=True, text_align=ft.TextAlign.CENTER)
@@ -111,10 +115,10 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
             set_status("Callback recibido. Intercambiando code por sesion Supabase...")
 
             fase = "obtener_sesion"
-            exchange_code_for_session(str(code))
+            exchange_code_for_session(supabase, str(code))
 
             fase = "obtener_usuario_auth"
-            user = get_current_user()
+            user = get_current_user(supabase)
             if not user:
                 raise RuntimeError("No se pudo obtener el usuario autenticado con supabase.auth.get_user().")
 
@@ -130,7 +134,7 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
             set_status("Login exitoso. Consultando evp_usr_usuario para validar trigger...")
 
             fase = "cargar_usuario_eventplus"
-            usuario_eventplus = buscar_usuario_eventplus_por_auth_uuid(auth_user_id)
+            usuario_eventplus = buscar_usuario_eventplus_por_auth_uuid(supabase, auth_user_id)
 
             diagnostico = [
                 "LOGIN SUPABASE AUTH EXITOSO",
@@ -143,7 +147,7 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
             ]
 
             if not usuario_eventplus and email:
-                usuario_por_email = buscar_usuario_eventplus_por_email(email)
+                usuario_por_email = buscar_usuario_eventplus_por_email(supabase, email)
                 diagnostico.extend(
                     [
                         "",
@@ -192,7 +196,7 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
             set_status("Cargando contexto del usuario EventPlus...")
             try:
                 fase = "cargar_contexto_usuario"
-                contexto_usuario = cargar_contexto_usuario(auth_user_id)
+                contexto_usuario = cargar_contexto_usuario(supabase, auth_user_id)
                 page.session.store.set("usuario_contexto", contexto_usuario)
                 diagnostico.extend(["", formato_resumen_contexto(contexto_usuario)])
                 print("[LOGIN] Contexto cargado")
@@ -217,7 +221,7 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
                 home_control = build_home_view(
                     page=page,
                     contexto_usuario=contexto_usuario,
-                    supabase=None,
+                    supabase=supabase,
                 )
                 print("[HOME] Tipo devuelto:", type(home_control))
 
@@ -242,6 +246,7 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
                 page.clean()
                 build_login_view(
                     page,
+                    supabase,
                     initial_message="No fue posible abrir la pantalla principal.",
                 )
                 page.update()
@@ -327,7 +332,7 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
             set_status("Solicitando URL OAuth a Supabase...")
 
             redirect_url = get_oauth_redirect_url(page.platform)
-            oauth_url = get_oauth_url(redirect_url=redirect_url)
+            oauth_url = get_oauth_url(supabase, redirect_url=redirect_url)
 
             fase = "abrir_navegador"
             set_status(
@@ -373,7 +378,7 @@ def build_login_view(page: ft.Page, initial_message: str | None = None) -> None:
 
     def logout_click(e: ft.ControlEvent) -> None:
         try:
-            sign_out_local_session()
+            sign_out_local_session(supabase)
         except Exception:
             pass
 

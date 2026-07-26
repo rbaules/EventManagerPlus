@@ -6,7 +6,6 @@ import unicodedata
 from typing import Any
 
 from config import is_checkin_mode
-from db import get_supabase_client
 from services.evento_context_service import evento_key
 from services.response_utils import extract_data, safe_get, to_dict
 
@@ -47,6 +46,12 @@ FILTROS_INVITADOS = {
 TIPO_BUSQUEDA_INVITADO = "invitado"
 TIPO_BUSQUEDA_MESA = "mesa"
 TIPOS_BUSQUEDA_INVITADOS = {TIPO_BUSQUEDA_INVITADO, TIPO_BUSQUEDA_MESA}
+
+
+def _require_supabase(supabase: Any) -> Any:
+    if supabase is None:
+        raise ValueError("Se requiere el cliente Supabase de la Page actual.")
+    return supabase
 
 
 @dataclass(frozen=True)
@@ -565,7 +570,7 @@ def listar_invitados(
         f"limit={limit}",
     )
 
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
     mesas_coincidentes = 0
     try:
         mesas_filtradas: list[int] = []
@@ -668,7 +673,7 @@ def listar_invitaciones_evento(
             invitaciones=[],
         )
 
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
     try:
         response = (
             supabase
@@ -720,7 +725,7 @@ def validar_duplicado_invitado(
         return _resultado_operacion("event_required", "Selecciona un evento valido antes de administrar invitados.")
 
     nombre_normalizado = _normalizar_nombre_bd(nombre_completo)
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
     try:
         response = (
             supabase
@@ -816,7 +821,7 @@ def crear_invitado_planificado(
 
     key = _evento_activo_valido(evento_activo)
     assert key is not None
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
     print("[INVITADOS][INFO] Inicio guardado invitado planificado: operacion=crear", f"cuenta={key[0]}", f"evento={key[1]}")
     insert_data = {
         "ivt_cuenta_id": key[0],
@@ -878,7 +883,7 @@ def actualizar_invitado_planificado(
         print("[INVITADOS][WARNING] Cambio de evento detectado antes de guardar.")
         return _resultado_operacion("event_changed", "El evento activo cambio. Vuelve a abrir el formulario.")
 
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
     try:
         actual = _obtener_invitado_por_clave(
             evento_activo,
@@ -966,7 +971,7 @@ def confirmar_llegada(
     if error:
         return error
     assert key is not None
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
 
     bloqueo_real = _validar_evento_real_operativo(evento_activo, supabase)
     if bloqueo_real:
@@ -1050,7 +1055,7 @@ def cargar_grupo_invitacion(
         f"evento={key[1]}",
         f"invitacion={invitacion_id}",
     )
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
     try:
         invitacion_response = (
             supabase
@@ -1152,7 +1157,7 @@ def confirmar_llegadas_invitados(
             [],
         )
 
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
     bloqueo_real = _validar_evento_real_operativo(evento_activo, supabase)
     if bloqueo_real:
         return ResultadoConfirmacionGrupo(False, bloqueo_real.estado, bloqueo_real.mensaje, 0, 0, [])
@@ -1229,7 +1234,7 @@ def reversar_llegada(
     if error:
         return error
     assert key is not None
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
 
     bloqueo_real = _validar_evento_real_operativo(evento_activo, supabase)
     if bloqueo_real:
@@ -1304,7 +1309,7 @@ def crear_invitado_imprevisto(
         return _resultado_operacion("invalid_data", error)
 
     evento_activo = contexto.get("evento_actual") if contexto else None
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
     bloqueo_real = _validar_evento_real_operativo(evento_activo, supabase)
     if bloqueo_real:
         return bloqueo_real
@@ -1360,7 +1365,7 @@ def eliminar_invitado_imprevisto(
     if error:
         return error
     assert key is not None
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
 
     bloqueo_real = _validar_evento_real_operativo(evento_activo, supabase)
     if bloqueo_real:
@@ -1444,7 +1449,7 @@ def obtener_invitado_por_id(
         )
 
     print("[INVITADOS][INFO] Consultando detalle de invitado.")
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
     try:
         response = (
             supabase

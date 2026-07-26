@@ -13,7 +13,6 @@ from config import (
     SUPABASE_OAUTH_REDIRECT_URL,
     get_oauth_redirect_url,
 )
-from db import get_supabase_client
 from services.response_utils import pretty, safe_get, to_dict
 
 
@@ -108,8 +107,7 @@ def parse_oauth_callback_url(url: str) -> dict[str, Any]:
     }
 
 
-def get_oauth_url(redirect_url: str | None = None) -> str:
-    supabase = get_supabase_client()
+def get_oauth_url(supabase: Any, redirect_url: str | None = None) -> str:
     redirect_to = redirect_url or get_oauth_redirect_url()
     response = supabase.auth.sign_in_with_oauth(
         {
@@ -133,8 +131,7 @@ def get_oauth_url(redirect_url: str | None = None) -> str:
     return str(url)
 
 
-def exchange_code_for_session(code: str) -> Any:
-    supabase = get_supabase_client()
+def exchange_code_for_session(supabase: Any, code: str) -> Any:
     if not hasattr(supabase.auth, "exchange_code_for_session"):
         raise RuntimeError(
             "Tu version de supabase-py no tiene exchange_code_for_session(). "
@@ -144,11 +141,10 @@ def exchange_code_for_session(code: str) -> Any:
     return supabase.auth.exchange_code_for_session({"auth_code": code})
 
 
-def get_current_user() -> Any:
-    supabase = get_supabase_client()
+def get_current_user(supabase: Any) -> Any:
     response = supabase.auth.get_user()
     return safe_get(response, "user")
 
 
-def sign_out_local_session() -> None:
-    get_supabase_client().auth.sign_out()
+def sign_out_local_session(supabase: Any) -> None:
+    supabase.auth.sign_out()

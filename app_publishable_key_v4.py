@@ -58,7 +58,9 @@ if not SUPABASE_URL:
 if not SUPABASE_PUBLISHABLE_KEY:
     raise RuntimeError("Falta SUPABASE_PUBLISHABLE_KEY en el archivo .env")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY)
+def create_page_supabase_client() -> Client:
+    """Create an independent client for one execution of main(page)."""
+    return create_client(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY)
 
 
 # -----------------------------------------------------------------------------
@@ -244,7 +246,7 @@ def wait_for_oauth_callback(timeout_seconds: int = 180) -> dict[str, Any]:
 # Supabase Auth
 # -----------------------------------------------------------------------------
 
-def get_oauth_url() -> str:
+def get_oauth_url(supabase: Client) -> str:
     response = supabase.auth.sign_in_with_oauth(
         {
             "provider": "google",
@@ -267,7 +269,7 @@ def get_oauth_url() -> str:
     return str(url)
 
 
-def exchange_code_for_session(code: str) -> Any:
+def exchange_code_for_session(supabase: Client, code: str) -> Any:
     if not hasattr(supabase.auth, "exchange_code_for_session"):
         raise RuntimeError(
             "Tu versión de supabase-py no tiene exchange_code_for_session(). "
@@ -277,7 +279,7 @@ def exchange_code_for_session(code: str) -> Any:
     return supabase.auth.exchange_code_for_session({"auth_code": code})
 
 
-def get_current_user() -> Any:
+def get_current_user(supabase: Client) -> Any:
     response = supabase.auth.get_user()
     return safe_get(response, "user")
 
@@ -297,7 +299,10 @@ SELECT_USUARIO = (
 )
 
 
-def buscar_usuario_eventplus_por_auth_uuid(auth_user_id: str) -> dict[str, Any] | None:
+def buscar_usuario_eventplus_por_auth_uuid(
+    supabase: Client,
+    auth_user_id: str,
+) -> dict[str, Any] | None:
     response = (
         supabase
         .table("evp_usr_usuario")
@@ -314,7 +319,10 @@ def buscar_usuario_eventplus_por_auth_uuid(auth_user_id: str) -> dict[str, Any] 
     return to_dict(data[0])
 
 
-def buscar_usuario_eventplus_por_email(email: str) -> dict[str, Any] | None:
+def buscar_usuario_eventplus_por_email(
+    supabase: Client,
+    email: str,
+) -> dict[str, Any] | None:
     response = (
         supabase
         .table("evp_usr_usuario")
@@ -361,6 +369,7 @@ def formato_usuario_eventplus(usuario: dict[str, Any] | None) -> str:
 # -----------------------------------------------------------------------------
 
 def main(page: ft.Page) -> None:
+    supabase = create_page_supabase_client()
     page.title = "EventPlus - Prueba Google OAuth + Supabase"
     page.window.width = 950
     page.window.height = 760
@@ -401,7 +410,7 @@ def main(page: ft.Page) -> None:
             login_button.disabled = True
             set_status("Solicitando URL OAuth a Supabase...")
 
-            oauth_url = get_oauth_url()
+            oauth_url = get_oauth_url(supabase)
 
             set_status(
                 "Se abrirá el navegador para iniciar sesión con Google. "
@@ -429,9 +438,9 @@ def main(page: ft.Page) -> None:
 
             set_status("Callback recibido. Intercambiando code por sesión Supabase...")
 
-            exchange_code_for_session(str(code))
+            exchange_code_for_session(supabase, str(code))
 
-            user = get_current_user()
+            user = get_current_user(supabase)
             if not user:
                 raise RuntimeError("No se pudo obtener el usuario autenticado con supabase.auth.get_user().")
 
@@ -446,7 +455,7 @@ def main(page: ft.Page) -> None:
 
             set_status("Login exitoso. Consultando evp_usr_usuario para validar trigger...")
 
-            usuario_eventplus = buscar_usuario_eventplus_por_auth_uuid(auth_user_id)
+            usuario_eventplus = buscar_usuario_eventplus_por_auth_uuid(supabase, auth_user_id)
 
             diagnostico = [
                 "LOGIN SUPABASE AUTH EXITOSO",
@@ -459,7 +468,7 @@ def main(page: ft.Page) -> None:
             ]
 
             if not usuario_eventplus and email:
-                usuario_por_email = buscar_usuario_eventplus_por_email(email)
+                usuario_por_email = buscar_usuario_eventplus_por_email(supabase, email)
                 diagnostico.extend(
                     [
                         "",

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from db import get_supabase_client
 from services.evento_context_service import evento_key
 from services.response_utils import extract_data, safe_get, to_dict
 
@@ -33,6 +32,12 @@ class ResultadoEventos:
 
 class EventoServiceError(RuntimeError):
     """Error controlado al consultar eventos disponibles."""
+
+
+def _require_supabase(supabase: Any) -> Any:
+    if supabase is None:
+        raise ValueError("Se requiere el cliente Supabase de la Page actual.")
+    return supabase
 
 
 def _normalizar_id(value: Any) -> int | None:
@@ -133,7 +138,7 @@ def obtener_eventos_disponibles(
             eventos=[],
         )
 
-    supabase = supabase or get_supabase_client()
+    supabase = _require_supabase(supabase)
     print(
         "[EVENTOS][INFO] Consultando eventos disponibles para usuario:",
         contexto_usuario.get("usr_usuario_id"),
