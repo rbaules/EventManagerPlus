@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -25,6 +26,34 @@ SUPABASE_OAUTH_REDIRECT_URL = os.getenv(
     "SUPABASE_OAUTH_REDIRECT_URL",
     "http://localhost:8765/auth/callback",
 ).strip()
+EVENTPLUS_WEB_OAUTH_REDIRECT_URL = os.getenv(
+    "EVENTPLUS_WEB_OAUTH_REDIRECT_URL",
+    "http://127.0.0.1:8550/auth/callback",
+).strip()
+EVENTPLUS_WEB_OAUTH_STATE_TTL_SECONDS = max(
+    30,
+    int(os.getenv("EVENTPLUS_WEB_OAUTH_STATE_TTL_SECONDS", "600")),
+)
+EVENTPLUS_WEB_OAUTH_ATTEMPT_TIMEOUT_SECONDS = max(
+    1,
+    int(os.getenv("EVENTPLUS_WEB_OAUTH_ATTEMPT_TIMEOUT_SECONDS", "120")),
+)
+
+
+def _configure_flet_web_oauth_endpoint() -> None:
+    callback_path = urlparse(EVENTPLUS_WEB_OAUTH_REDIRECT_URL).path.strip("/")
+    if not callback_path:
+        raise RuntimeError(
+            "EVENTPLUS_WEB_OAUTH_REDIRECT_URL debe incluir una ruta de callback."
+        )
+    os.environ.setdefault("FLET_OAUTH_CALLBACK_HANDLER_ENDPOINT", callback_path)
+    os.environ.setdefault(
+        "FLET_OAUTH_STATE_TIMEOUT",
+        str(EVENTPLUS_WEB_OAUTH_STATE_TTL_SECONDS),
+    )
+
+
+_configure_flet_web_oauth_endpoint()
 
 APP_MODE_FULL = "FULL"
 APP_MODE_CHECKIN = "CHECKIN"
@@ -74,3 +103,9 @@ def validate_config() -> None:
 
     if not SUPABASE_PUBLISHABLE_KEY:
         raise RuntimeError("Falta SUPABASE_PUBLISHABLE_KEY en el archivo .env")
+
+    parsed_web_redirect = urlparse(EVENTPLUS_WEB_OAUTH_REDIRECT_URL)
+    if parsed_web_redirect.scheme not in {"http", "https"} or not parsed_web_redirect.netloc:
+        raise RuntimeError(
+            "EVENTPLUS_WEB_OAUTH_REDIRECT_URL debe ser una URL HTTP(S) absoluta."
+        )

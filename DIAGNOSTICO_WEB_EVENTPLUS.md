@@ -760,3 +760,214 @@ No queda `@lru_cache` en la creación del cliente ni un `supabase.Client` autent
 - RLS continúa pendiente.
 - Realtime continúa pendiente.
 - La función de compatibilidad `get_supabase_client()` debe retirarse cuando no existan consumidores externos; actualmente siempre crea un cliente nuevo y no es usada por los servicios productivos.
+
+## Resultado de la Tarea 2 — Separación del flujo OAuth web
+
+**Fecha:** 25 de julio de 2026.
+
+### Arquitectura aplicada
+
+El login selecciona una de tres estrategias explícitas:
+
+- **Web:** usa `Page.login()` y el callback OAuth integrado en el servidor de Flet 0.85.3.
+- **Escritorio:** conserva temporalmente `webbrowser.open()`, `HTTPServer` local y la espera del callback en `127.0.0.1:8765`.
+- **Android:** conserva el redirect `eventplusbeta://auth-callback`, abre el navegador mediante la API de Flet y procesa el deep link existente.
+
+La estrategia web no invoca funciones de la estrategia desktop. No inicia un servidor adicional, no usa `webbrowser.open()`, no consulta `OAuthCallbackHandler.result_queue` y no bloquea un thread esperando el retorno.
+
+### Detección de plataforma
+
+`detect_oauth_strategy(page)` aplica este orden:
+
+1. `page.platform` Android → estrategia Android.
+2. `page.web is True` → estrategia web.
+3. Cualquier otro caso → estrategia desktop.
+
+El orden evita clasificar una aplicación Android como web por características incidentales del runtime.
+
+### Flujo web
+
+1. La Page crea `SupabaseWebOAuthProvider` con su cliente Supabase exclusivo.
+2. `SupabaseWebAuthorization` genera un `state` criptográficamente aleatorio y una expiración.
+3. El `state` se incorpora al `redirect_to` configurado.
+4. `supabase.auth.sign_in_with_oauth()` genera la URL Google/Supabase y conserva el verificador PKCE dentro del cliente de esa Page.
+5. `Page.login()` registra el state en el administrador OAuth de Flet, asociado al identificador interno de la sesión.
+6. Flet abre la URL en el navegador cliente.
+7. Supabase retorna a `/auth/callback`.
+8. El handler HTTP integrado de Flet consume el state, recupera exclusivamente la Page original y entrega el code a su autorización.
+9. `SupabaseWebAuthorization.request_token()` intercambia el code mediante el cliente Supabase de esa Page.
+10. `page.on_login` continúa con `get_current_user()`, contexto EventPlus y Home.
+
+Se verificó contra el código instalado de Flet 0.85.3 que el servidor dinámico ya incluye un endpoint OAuth, almacenamiento temporal de state, asociación a la sesión Flet, expiración y consumo de un solo uso. No fue necesario exportar ASGI ni crear una ruta HTTP paralela.
+
+### Flujo desktop
+
+El flujo desktop permanece encapsulado en `run_desktop_login_flow()` y conserva:
+
+- `SUPABASE_OAUTH_REDIRECT_URL`;
+- navegador del sistema;
+- callback `http://localhost:8765/auth/callback`;
+- `HTTPServer` local;
+- intercambio mediante el cliente de la Page.
+
+Este mecanismo no es utilizado cuando `page.web` es verdadero.
+
+### Flujo Android
+
+Android conserva:
+
+- `eventplusbeta://auth-callback`;
+- `page.on_route_change`;
+- parseo del deep link;
+- cliente Supabase aislado por Page.
+
+La apertura de URL ahora espera correctamente la API asíncrona `page.launch_url()` de Flet 0.85.3. No se modificaron package ID, scheme, host ni configuración del proveedor.
+
+### Correlación y protección del callback
+
+La protección combina:
+
+- state aleatorio de 256 bits aproximados generado con `secrets.token_urlsafe(32)`;
+- validación defensiva del state en el adaptador de autorización;
+- state interno de Flet asociado al identificador de sesión/Page;
+- expiración configurable;
+- consumo de un solo uso en Flet;
+- marca `consumed` antes del intercambio Supabase;
+- PKCE generado y conservado por el cliente `supabase-py` de esa Page.
+
+Un state desconocido, cruzado, repetido o expirado no puede intercambiar un code con otro cliente. El endpoint real fue probado con un state inválido y respondió HTTP 400.
+
+No se registran auth codes, access tokens o refresh tokens. Los mensajes de error web no muestran `error_description` del proveedor.
+
+### Variables de entorno nuevas
+
+```text
+EVENTPLUS_WEB_OAUTH_REDIRECT_URL=http://127.0.0.1:8550/auth/callback
+EVENTPLUS_WEB_OAUTH_STATE_TTL_SECONDS=600
+EVENTPLUS_WEB_OAUTH_ATTEMPT_TIMEOUT_SECONDS=120
+```
+
+La primera define el callback local completo. La segunda controla la vida máxima del state de Flet y nunca puede ser menor de 30 segundos. La tercera controla cuánto espera la UI por un callback antes de expirar el intento y restaurar el login.
+
+`config.py` deriva de la ruta configurada:
+
+```text
+FLET_OAUTH_CALLBACK_HANDLER_ENDPOINT=auth/callback
+```
+
+También alinea `FLET_OAUTH_STATE_TIMEOUT` con el TTL configurado. `SUPABASE_OAUTH_REDIRECT_URL` continúa reservado para escritorio.
+
+### Prueba creada
+
+`scripts/test_web_oauth_flow.py` valida con dobles:
+
+- selección web/desktop/Android;
+- ausencia de `HTTPServer`, `webbrowser.open()` y cola desktop en web;
+- states diferentes para dos sesiones;
+- aislamiento A/B;
+- rechazo de state cruzado;
+- rechazo de callback repetido, expirado o sin code;
+- manejo controlado de error del proveedor;
+- intercambio únicamente con el cliente de la Page correspondiente;
+- construcción del contexto posterior;
+- ausencia de codes/tokens en stdout y stderr.
+
+`scripts/verify_environment.py` valida además la existencia en Flet 0.85.3 de `Page.web`, `Page.login`, `Page.on_login`, `LoginEvent` y el parámetro `authorization`.
+
+### Validaciones
+
+Todas las verificaciones obligatorias pasaron:
+
+- `pip check`;
+- `compileall`;
+- `verify_environment.py`;
+- `smoke_imports.py`;
+- inicialización de sesión;
+- selección de evento;
+- invitados read-only;
+- escritura de invitados;
+- operaciones de llegada;
+- llegadas por invitación;
+- aislamiento multisesión;
+- flujo OAuth web.
+
+Los arranques FULL escritorio, CHECKIN escritorio, FULL web en 8550 y CHECKIN web en 8551 iniciaron sin traceback inmediato y fueron detenidos de forma controlada.
+
+### Configuración manual requerida en Supabase
+
+Para FULL web local:
+
+1. Abrir Supabase Dashboard.
+2. Ir a **Authentication → URL Configuration → Redirect URLs**.
+3. Agregar para desarrollo local:
+
+```text
+http://127.0.0.1:8550/auth/callback**
+```
+
+El sufijo `**` se necesita en desarrollo porque el state de correlación viaja como query parameter dentro de `redirect_to`. No usar un wildcard amplio en producción.
+
+4. Conservar:
+
+```text
+http://localhost:8765/auth/callback
+eventplusbeta://auth-callback
+```
+
+5. En `.env`, agregar:
+
+```text
+EVENTPLUS_WEB_OAUTH_REDIRECT_URL=http://127.0.0.1:8550/auth/callback
+```
+
+6. Reiniciar EventPlus y ejecutar:
+
+```powershell
+env\Scripts\flet.exe run --web --host 127.0.0.1 --port 8550 app.py
+```
+
+7. Abrir `http://127.0.0.1:8550`, iniciar con Google y confirmar que vuelve a Home.
+
+Para probar CHECKIN web en el puerto 8551, registrar también:
+
+```text
+http://127.0.0.1:8551/auth/callback**
+```
+
+y arrancar el proceso con:
+
+```powershell
+$env:EVENTPLUS_WEB_OAUTH_REDIRECT_URL="http://127.0.0.1:8551/auth/callback"
+env\Scripts\flet.exe run --web --host 127.0.0.1 --port 8551 main_checkin.py
+```
+
+Google Cloud debe continuar usando como redirect autorizado el callback del proyecto Supabase:
+
+```text
+https://<project-ref>.supabase.co/auth/v1/callback
+```
+
+No se realizaron cambios automáticos en Supabase o Google Cloud.
+
+### Limitaciones
+
+- El cierre manual del popup no produce un evento en Flet ni en Google. La corrección de la Tarea 2 mantiene ahora un intento OAuth por `Page` y aplica un timeout controlado, sin intentar inspeccionar el popup mediante JavaScript o polling.
+- Cada intento contiene un identificador aleatorio, fecha de creación, estado terminal atómico (`pending`, `completed`, `cancelled` o `expired`), referencia a su `Page`, autorización y tarea de timeout. No existe timer, cola ni estado global para el flujo web.
+- `Page.run_task()` ejecuta el timeout no bloqueante en el bucle asociado a esa Page. La variable `EVENTPLUS_WEB_OAUTH_ATTEMPT_TIMEOUT_SECONDS` permite configurarlo y su valor predeterminado es `120`.
+- Mientras el intento está pendiente, la vista muestra “Esperando autenticación”, deshabilita el login, muestra progreso y ofrece **Cancelar**. Cancelar marca el intento como `cancelled`, invalida inmediatamente la autorización/state en la capa EventPlus, cancela la tarea y permite reintentar con un state nuevo.
+- Al vencer el timeout, el intento pasa una sola vez a `expired`, se invalida su autorización, se restaura el login y se presenta un mensaje controlado. El state correlacionado que Flet mantiene internamente continúa sujeto a su expiración propia, pero ya no puede intercambiar un code en EventPlus.
+- `SupabaseWebAuthorization.request_token()` exige ganar la transición atómica a `completed` antes de intercambiar el code. Un callback posterior a cancelación o expiración se rechaza antes de `exchange_code_for_session()`; un intento antiguo tampoco puede modificar un intento nuevo ni otra Page.
+- Un callback válido cancela la tarea de timeout antes de continuar el login normal. Las carreras callback/timeout y callback/Cancelar admiten una sola transición terminal.
+- Las pruebas con dobles añadidas a `scripts/test_web_oauth_flow.py` cubren UI pendiente, bloqueo de doble clic, cancelación, timeout, reintento con state nuevo, éxito único, callback tardío sin intercambio, aislamiento de dos Pages, carrera concurrente y ausencia de credenciales en logs.
+
+- La correlación integrada de Flet 0.85.3 reside en memoria del proceso. Esta implementación es adecuada para desarrollo web local con un proceso; una futura topología multiworker deberá definir afinidad o un almacén de state compartido.
+- La sesión Supabase todavía no se recupera después de reiniciar el proceso.
+- No se sincroniza logout entre pestañas.
+- El callback público HTTPS, reverse proxy y cookies endurecidas pertenecen al despliegue posterior.
+- Desktop conserva temporalmente su cola global y servidor local, encapsulados fuera de web.
+- Flet rechaza antes del intercambio un callback que tenga state válido pero no incluya ni `code` ni `error`; en ese caso anómalo el endpoint puede mostrar una respuesta HTTP de error en vez de un mensaje dentro de EventPlus. Los errores normales del proveedor, incluida cancelación, sí llegan como mensajes controlados a la Page.
+- RLS continúa pendiente y sigue siendo obligatoria antes de exposición pública.
+
+### Siguiente tarea recomendada
+
+Antes de despliegue público, definir el ciclo de vida de sesión web —recuperación, refresh, expiración y logout— y después integrar la aplicación en la topología ASGI/HTTPS definitiva con una estrategia explícita para state y sesiones en múltiples workers. No se implementó ninguna de esas tareas en este incremento.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -76,6 +77,14 @@ def main() -> int:
             "ft.Alignment": hasattr(ft, "Alignment"),
             "ft.Alignment.CENTER_RIGHT": hasattr(ft.Alignment, "CENTER_RIGHT"),
             "ft.run": hasattr(ft, "run"),
+            "ft.Page.web": hasattr(ft.Page, "web"),
+            "ft.Page.login": hasattr(ft.Page, "login"),
+            "ft.Page.run_task": hasattr(ft.Page, "run_task"),
+            "ft.Page.on_login": hasattr(ft.Page, "on_login"),
+            "ft.LoginEvent": hasattr(ft, "LoginEvent"),
+            "ft.Page.login.authorization": (
+                "authorization" in inspect.signature(ft.Page.login).parameters
+            ),
         }
         for name, ok in checks.items():
             print(f"- {name}: {'OK' if ok else 'FAIL'}")

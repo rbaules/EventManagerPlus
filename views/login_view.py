@@ -1,26 +1,39 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import traceback
 import webbrowser
+from typing import Any
 
 import flet as ft
 
 from config import (
     ANDROID_OAUTH_REDIRECT_URL,
     APP_VERSION,
+    EVENTPLUS_WEB_OAUTH_ATTEMPT_TIMEOUT_SECONDS,
+    EVENTPLUS_WEB_OAUTH_REDIRECT_URL,
     SUPABASE_OAUTH_REDIRECT_URL,
     get_oauth_redirect_url,
-    is_android_platform,
     is_checkin_mode,
 )
 from services.auth_service import (
+    OAUTH_STRATEGY_ANDROID,
+    OAUTH_STRATEGY_DESKTOP,
+    OAUTH_STRATEGY_WEB,
+    WEB_OAUTH_ATTEMPT_CANCELLED,
+    WEB_OAUTH_ATTEMPT_COMPLETED,
+    WEB_OAUTH_ATTEMPT_EXPIRED,
+    WebOAuthAttempt,
+    detect_oauth_strategy,
     exchange_code_for_session,
     get_current_user,
     get_oauth_url,
     parse_oauth_callback_url,
     sign_out_local_session,
+    start_web_oauth,
     wait_for_oauth_callback,
+    web_oauth_error_message,
 )
 from services.response_utils import pretty, safe_get, to_dict
 from services.usuario_service import (
@@ -81,10 +94,15 @@ def build_login_view(
         visible=False,
     )
 
-    login_button = ft.ElevatedButton(
+    login_button = ft.Button(
         "Continuar con Google",
         icon=ft.Icons.LOGIN,
         height=48,
+    )
+    cancel_login_button = ft.TextButton(
+        "Cancelar",
+        icon=ft.Icons.CANCEL,
+        visible=False,
     )
 
     logout_button = ft.OutlinedButton(
@@ -105,17 +123,28 @@ def build_login_view(
     def set_loading(is_loading: bool) -> None:
         login_button.disabled = is_loading
         progress.visible = is_loading
+        cancel_login_button.visible = False
+        page.update()
+
+    def set_web_attempt_ui(is_pending: bool, message: str) -> None:
+        login_button.disabled = is_pending
+        progress.visible = is_pending
+        cancel_login_button.visible = is_pending
+        status.value = message
         page.update()
 
     processed_callbacks: set[str] = set()
 
-    def completar_login_con_code(code: str, fase_inicial: str = "obtener_sesion") -> None:
+    def completar_login_con_code(
+        code: str | None,
+        fase_inicial: str = "obtener_sesion",
+    ) -> None:
         fase = fase_inicial
         try:
-            set_status("Callback recibido. Intercambiando code por sesion Supabase...")
-
-            fase = "obtener_sesion"
-            exchange_code_for_session(supabase, str(code))
+            if code is not None:
+                set_status("Callback recibido. Completando sesion Supabase...")
+                fase = "obtener_sesion"
+                exchange_code_for_session(supabase, code)
 
             fase = "obtener_usuario_auth"
             user = get_current_user(supabase)
@@ -322,7 +351,7 @@ def build_login_view(
 
     page.on_route_change = route_change
 
-    def run_login_flow() -> None:
+    def run_desktop_login_flow() -> None:
         fase = "inicio"
         try:
             set_loading(True)
@@ -331,7 +360,7 @@ def build_login_view(
             fase = "oauth_url"
             set_status("Solicitando URL OAuth a Supabase...")
 
-            redirect_url = get_oauth_redirect_url(page.platform)
+            redirect_url = get_oauth_redirect_url()
             oauth_url = get_oauth_url(supabase, redirect_url=redirect_url)
 
             fase = "abrir_navegador"
@@ -339,11 +368,6 @@ def build_login_view(
                 "Se abrira el navegador para iniciar sesion con Google. "
                 "Despues del login, vuelve a EventPlus."
             )
-
-            if is_android_platform(page.platform):
-                page.launch_url(oauth_url)
-                set_status("Completa el inicio de sesion en el navegador. Volveremos automaticamente a EventPlus.")
-                return
 
             webbrowser.open(oauth_url)
 
@@ -373,8 +397,152 @@ def build_login_view(
             set_result("No fue posible abrir o completar el inicio de sesion con Google. Intenta nuevamente.")
             set_loading(False)
 
-    def login_click(e: ft.ControlEvent) -> None:
-        threading.Thread(target=run_login_flow, daemon=True).start()
+    async def run_android_login_flow() -> None:
+        try:
+            set_loading(True)
+            set_status("Solicitando URL OAuth a Supabase...")
+            oauth_url = get_oauth_url(
+                supabase,
+                redirect_url=get_oauth_redirect_url(page.platform),
+            )
+            set_status(
+                "Completa el inicio de sesion en el navegador. "
+                "Volveremos automaticamente a EventPlus."
+            )
+            await page.launch_url(oauth_url)
+        except Exception as ex:
+            print(
+                "[LOGIN][ERROR]",
+                "estrategia=android",
+                f"tipo={type(ex).__name__}",
+            )
+            set_status("No pudimos iniciar sesion.")
+            set_result(
+                "No fue posible abrir el inicio de sesion con Google. "
+                "Intenta nuevamente."
+            )
+            set_loading(False)
+
+    current_web_attempt: WebOAuthAttempt | None = None
+
+    async def web_attempt_timeout(attempt: WebOAuthAttempt) -> None:
+        nonlocal current_web_attempt
+        await asyncio.sleep(EVENTPLUS_WEB_OAUTH_ATTEMPT_TIMEOUT_SECONDS)
+        if not attempt.transition(WEB_OAUTH_ATTEMPT_EXPIRED):
+            return
+        attempt.set_timeout_task(None)
+        if current_web_attempt is not attempt:
+            return
+        current_web_attempt = None
+        set_web_attempt_ui(
+            False,
+            "No se completo la autenticacion. La ventana pudo haberse cerrado "
+            "o el tiempo de espera termino. Intenta nuevamente.",
+        )
+
+    async def cancel_web_login(e: ft.ControlEvent) -> None:
+        del e
+        nonlocal current_web_attempt
+        attempt = current_web_attempt
+        if attempt is None or not attempt.transition(WEB_OAUTH_ATTEMPT_CANCELLED):
+            return
+        attempt.cancel_timeout()
+        if current_web_attempt is attempt:
+            current_web_attempt = None
+            set_web_attempt_ui(False, "Inicio de sesion cancelado.")
+
+    async def web_login_completed(e: ft.LoginEvent) -> None:
+        nonlocal current_web_attempt
+        attempt = current_web_attempt
+        if attempt is None:
+            return
+
+        error = str(getattr(e, "error", "") or "")
+        if error:
+            if attempt.status in {
+                WEB_OAUTH_ATTEMPT_CANCELLED,
+                WEB_OAUTH_ATTEMPT_EXPIRED,
+            }:
+                return
+            if attempt.pending:
+                attempt.transition(WEB_OAUTH_ATTEMPT_CANCELLED)
+            attempt.cancel_timeout()
+            if current_web_attempt is not attempt:
+                return
+            current_web_attempt = None
+            description = str(getattr(e, "error_description", "") or "")
+            set_status("No pudimos completar el inicio de sesion con Google.")
+            set_result(web_oauth_error_message(error, description))
+            set_loading(False)
+            return
+
+        if attempt.status != WEB_OAUTH_ATTEMPT_COMPLETED:
+            return
+        attempt.cancel_timeout()
+        if current_web_attempt is not attempt:
+            return
+        current_web_attempt = None
+        threading.Thread(
+            target=lambda: completar_login_con_code(None, "obtener_usuario_auth"),
+            daemon=True,
+        ).start()
+
+    page.on_login = web_login_completed
+
+    async def run_web_login_flow() -> None:
+        nonlocal current_web_attempt
+        if current_web_attempt is not None and current_web_attempt.pending:
+            return
+
+        attempt = WebOAuthAttempt(page)
+        current_web_attempt = attempt
+        set_result("")
+        set_web_attempt_ui(
+            True,
+            "Esperando autenticacion. Completa el proceso en la ventana de Google "
+            "o pulsa Cancelar.",
+        )
+        timeout_task = page.run_task(web_attempt_timeout, attempt)
+        attempt.set_timeout_task(timeout_task)
+        try:
+            await start_web_oauth(
+                page,
+                supabase,
+                redirect_url=EVENTPLUS_WEB_OAUTH_REDIRECT_URL,
+                attempt=attempt,
+            )
+        except Exception as ex:
+            if not attempt.transition(WEB_OAUTH_ATTEMPT_CANCELLED):
+                return
+            attempt.cancel_timeout()
+            if current_web_attempt is not attempt:
+                return
+            current_web_attempt = None
+            print(
+                "[LOGIN][ERROR]",
+                "estrategia=web",
+                f"tipo={type(ex).__name__}",
+            )
+            set_status("No pudimos iniciar sesion.")
+            set_result(
+                "No fue posible abrir el inicio de sesion con Google. "
+                "Intenta nuevamente."
+            )
+            set_loading(False)
+
+    async def login_click(e: ft.ControlEvent) -> None:
+        del e
+        strategy = detect_oauth_strategy(page)
+        if strategy == OAUTH_STRATEGY_WEB:
+            await run_web_login_flow()
+            return
+        if strategy == OAUTH_STRATEGY_ANDROID:
+            await run_android_login_flow()
+            return
+        if strategy == OAUTH_STRATEGY_DESKTOP:
+            threading.Thread(target=run_desktop_login_flow, daemon=True).start()
+            return
+        raise RuntimeError("Estrategia OAuth no soportada.")
 
     def logout_click(e: ft.ControlEvent) -> None:
         try:
@@ -387,6 +555,7 @@ def build_login_view(
         set_result("")
 
     login_button.on_click = login_click
+    cancel_login_button.on_click = cancel_web_login
     logout_button.on_click = logout_click
 
     modo_texto = "Modo Check-in" if is_checkin_mode() else "Modo completo"
@@ -416,7 +585,12 @@ def build_login_view(
                     color=ft.Colors.ON_SURFACE_VARIANT,
                     text_align=ft.TextAlign.CENTER,
                 ),
-                ft.Row([login_button, progress], alignment=ft.MainAxisAlignment.CENTER, spacing=12),
+                ft.Row(
+                    [login_button, progress],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    spacing=12,
+                ),
+                cancel_login_button,
                 logout_button,
                 status,
                 result_box,
