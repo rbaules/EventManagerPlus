@@ -625,7 +625,7 @@ def build_home_view(
             content=ft.Text(mensaje),
             actions=[
                 ft.TextButton(content="Cancelar", on_click=lambda e: cerrar_dialogo()),
-                ft.ElevatedButton(content=texto_confirmar, on_click=lambda e: aceptar_dialogo()),
+                ft.Button(content=texto_confirmar, on_click=lambda e: aceptar_dialogo()),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )

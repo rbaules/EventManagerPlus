@@ -113,7 +113,7 @@ def _evento_card(
                 ft.Text(f"Acceso: {rol}", size=13, color=ft.Colors.ON_SURFACE_VARIANT),
                 ft.Row(
                     [
-                        ft.ElevatedButton(
+                        ft.Button(
                             content="Seleccionar evento",
                             icon=ft.Icons.CHECK_CIRCLE,
                             disabled=is_active,

@@ -212,7 +212,7 @@ def arrivals_view(
                 ft.Container(
                     ft.Row(
                         [
-                            ft.ElevatedButton(
+                            ft.Button(
                                 content="Buscar",
                                 icon=ft.Icons.SEARCH,
                                 disabled=is_loading or is_saving,
@@ -332,7 +332,7 @@ def arrivals_view(
                                     disabled=is_saving or not pendientes,
                                     on_click=lambda e: on_select_pending(),
                                 ),
-                                ft.ElevatedButton(
+                                ft.Button(
                                     content=f"Confirmar seleccionados ({seleccion_count})",
                                     icon=ft.Icons.HOW_TO_REG,
                                     disabled=is_saving or seleccion_count == 0,

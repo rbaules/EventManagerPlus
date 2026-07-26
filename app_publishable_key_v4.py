@@ -386,7 +386,7 @@ def main(page: ft.Page) -> None:
         value="",
     )
 
-    login_button = ft.ElevatedButton(
+    login_button = ft.Button(
         "Iniciar sesión con Google",
         icon=ft.Icons.LOGIN,
     )

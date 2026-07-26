@@ -323,7 +323,7 @@ def _form_panel(
             ),
             ft.Row(
                 [
-                    ft.ElevatedButton(
+                    ft.Button(
                         content="Guardar" if modo in {"crear", "imprevisto"} else "Guardar cambios",
                         icon=ft.Icons.SAVE,
                         disabled=is_saving or not can_manage,
@@ -476,7 +476,7 @@ def invitados_view(
                 ft.Container(
                     ft.Row(
                         [
-                            ft.ElevatedButton(
+                            ft.Button(
                                 content="Buscar",
                                 icon=ft.Icons.SEARCH,
                                 disabled=is_loading,
@@ -521,7 +521,7 @@ def invitados_view(
         controls.append(
             ft.Row(
                 [
-                    ft.ElevatedButton(
+                    ft.Button(
                         content="Agregar planificado",
                         icon=ft.Icons.PERSON_ADD,
                         disabled=(not can_manage_planned) or is_loading or is_saving,
