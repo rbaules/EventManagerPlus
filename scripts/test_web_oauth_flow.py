@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import io
 import sys
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,8 +27,15 @@ class FakeAuth:
         self.redirect_urls: list[str] = []
         self.exchanged_codes: list[str] = []
         self.user_id = f"auth-{name}"
+        self.session: Any = None
+        self.sign_out_scopes: list[str] = []
+        self.exchange_delay = 0.0
+        self.exchange_started = threading.Event()
+        self.oauth_credentials: list[dict[str, Any]] = []
 
     def sign_in_with_oauth(self, credentials: dict[str, Any]) -> Any:
+        self.oauth_credentials.append(credentials)
+        self.session = None
         redirect_url = credentials["options"]["redirect_to"]
         self.redirect_urls.append(redirect_url)
         return SimpleNamespace(
@@ -34,13 +43,28 @@ class FakeAuth:
         )
 
     def exchange_code_for_session(self, params: dict[str, str]) -> Any:
+        self.exchange_started.set()
+        if self.exchange_delay:
+            time.sleep(self.exchange_delay)
         self.exchanged_codes.append(params["auth_code"])
-        return SimpleNamespace(session=f"session-{self.name}")
+        self.session = SimpleNamespace(
+            user=SimpleNamespace(id=self.user_id),
+            access_token=f"access-{self.name}",
+            refresh_token=f"refresh-{self.name}",
+        )
+        return SimpleNamespace(session=self.session)
+
+    def get_session(self) -> Any:
+        return self.session
 
     def get_user(self) -> Any:
         return SimpleNamespace(
             user=SimpleNamespace(id=self.user_id, email=f"{self.name}@example.com")
         )
+
+    def sign_out(self, options: dict[str, str] | None = None) -> None:
+        self.sign_out_scopes.append((options or {}).get("scope", "global"))
+        self.session = None
 
 
 class FakeClient:
@@ -60,6 +84,7 @@ class FakePage:
         self.update_calls = 0
         self.navigation_bar = None
         self.on_login: Any = None
+        self.on_login_was_set_at_login = False
 
     async def login(
         self,
@@ -70,6 +95,7 @@ class FakePage:
         authorization: type[auth_service.SupabaseWebAuthorization],
     ) -> Any:
         self.login_calls += 1
+        self.on_login_was_set_at_login = self.on_login is not None
         self.authorization = authorization(
             provider,
             fetch_user=fetch_user,
@@ -218,6 +244,9 @@ async def assert_state_session_and_client_isolation() -> None:
     redirect_b = client_b.auth.redirect_urls[0]
     assert parse_qs(urlparse(redirect_a).query)["state"] == [auth_a.state]
     assert parse_qs(urlparse(redirect_b).query)["state"] == [auth_b.state]
+    assert client_a.auth.oauth_credentials[0]["options"]["query_params"] == {
+        "prompt": "select_account"
+    }
 
     auth_a.validate_callback_state(auth_a.state)
     auth_b.validate_callback_state(auth_b.state)
@@ -353,9 +382,15 @@ async def assert_success_cancels_timeout_exactly_once() -> None:
     attempt.set_timeout_task(timeout_task)
     await authorization.request_token("success-code")
     await asyncio.sleep(0)
-    assert attempt.status == auth_service.WEB_OAUTH_ATTEMPT_COMPLETED
+    assert (
+        attempt.status
+        == auth_service.WEB_OAUTH_ATTEMPT_SESSION_EXCHANGING
+    )
     assert timeout_task.cancelled()
     assert client.auth.exchanged_codes == ["success-code"]
+    assert attempt.transition(auth_service.WEB_OAUTH_ATTEMPT_CONTEXT_BUILDING)
+    assert attempt.transition(auth_service.WEB_OAUTH_ATTEMPT_HOME_BUILDING)
+    assert attempt.transition(auth_service.WEB_OAUTH_ATTEMPT_COMPLETED)
     assert not attempt.transition(auth_service.WEB_OAUTH_ATTEMPT_EXPIRED)
     try:
         await authorization.request_token("second-code")
@@ -382,6 +417,7 @@ async def assert_page_ui_pending_cancel_timeout_and_retry() -> None:
         await login_button.on_click(SimpleNamespace())
         first_authorization = page.authorization
         assert page.login_calls == 1
+        assert page.on_login_was_set_at_login
         assert login_button.disabled
         assert cancel_button.visible
 
@@ -431,6 +467,9 @@ async def assert_two_pages_and_race_isolation() -> None:
     assert attempt_a.transition(auth_service.WEB_OAUTH_ATTEMPT_CANCELLED)
     attempt_a.cancel_timeout()
     await auth_b.request_token("code-B")
+    assert attempt_b.transition(auth_service.WEB_OAUTH_ATTEMPT_CONTEXT_BUILDING)
+    assert attempt_b.transition(auth_service.WEB_OAUTH_ATTEMPT_HOME_BUILDING)
+    assert attempt_b.transition(auth_service.WEB_OAUTH_ATTEMPT_COMPLETED)
     await asyncio.sleep(0)
     assert task_a.cancelled()
     assert task_b.cancelled()
@@ -450,15 +489,78 @@ async def assert_two_pages_and_race_isolation() -> None:
     )
     assert race_attempt.status in {
         auth_service.WEB_OAUTH_ATTEMPT_EXPIRED,
-        auth_service.WEB_OAUTH_ATTEMPT_COMPLETED,
+        auth_service.WEB_OAUTH_ATTEMPT_SESSION_EXCHANGING,
     }
     assert len(race_client.auth.exchanged_codes) <= 1
     if race_attempt.status == auth_service.WEB_OAUTH_ATTEMPT_EXPIRED:
-        assert race_client.auth.exchanged_codes == []
         assert any(isinstance(result, ValueError) for result in results)
+        if race_client.auth.exchanged_codes:
+            assert race_client.auth.exchanged_codes == ["race-code"]
+            assert race_client.auth.sign_out_scopes == ["local"]
+            assert race_client.auth.get_session() is None
     else:
         assert race_client.auth.exchanged_codes == ["race-code"]
         assert results[0] is False
+
+
+async def assert_late_exchange_is_cleaned_after_timeout_or_cancel() -> None:
+    _, expired_client, expired_attempt, expired_auth = (
+        await create_managed_web_attempt("late-expired")
+    )
+    expired_attempt.mark_waiting_callback()
+    assert expired_attempt.transition(auth_service.WEB_OAUTH_ATTEMPT_EXPIRED)
+    result = await asyncio.gather(
+        expired_auth.request_token("code-expired"),
+        return_exceptions=True,
+    )
+    assert isinstance(result[0], ValueError)
+    assert expired_client.auth.exchanged_codes == []
+
+    _, client, attempt, authorization = await create_managed_web_attempt(
+        "late-cancelled"
+    )
+    client.auth.exchange_delay = 0.04
+    request_task = asyncio.create_task(
+        authorization.request_token("code-cancelled")
+    )
+    await asyncio.to_thread(client.auth.exchange_started.wait, 1)
+    assert attempt.transition(auth_service.WEB_OAUTH_ATTEMPT_CANCELLED)
+    result = await asyncio.gather(request_task, return_exceptions=True)
+    assert isinstance(result[0], ValueError)
+    assert client.auth.exchanged_codes == ["code-cancelled"]
+    assert client.auth.sign_out_scopes == ["local"]
+    assert client.auth.get_session() is None
+
+
+async def assert_callback_neutralizes_timeout_during_slow_phases() -> None:
+    _, client, attempt, authorization = await create_managed_web_attempt(
+        "callback-before-timeout"
+    )
+    attempt.mark_waiting_callback()
+    timeout_task = asyncio.create_task(asyncio.sleep(60))
+    attempt.set_timeout_task(timeout_task)
+    await authorization.request_token("first-login-code")
+    await asyncio.sleep(0)
+    assert timeout_task.cancelled()
+    assert (
+        attempt.status
+        == auth_service.WEB_OAUTH_ATTEMPT_SESSION_EXCHANGING
+    )
+    assert not attempt.transition(auth_service.WEB_OAUTH_ATTEMPT_EXPIRED)
+    assert attempt.transition(auth_service.WEB_OAUTH_ATTEMPT_CONTEXT_BUILDING)
+    await asyncio.sleep(0.02)
+    assert not attempt.transition(auth_service.WEB_OAUTH_ATTEMPT_EXPIRED)
+    assert attempt.transition(auth_service.WEB_OAUTH_ATTEMPT_HOME_BUILDING)
+    assert not attempt.transition(auth_service.WEB_OAUTH_ATTEMPT_EXPIRED)
+    assert attempt.transition(auth_service.WEB_OAUTH_ATTEMPT_COMPLETED)
+    assert client.auth.exchanged_codes == ["first-login-code"]
+
+    waiting = auth_service.WebOAuthAttempt(FakePage(web=True, platform="windows"))
+    assert waiting.timeout_eligible
+    assert waiting.mark_waiting_callback()
+    assert waiting.timeout_eligible
+    assert waiting.mark_callback_received(has_error=False)
+    assert not waiting.timeout_eligible
 
 
 async def main_async() -> None:
@@ -471,6 +573,8 @@ async def main_async() -> None:
     await assert_success_cancels_timeout_exactly_once()
     await assert_page_ui_pending_cancel_timeout_and_retry()
     await assert_two_pages_and_race_isolation()
+    await assert_late_exchange_is_cleaned_after_timeout_or_cancel()
+    await assert_callback_neutralizes_timeout_during_slow_phases()
 
 
 def main() -> int:

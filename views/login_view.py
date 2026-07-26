@@ -22,8 +22,13 @@ from services.auth_service import (
     OAUTH_STRATEGY_DESKTOP,
     OAUTH_STRATEGY_WEB,
     WEB_OAUTH_ATTEMPT_CANCELLED,
+    WEB_OAUTH_ATTEMPT_CALLBACK_RECEIVED,
     WEB_OAUTH_ATTEMPT_COMPLETED,
+    WEB_OAUTH_ATTEMPT_CONTEXT_BUILDING,
     WEB_OAUTH_ATTEMPT_EXPIRED,
+    WEB_OAUTH_ATTEMPT_FAILED,
+    WEB_OAUTH_ATTEMPT_HOME_BUILDING,
+    WEB_OAUTH_ATTEMPT_SESSION_EXCHANGING,
     WebOAuthAttempt,
     detect_oauth_strategy,
     exchange_code_for_session,
@@ -36,6 +41,10 @@ from services.auth_service import (
     web_oauth_error_message,
 )
 from services.response_utils import pretty, safe_get, to_dict
+from services.session_service import (
+    PageSessionController,
+    SESSION_INVALID_MESSAGE,
+)
 from services.usuario_service import (
     UsuarioContextoError,
     buscar_usuario_eventplus_por_auth_uuid,
@@ -74,11 +83,36 @@ def formato_resumen_contexto(contexto: dict) -> str:
     )
 
 
+async def wait_for_supabase_session(
+    session_controller: PageSessionController,
+    attempt: WebOAuthAttempt,
+    *,
+    retries: int = 5,
+    delay_seconds: float = 0.15,
+) -> bool:
+    for index in range(retries):
+        attempt.trace("supabase_session_check_start")
+        session_present = await asyncio.to_thread(
+            session_controller.has_supabase_session
+        )
+        attempt.trace(
+            "supabase_session_present",
+            session_present=session_present,
+        )
+        if session_present:
+            return True
+        if index + 1 < retries:
+            await asyncio.sleep(delay_seconds)
+    return False
+
+
 def build_login_view(
     page: ft.Page,
     supabase: Any,
     initial_message: str | None = None,
+    session_controller: PageSessionController | None = None,
 ) -> None:
+    session_controller = session_controller or PageSessionController(page, supabase)
     page.navigation_bar = None
     print("[APP][INFO] Plataforma detectada:", page.platform)
     status = ft.Text(initial_message or "Listo para iniciar sesion.", size=14, selectable=True, text_align=ft.TextAlign.CENTER)
@@ -133,11 +167,33 @@ def build_login_view(
         status.value = message
         page.update()
 
+    def set_web_callback_processing_ui() -> None:
+        login_button.disabled = True
+        progress.visible = True
+        cancel_login_button.visible = False
+        status.value = (
+            "Autenticacion recibida. EventPlus esta preparando tu sesion..."
+        )
+        page.update()
+
+    async def session_became_invalid(message: str) -> None:
+        session_controller.logout(cancel_tasks=False)
+        page.navigation_bar = None
+        page.clean()
+        build_login_view(
+            page,
+            supabase,
+            initial_message=message or SESSION_INVALID_MESSAGE,
+            session_controller=session_controller,
+        )
+        page.update()
+
     processed_callbacks: set[str] = set()
 
     def completar_login_con_code(
         code: str | None,
         fase_inicial: str = "obtener_sesion",
+        attempt: WebOAuthAttempt | None = None,
     ) -> None:
         fase = fase_inicial
         try:
@@ -147,9 +203,25 @@ def build_login_view(
                 exchange_code_for_session(supabase, code)
 
             fase = "obtener_usuario_auth"
-            user = get_current_user(supabase)
-            if not user:
-                raise RuntimeError("No se pudo obtener el usuario autenticado con supabase.auth.get_user().")
+            if attempt is not None:
+                attempt.trace("supabase_session_check_start")
+            validation = session_controller.validate_current_session(
+                load_context=True,
+                claim_home=True,
+            )
+            if not validation.ok:
+                raise UsuarioContextoError(
+                    validation.message or SESSION_INVALID_MESSAGE
+                )
+            user = validation.user
+            contexto_usuario = validation.context
+            if attempt is not None:
+                attempt.trace(
+                    "eventplus_context_success",
+                    session_present=True,
+                )
+            if not user or not contexto_usuario:
+                raise RuntimeError("No se pudo validar la sesion autenticada.")
 
             auth_user_id = str(safe_get(user, "id", ""))
             email = str(safe_get(user, "email", ""))
@@ -225,8 +297,6 @@ def build_login_view(
             set_status("Cargando contexto del usuario EventPlus...")
             try:
                 fase = "cargar_contexto_usuario"
-                contexto_usuario = cargar_contexto_usuario(supabase, auth_user_id)
-                page.session.store.set("usuario_contexto", contexto_usuario)
                 diagnostico.extend(["", formato_resumen_contexto(contexto_usuario)])
                 print("[LOGIN] Contexto cargado")
             except UsuarioContextoError as ex:
@@ -240,6 +310,17 @@ def build_login_view(
                 logout_button.visible = True
                 return
 
+            if not validation.should_build_home:
+                print("[LOGIN][INFO] Home ya fue reclamado por esta sesion.")
+                return
+
+            if attempt is not None:
+                attempt.trace("home_claim_start")
+                if not attempt.transition(WEB_OAUTH_ATTEMPT_HOME_BUILDING):
+                    attempt.trace("late_event_rejected")
+                    session_controller.logout()
+                    return
+
             page.session.store.set("diagnostico_login", "\n".join(diagnostico))
             set_status("Acceso concedido. Abriendo Dashboard...")
             try:
@@ -251,6 +332,7 @@ def build_login_view(
                     page=page,
                     contexto_usuario=contexto_usuario,
                     supabase=supabase,
+                    session_controller=session_controller,
                 )
                 print("[HOME] Tipo devuelto:", type(home_control))
 
@@ -269,17 +351,36 @@ def build_login_view(
                     start_eventos = home_control.data.get("start_eventos")
                 if callable(start_eventos):
                     start_eventos()
+                session_controller.start_refresh_monitor(session_became_invalid)
+                if attempt is not None:
+                    attempt.transition(WEB_OAUTH_ATTEMPT_COMPLETED)
+                    attempt.trace("home_claim_success", home_claimed=True)
                 print("[HOME] Home mostrado")
             except Exception:
                 traceback.print_exc()
+                if attempt is not None:
+                    attempt.transition(WEB_OAUTH_ATTEMPT_FAILED)
+                session_controller.logout()
                 page.clean()
                 build_login_view(
                     page,
                     supabase,
                     initial_message="No fue posible abrir la pantalla principal.",
+                    session_controller=session_controller,
                 )
                 page.update()
+        except UsuarioContextoError as ex:
+            if attempt is not None:
+                attempt.transition(WEB_OAUTH_ATTEMPT_FAILED)
+            session_controller.logout()
+            set_status("Acceso no autorizado o contexto incompleto.")
+            set_result(
+                f"{ex}\n\n"
+                "La sesion local fue cerrada. Puedes intentarlo nuevamente."
+            )
         except Exception as ex:
+            if attempt is not None:
+                attempt.transition(WEB_OAUTH_ATTEMPT_FAILED)
             print(
                 "[LOGIN][ERROR]",
                 f"fase={fase}",
@@ -287,6 +388,13 @@ def build_login_view(
                 f"mensaje={ex}",
             )
             traceback.print_exc()
+            if fase in {
+                "obtener_usuario_auth",
+                "cargar_usuario_eventplus",
+                "cargar_contexto_usuario",
+                "construir_dashboard",
+            }:
+                session_controller.logout()
             set_status("La prueba fallo.")
             page.session.store.set(
                 "diagnostico_login",
@@ -430,10 +538,12 @@ def build_login_view(
         await asyncio.sleep(EVENTPLUS_WEB_OAUTH_ATTEMPT_TIMEOUT_SECONDS)
         if not attempt.transition(WEB_OAUTH_ATTEMPT_EXPIRED):
             return
+        attempt.trace("timeout_fired", timeout_fired=True)
         attempt.set_timeout_task(None)
         if current_web_attempt is not attempt:
             return
         current_web_attempt = None
+        session_controller.clear_oauth_attempt(attempt)
         set_web_attempt_ui(
             False,
             "No se completo la autenticacion. La ventana pudo haberse cerrado "
@@ -447,26 +557,42 @@ def build_login_view(
         if attempt is None or not attempt.transition(WEB_OAUTH_ATTEMPT_CANCELLED):
             return
         attempt.cancel_timeout()
+        session_controller.clear_oauth_attempt(attempt)
         if current_web_attempt is attempt:
             current_web_attempt = None
             set_web_attempt_ui(False, "Inicio de sesion cancelado.")
 
     async def web_login_completed(e: ft.LoginEvent) -> None:
         nonlocal current_web_attempt
-        attempt = current_web_attempt
+        attempt = current_web_attempt or session_controller.current_oauth_attempt
         if attempt is None:
             return
 
         error = str(getattr(e, "error", "") or "")
+        if not attempt.mark_callback_received(has_error=bool(error)):
+            attempt.trace("late_event_rejected", on_login=True)
+            if (
+                attempt.status == WEB_OAUTH_ATTEMPT_FAILED
+                and current_web_attempt is attempt
+            ):
+                session_controller.clear_oauth_attempt(attempt)
+                current_web_attempt = None
+                set_web_attempt_ui(
+                    False,
+                    "Google no pudo completar la autenticacion. "
+                    "Intenta nuevamente.",
+                )
+            return
+        attempt.trace(
+            "on_login_success_or_error",
+            on_login=True,
+            has_error=bool(error),
+        )
+        set_web_callback_processing_ui()
         if error:
-            if attempt.status in {
-                WEB_OAUTH_ATTEMPT_CANCELLED,
-                WEB_OAUTH_ATTEMPT_EXPIRED,
-            }:
-                return
-            if attempt.pending:
-                attempt.transition(WEB_OAUTH_ATTEMPT_CANCELLED)
+            attempt.transition(WEB_OAUTH_ATTEMPT_FAILED)
             attempt.cancel_timeout()
+            session_controller.clear_oauth_attempt(attempt)
             if current_web_attempt is not attempt:
                 return
             current_web_attempt = None
@@ -476,16 +602,45 @@ def build_login_view(
             set_loading(False)
             return
 
-        if attempt.status != WEB_OAUTH_ATTEMPT_COMPLETED:
+        if attempt.status not in {
+            WEB_OAUTH_ATTEMPT_CALLBACK_RECEIVED,
+            WEB_OAUTH_ATTEMPT_SESSION_EXCHANGING,
+        }:
+            attempt.trace("late_event_rejected", on_login=True)
             return
         attempt.cancel_timeout()
         if current_web_attempt is not attempt:
+            current_web_attempt = attempt
+
+        session_present = await wait_for_supabase_session(
+            session_controller,
+            attempt,
+        )
+
+        if not session_present:
+            attempt.transition(WEB_OAUTH_ATTEMPT_FAILED)
+            session_controller.clear_oauth_attempt(attempt)
+            current_web_attempt = None
+            session_controller.logout()
+            set_web_attempt_ui(
+                False,
+                "La autenticacion fue recibida, pero EventPlus no pudo "
+                "completar la sesion. Intenta nuevamente.",
+            )
             return
+
+        if not attempt.transition(WEB_OAUTH_ATTEMPT_CONTEXT_BUILDING):
+            attempt.trace("late_event_rejected", on_login=True)
+            return
+        attempt.trace("eventplus_context_start")
+        await asyncio.to_thread(
+            completar_login_con_code,
+            None,
+            "obtener_usuario_auth",
+            attempt,
+        )
+        session_controller.clear_oauth_attempt(attempt)
         current_web_attempt = None
-        threading.Thread(
-            target=lambda: completar_login_con_code(None, "obtener_usuario_auth"),
-            daemon=True,
-        ).start()
 
     page.on_login = web_login_completed
 
@@ -494,27 +649,34 @@ def build_login_view(
         if current_web_attempt is not None and current_web_attempt.pending:
             return
 
+        await asyncio.to_thread(session_controller.clear_residual_session)
         attempt = WebOAuthAttempt(page)
+        attempt.trace("login_click")
         current_web_attempt = attempt
+        session_controller.register_oauth_attempt(attempt)
         set_result("")
         set_web_attempt_ui(
             True,
             "Esperando autenticacion. Completa el proceso en la ventana de Google "
             "o pulsa Cancelar.",
         )
-        timeout_task = page.run_task(web_attempt_timeout, attempt)
-        attempt.set_timeout_task(timeout_task)
         try:
+            attempt.trace("page_login_called")
             await start_web_oauth(
                 page,
                 supabase,
                 redirect_url=EVENTPLUS_WEB_OAUTH_REDIRECT_URL,
                 attempt=attempt,
             )
+            attempt.mark_waiting_callback()
+            if attempt.timeout_eligible:
+                timeout_task = page.run_task(web_attempt_timeout, attempt)
+                attempt.set_timeout_task(timeout_task)
         except Exception as ex:
             if not attempt.transition(WEB_OAUTH_ATTEMPT_CANCELLED):
                 return
             attempt.cancel_timeout()
+            session_controller.clear_oauth_attempt(attempt)
             if current_web_attempt is not attempt:
                 return
             current_web_attempt = None
@@ -545,10 +707,8 @@ def build_login_view(
         raise RuntimeError("Estrategia OAuth no soportada.")
 
     def logout_click(e: ft.ControlEvent) -> None:
-        try:
-            sign_out_local_session(supabase)
-        except Exception:
-            pass
+        del e
+        session_controller.logout()
 
         logout_button.visible = False
         set_status("Sesion local cerrada.")

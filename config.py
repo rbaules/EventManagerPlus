@@ -38,6 +38,10 @@ EVENTPLUS_WEB_OAUTH_ATTEMPT_TIMEOUT_SECONDS = max(
     1,
     int(os.getenv("EVENTPLUS_WEB_OAUTH_ATTEMPT_TIMEOUT_SECONDS", "120")),
 )
+EVENTPLUS_AUTH_DEBUG = (
+    os.getenv("EVENTPLUS_AUTH_DEBUG", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 
 def _configure_flet_web_oauth_endpoint() -> None:

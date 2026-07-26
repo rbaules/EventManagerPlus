@@ -971,3 +971,281 @@ No se realizaron cambios automáticos en Supabase o Google Cloud.
 ### Siguiente tarea recomendada
 
 Antes de despliegue público, definir el ciclo de vida de sesión web —recuperación, refresh, expiración y logout— y después integrar la aplicación en la topología ASGI/HTTPS definitiva con una estrategia explícita para state y sesiones en múltiples workers. No se implementó ninguna de esas tareas en este incremento.
+
+## Resultado de la Tarea 3 — Ciclo de vida y recuperación de sesión web
+
+**Fecha:** 26 de julio de 2026.
+
+### Comportamiento anterior
+
+Cada `Page` ya recibía un cliente Supabase exclusivo, pero la aplicación no tenía un controlador explícito para coordinar sesión, refresh, contexto, logout y tareas tardías. Después del OAuth se consultaba directamente el usuario y se construía Home. El logout limpiaba el contexto y llamaba `sign_out()`, pero no coordinaba tareas de refresh ni intentos OAuth.
+
+No existía restauración segura entre una nueva Page y otra. Los tokens permanecían solamente en la memoria interna del cliente `supabase-py` de la Page.
+
+### Auditoría de Flet 0.85.3
+
+La inspección del código instalado confirmó:
+
+- Flet conserva una `Session` y su `Page` en memoria después de una desconexión durante `FLET_SESSION_TIMEOUT`; el valor predeterminado es 3600 segundos.
+- El cliente puede solicitar reconexión enviando el identificador de sesión Flet. Si la sesión sigue en memoria y no tiene otra conexión, Flet adjunta el nuevo WebSocket a la misma Page.
+- Existen `page.on_disconnect`, `page.on_connect` y `page.on_close`.
+- `on_disconnect` no destruye inmediatamente la Page; `on_close` ocurre cuando Flet elimina la sesión expirada.
+- La entrada dinámica actual no recibe objetos FastAPI `Request`/`Response` ni ofrece una API general para emitir una cookie de sesión propia.
+- Flet usa una cookie `flet_oauth_state` HttpOnly, SameSite Strict y temporal solamente para una variante de retorno OAuth. En 0.85.3 aparece con `Secure=False` y no representa una sesión EventPlus ni puede reutilizarse para persistir Supabase Auth.
+- El identificador de sesión Flet no es una cookie de autenticación EventPlus y no sustituye una cookie opaca, HttpOnly y Secure respaldada por un repositorio server-side.
+
+Por estas limitaciones no se guardaron access tokens ni refresh tokens en almacenamiento accesible al navegador y no se simuló persistencia entre Pages.
+
+### Arquitectura implementada
+
+`services/session_service.py` incorpora `PageSessionController`. Cada instancia pertenece a exactamente una Page y contiene:
+
+- el cliente Supabase exclusivo de esa Page;
+- usuario Auth y contexto EventPlus actuales;
+- estado autenticado, conectado y cerrado;
+- lock exclusivo de refresh;
+- generación de sesión para invalidar resultados tardíos;
+- reclamación única de Home por generación;
+- tareas de monitorización pertenecientes a la Page;
+- referencia al intento OAuth pendiente;
+- limpieza coordinada.
+
+No existe controlador autenticado global.
+
+La interfaz `SessionRepository` deja preparado el límite futuro para crear, restaurar y eliminar sesiones server-side mediante identificadores opacos. No se implementó un repositorio en memoria porque la entrada dinámica actual no puede entregar de forma segura el identificador mediante una cookie HttpOnly propia. Tampoco se añadieron Redis, archivos o tablas.
+
+### Validación previa a Home
+
+Antes de reclamar Home se verifica:
+
+1. `supabase.auth.get_session()` devuelve una sesión válida.
+2. `supabase.auth.get_user()` devuelve un usuario Auth identificable.
+3. `cargar_contexto_usuario()` acepta el usuario.
+4. `usr_usuario_auth_uuid` coincide con Auth.
+5. El usuario EventPlus está activo.
+6. Existen cuentas permitidas y la cuenta actual pertenece a ellas.
+7. Si hay evento actual, pertenece a los eventos permitidos.
+8. La generación no cambió por logout mientras se realizaban consultas.
+
+Una sola operación puede reclamar la construcción de Home. Esto evita dos Homes si restauración y callback OAuth coinciden.
+
+### Manejo de refresh
+
+En `supabase-py` 2.31.0, `auth.get_session()` comprueba la expiración y llama internamente al refresh usando el refresh token guardado en el propio cliente cuando la sesión está vencida o próxima a vencer.
+
+EventPlus ejecuta esa operación bajo un lock por Page. Dos comprobaciones simultáneas de la misma Page producen como máximo un refresh efectivo: la segunda observa la sesión ya renovada. Dos Pages usan locks y clientes diferentes.
+
+Después del login se inicia mediante `Page.run_task()` una comprobación periódica no bloqueante. Durante desconexión queda pausada lógicamente; al reconectar, `on_connect` vuelve a validar la misma sesión retenida por Flet.
+
+Si refresh o validación Auth falla:
+
+- se invalida el estado autenticado de esa Page;
+- se elimina el contexto del store;
+- se ejecuta logout controlado;
+- se cancela la monitorización;
+- se reconstruye Login con el mensaje “Tu sesión venció o dejó de ser válida. Inicia sesión nuevamente.”;
+- una tarea tardía no puede reclamar Home porque su generación ya no coincide.
+
+No se imprimen tokens.
+
+### Manejo de logout y cierre
+
+Logout:
+
+- incrementa la generación antes de esperar operaciones de red;
+- marca la Page como no autenticada;
+- limpia usuario y contexto;
+- elimina `usuario_contexto`, eventos y diagnóstico del store;
+- cancela las tareas registradas;
+- cancela e invalida el intento OAuth pendiente;
+- ejecuta `sign_out()` solamente sobre el cliente de esa Page;
+- reconstruye Login.
+
+`on_close` cancela tareas y limpia estado local sin compartir datos con otras Pages. `on_disconnect` no destruye la sesión, porque Flet puede reconectarla durante su ventana server-side.
+
+### Almacenamiento utilizado
+
+- Tokens Supabase: únicamente dentro del cliente `supabase-py` de la Page, en memoria del proceso.
+- Contexto EventPlus: `page.session.store`, sin access token ni refresh token.
+- Navegador: no se escriben tokens en localStorage, sessionStorage, client storage, shared preferences, controles, URLs ni cookies propias.
+- Archivos y logs: no se escriben tokens.
+- Globals: no existen clientes, tokens ni controladores autenticados globales.
+
+### Comportamiento ante recarga y nuevas Pages
+
+| Escenario | Resultado diseñado | Evidencia |
+|---|---|---|
+| Corte temporal y reconexión de la misma sesión Flet | Conserva la Page/client en memoria dentro del timeout; `on_connect` revalida Auth | API/código instalado de Flet; lógica automatizada del controlador. Requiere prueba manual de navegador. |
+| F5 que Flet reconecte a la misma Session | Puede conservar Home y revalidar | Depende del identificador que envíe el cliente Flet; no se afirma como prueba manual completada. |
+| F5 que cree una Page nueva | Vuelve a Login | No hay persistencia insegura de tokens. |
+| Pestaña nueva | Vuelve a Login si crea otra Page | No hay restauración entre Pages. |
+| Duplicar pestaña | Comportamiento del identificador cliente debe comprobarse manualmente; no se comparte identidad mediante EventPlus | No probado manualmente. |
+| Cerrar y reabrir pestaña | Normalmente nueva Page y Login | No hay cookie EventPlus. |
+| Reiniciar navegador | Login | No hay persistencia de Auth en navegador. |
+| Reiniciar servidor | Login | Cliente y sesión Flet estaban en memoria del proceso. |
+| Access token vencido dentro de Page activa | Refresh serializado mediante el cliente de esa Page | Prueba automatizada. |
+| Refresh token inválido/revocado | Limpieza y retorno controlado a Login | Prueba automatizada. |
+
+### Pruebas automatizadas
+
+`scripts/test_web_session_lifecycle.py` usa dobles y valida:
+
+- sesión válida y sesión ausente;
+- ausencia de refresh innecesario;
+- refresh válido de sesión vencida;
+- refresh inválido y limpieza;
+- refresh concurrente único;
+- refresh aislado en dos Pages;
+- logout aislado;
+- resultado tardío después de logout;
+- reclamación única de Home;
+- rechazo de contexto cruzado;
+- rechazo de usuario inactivo;
+- ausencia de tokens en client storage, store y logs;
+- cancelación de tareas en logout y cierre;
+- imposibilidad de restaurar A dentro de B sin sesión propia.
+
+Son pruebas automatizadas; no equivalen a OAuth real, F5 real ni dos navegadores reales.
+
+### Pruebas manuales pendientes
+
+Para FULL web deben ejecutarse y registrar por separado:
+
+1. Login normal real.
+2. F5 y confirmación de si Flet reconecta la misma Session.
+3. Duplicar pestaña.
+4. Abrir una pestaña nueva.
+5. Cerrar y reabrir pestaña.
+6. Logout y F5.
+7. Dos navegadores con usuarios distintos.
+8. Logout A mientras B permanece activo.
+9. Invalidar/revocar refresh token real.
+10. Cortar y recuperar temporalmente la conexión.
+
+No se afirma que estos casos manuales hayan pasado en esta tarea.
+
+### Necesidad de ASGI
+
+La persistencia segura entre una nueva Page, reinicio del navegador o reinicio del proceso requiere la siguiente tarea de arquitectura ASGI:
+
+- acceso controlado a request/response;
+- cookie con identificador opaco, HttpOnly, Secure y SameSite apropiado;
+- rotación y protección contra fijación;
+- repositorio server-side con expiración y eliminación por logout;
+- estrategia multiworker;
+- protección CSRF según rutas y SameSite;
+- ningún token Supabase expuesto al navegador.
+
+La memoria del proceso no se presentará como solución productiva.
+
+### Corrección posterior a las pruebas manuales
+
+Las pruebas manuales de la Tarea 3 detectaron dos defectos:
+
+1. `supabase.auth.sign_out()` sin opciones usa scope `global` en supabase-py 2.31.0. Logout en una Page podía revocar los refresh tokens de otras Pages del mismo usuario.
+2. En determinadas condiciones del navegador, un exchange OAuth podía establecer una sesión Supabase aunque EventPlus ya hubiera cancelado o expirado el intento, dejando una sesión residual para el siguiente login.
+
+#### Logout local
+
+El logout normal usa ahora exactamente:
+
+```python
+supabase.auth.sign_out({"scope": "local"})
+```
+
+Esto revoca el refresh token de la sesión actual y elimina la sesión almacenada en el cliente de esa Page, sin revocar las demás sesiones del mismo usuario.
+
+`sign_out_global_session()` y `PageSessionController.logout_global()` quedan como funciones internas separadas para una futura operación administrativa, sin opción visual actual. Utilizan:
+
+```python
+supabase.auth.sign_out({"scope": "global"})
+```
+
+El logout global revoca todos los refresh tokens del usuario. En ambos scopes, los access tokens JWT ya emitidos no pueden revocarse individualmente mediante esta API y siguen siendo técnicamente válidos hasta su expiración; por eso su duración debe mantenerse limitada y la autorización de datos seguirá dependiendo de RLS en la tarea correspondiente.
+
+#### Selección explícita de cuenta Google
+
+El flujo OAuth web agrega a `sign_in_with_oauth()`:
+
+```python
+"query_params": {"prompt": "select_account"}
+```
+
+Supabase incorpora `prompt=select_account` a la autorización Google. No se utiliza `prompt=consent`. La opción se aplica únicamente al adaptador web; los flujos desktop y Android conservan su construcción anterior.
+
+#### Sesión residual y carrera callback/timeout
+
+El intento permanece en estado `pending` mientras `exchange_code_for_session()` se ejecuta y registra internamente que el exchange ya comenzó. Solo un callback puede iniciar el intercambio.
+
+Al finalizar:
+
+- si el intento todavía está pendiente, gana la transición única a `completed`, cancela el timeout y continúa a Home;
+- si timeout o Cancelar ya ganaron, la transición a `completed` se rechaza, se ejecuta logout local sobre el cliente que pudo haber recibido la sesión y no se construye Home;
+- si el exchange falla después de modificar parcialmente Auth, también se ejecuta logout local;
+- si la coroutine del callback se cancela mientras el trabajo síncrono continúa, EventPlus espera su terminación y limpia cualquier sesión creada antes de propagar la cancelación.
+
+Antes de abrir un OAuth web nuevo, `PageSessionController.clear_residual_session()` consulta el cliente. Si EventPlus no está autenticado pero Supabase conserva una sesión, se clasifica como huérfana, se elimina con scope local y se limpia el contexto antes de generar un state nuevo.
+
+Si Auth se completa pero falla la validación o construcción de `usuario_contexto`, EventPlus cierra localmente la sesión, invalida su generación, limpia el contexto y vuelve a Login. El siguiente intento no hereda esa sesión.
+
+#### Pruebas agregadas
+
+Las suites OAuth y lifecycle incluyen ahora:
+
+- logout local A sin afectar B para el mismo usuario;
+- función global interna que sí revoca las sesiones simuladas del usuario;
+- `prompt=select_account` en OAuth web;
+- state nuevo después de logout/reintento;
+- un solo Home ante callback concurrente;
+- exchange que termina después de timeout;
+- exchange que termina después de Cancelar;
+- logout local y cliente vacío tras una carrera perdida;
+- limpieza de sesión residual antes de OAuth;
+- limpieza posterior a contexto EventPlus inválido;
+- revalidación de B después del logout local de A;
+- aislamiento de usuarios distintos;
+- ausencia de codes y tokens en logs.
+
+El comportamiento esperado con dos Pages del mismo usuario es que logout local A devuelva A a Login, mientras B conserva su refresh token, sigue autenticada y supera F5/revalidación mientras su propia sesión continúe válida.
+
+### Corrección del primer login en navegador invitado
+
+#### Defecto y causa raíz
+
+En una Page sin cookies ni sesión Google previa, el primer intercambio puede tardar más que en el segundo intento. En Flet 0.85.3, el callback integrado invoca `authorization.request_token(code)` y espera que termine antes de emitir `page.on_login`. EventPlus iniciaba el timeout alrededor de `Page.login()` y solo lo cancelaba después del intercambio o al entrar en `on_login`. Por tanto, el timeout podía expirar el intento mientras `exchange_code_for_session()` ya estaba procesando el primer callback. El segundo intento parecía resolverlo porque Google ya conservaba su propia sesión y el intercambio terminaba más rápido.
+
+No existe doble intercambio: el mecanismo Auth de Flet delega el único intercambio a `SupabaseWebAuthorization.request_token()`, que usa el cliente Supabase exclusivo de esa Page. `page.on_login` permanece asignado antes de `page.login()` y no se reemplaza durante el popup.
+
+#### Máquina de estados e instrumentación
+
+Cada intento de la Page usa una sola máquina:
+
+`CREATED → WAITING_CALLBACK → CALLBACK_RECEIVED → SESSION_EXCHANGING → CONTEXT_BUILDING → HOME_BUILDING → COMPLETED`
+
+También puede terminar en `CANCELLED`, `EXPIRED` o `FAILED`. Solo `CREATED` y `WAITING_CALLBACK` pueden expirar. La referencia al intento vive en `PageSessionController`, además de la closure de la vista, por lo que una reconexión de la misma Page conserva el intento y su correlación.
+
+`SupabaseWebAuthorization.request_token()` registra la recepción efectiva del callback y cancela el timeout **antes** de iniciar `exchange_code_for_session()`. Cuando luego llega `on_login`, el handler verifica la sesión mediante reintentos cortos y acotados, construye el contexto y reclama Home una sola vez. Un error de callback, intercambio, contexto o Home termina como `FAILED`, limpia localmente Auth y muestra un mensaje distinto del timeout sin callback.
+
+Con `EVENTPLUS_AUTH_DEBUG=true` se emiten fases estructuradas seguras: creación y click, llamada a Page.login, recepción de callback/on_login, comprobación booleana de sesión, contexto, reclamación de Home, cancelación/vencimiento de timeout, estado terminal y rechazo tardío. Solo incluyen correlación y Page abreviadas, tiempo monotónico, estado, conexión, plataforma y booleanos permitidos. No incluyen code, tokens, email, payload ni secretos. El valor predeterminado es `false`.
+
+#### Pruebas automatizadas
+
+`scripts/test_web_oauth_flow.py` y `scripts/test_web_session_lifecycle.py` cubren el orden del handler, primer intento, callback próximo al timeout, intercambio/contexto lentos, estados no expirables, fallo limpio, reintento posterior, reconexión con el mismo intento, aparición tardía acotada de la sesión, ausencia permanente de sesión, reclamación única de Home y logs sin credenciales.
+
+#### Pruebas manuales
+
+La verificación real del primer login con credenciales en Edge Invitado y Chrome Incógnito requiere interacción del usuario y confirmar externamente que Netskope está detenido. No se considera aprobada hasta ejecutar ambos navegadores desde cero y observar Home en el primer intento. Los logs de diagnóstico deben habilitarse solo durante esa prueba y revisarse sin conservar información sensible.
+
+### Limitaciones pendientes
+
+- No existe persistencia Auth entre Pages nuevas.
+- Un reinicio del proceso elimina las sesiones activas.
+- La reconexión depende de la retención server-side de Flet y del identificador enviado por su cliente.
+- No se sincroniza logout entre sesiones Flet distintas del mismo usuario.
+- No se incorporó ASGI, cookie propia ni repositorio de sesiones.
+- RLS continúa pendiente y sigue siendo obligatoria antes de exposición pública.
+- Realtime, dominio público, proxy e infraestructura no fueron modificados.
+
+### Siguiente tarea recomendada
+
+Exportar e integrar EventPlus como aplicación ASGI y añadir una sesión server-side respaldada por identificador opaco en cookie HttpOnly/Secure/SameSite. Esa tarea debe definir expiración, rotación, invalidación, protección contra fijación, estrategia multiworker y pruebas reales de F5/nuevas pestañas antes de afirmar persistencia web completa.

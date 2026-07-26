@@ -80,6 +80,9 @@ def main() -> int:
             "ft.Page.web": hasattr(ft.Page, "web"),
             "ft.Page.login": hasattr(ft.Page, "login"),
             "ft.Page.run_task": hasattr(ft.Page, "run_task"),
+            "ft.Page.on_connect": hasattr(ft.Page, "on_connect"),
+            "ft.Page.on_disconnect": hasattr(ft.Page, "on_disconnect"),
+            "ft.Page.on_close": hasattr(ft.Page, "on_close"),
             "ft.Page.on_login": hasattr(ft.Page, "on_login"),
             "ft.LoginEvent": hasattr(ft, "LoginEvent"),
             "ft.Page.login.authorization": (

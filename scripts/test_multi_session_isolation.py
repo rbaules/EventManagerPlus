@@ -29,8 +29,9 @@ class FakeAuth:
         self.token = f"token-{identity}"
         self.sign_out_calls = 0
 
-    def sign_out(self) -> None:
+    def sign_out(self, options: dict[str, str] | None = None) -> None:
         self.sign_out_calls += 1
+        assert options == {"scope": "local"}
         self.identity = ""
         self.token = ""
 
@@ -106,7 +107,9 @@ def test_main_creates_exactly_one_client_per_page() -> tuple[FakeClient, FakeCli
 
     try:
         app.create_supabase_client = factory
-        app.build_login_view = lambda page, client: injected.append((page, client))
+        app.build_login_view = lambda page, client, **_kwargs: injected.append(
+            (page, client)
+        )
         page_a = DummyPage()
         page_b = DummyPage()
         app.main(page_a)

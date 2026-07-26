@@ -4,6 +4,7 @@ import asyncio
 import queue
 import secrets
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
@@ -15,6 +16,7 @@ from config import (
     CALLBACK_PORT,
     EVENTPLUS_WEB_OAUTH_REDIRECT_URL,
     EVENTPLUS_WEB_OAUTH_STATE_TTL_SECONDS,
+    EVENTPLUS_AUTH_DEBUG,
     SUPABASE_OAUTH_REDIRECT_URL,
     get_oauth_redirect_url,
     is_android_platform,
@@ -25,10 +27,57 @@ from services.response_utils import pretty, safe_get, to_dict
 OAUTH_STRATEGY_WEB = "web"
 OAUTH_STRATEGY_DESKTOP = "desktop"
 OAUTH_STRATEGY_ANDROID = "android"
-WEB_OAUTH_ATTEMPT_PENDING = "pending"
-WEB_OAUTH_ATTEMPT_COMPLETED = "completed"
-WEB_OAUTH_ATTEMPT_CANCELLED = "cancelled"
-WEB_OAUTH_ATTEMPT_EXPIRED = "expired"
+WEB_OAUTH_ATTEMPT_CREATED = "CREATED"
+WEB_OAUTH_ATTEMPT_WAITING_CALLBACK = "WAITING_CALLBACK"
+WEB_OAUTH_ATTEMPT_CALLBACK_RECEIVED = "CALLBACK_RECEIVED"
+WEB_OAUTH_ATTEMPT_SESSION_EXCHANGING = "SESSION_EXCHANGING"
+WEB_OAUTH_ATTEMPT_CONTEXT_BUILDING = "CONTEXT_BUILDING"
+WEB_OAUTH_ATTEMPT_HOME_BUILDING = "HOME_BUILDING"
+WEB_OAUTH_ATTEMPT_COMPLETED = "COMPLETED"
+WEB_OAUTH_ATTEMPT_CANCELLED = "CANCELLED"
+WEB_OAUTH_ATTEMPT_EXPIRED = "EXPIRED"
+WEB_OAUTH_ATTEMPT_FAILED = "FAILED"
+WEB_OAUTH_ATTEMPT_PENDING = WEB_OAUTH_ATTEMPT_WAITING_CALLBACK
+
+WEB_OAUTH_TERMINAL_STATES = {
+    WEB_OAUTH_ATTEMPT_COMPLETED,
+    WEB_OAUTH_ATTEMPT_CANCELLED,
+    WEB_OAUTH_ATTEMPT_EXPIRED,
+    WEB_OAUTH_ATTEMPT_FAILED,
+}
+
+WEB_OAUTH_ALLOWED_TRANSITIONS = {
+    WEB_OAUTH_ATTEMPT_CREATED: {
+        WEB_OAUTH_ATTEMPT_WAITING_CALLBACK,
+        WEB_OAUTH_ATTEMPT_CANCELLED,
+        WEB_OAUTH_ATTEMPT_EXPIRED,
+        WEB_OAUTH_ATTEMPT_FAILED,
+    },
+    WEB_OAUTH_ATTEMPT_WAITING_CALLBACK: {
+        WEB_OAUTH_ATTEMPT_CALLBACK_RECEIVED,
+        WEB_OAUTH_ATTEMPT_CANCELLED,
+        WEB_OAUTH_ATTEMPT_EXPIRED,
+        WEB_OAUTH_ATTEMPT_FAILED,
+    },
+    WEB_OAUTH_ATTEMPT_CALLBACK_RECEIVED: {
+        WEB_OAUTH_ATTEMPT_SESSION_EXCHANGING,
+        WEB_OAUTH_ATTEMPT_CANCELLED,
+        WEB_OAUTH_ATTEMPT_FAILED,
+    },
+    WEB_OAUTH_ATTEMPT_SESSION_EXCHANGING: {
+        WEB_OAUTH_ATTEMPT_CONTEXT_BUILDING,
+        WEB_OAUTH_ATTEMPT_CANCELLED,
+        WEB_OAUTH_ATTEMPT_FAILED,
+    },
+    WEB_OAUTH_ATTEMPT_CONTEXT_BUILDING: {
+        WEB_OAUTH_ATTEMPT_HOME_BUILDING,
+        WEB_OAUTH_ATTEMPT_FAILED,
+    },
+    WEB_OAUTH_ATTEMPT_HOME_BUILDING: {
+        WEB_OAUTH_ATTEMPT_COMPLETED,
+        WEB_OAUTH_ATTEMPT_FAILED,
+    },
+}
 
 
 class WebOAuthAttempt:
@@ -37,16 +86,65 @@ class WebOAuthAttempt:
     def __init__(self, page: Any) -> None:
         self.attempt_id = secrets.token_urlsafe(24)
         self.created_at = datetime.now(timezone.utc)
-        self.status = WEB_OAUTH_ATTEMPT_PENDING
+        self.started_monotonic = time.monotonic()
+        self.status = WEB_OAUTH_ATTEMPT_CREATED
         self.page = page
         self.authorization: SupabaseWebAuthorization | None = None
         self.timeout_task: Any = None
+        self.exchange_started = False
+        self.connected = True
         self._transition_lock = threading.Lock()
+        self.trace("attempt_created")
 
     @property
     def pending(self) -> bool:
         with self._transition_lock:
-            return self.status == WEB_OAUTH_ATTEMPT_PENDING
+            return self.status not in WEB_OAUTH_TERMINAL_STATES
+
+    @property
+    def timeout_eligible(self) -> bool:
+        with self._transition_lock:
+            return self.status in {
+                WEB_OAUTH_ATTEMPT_CREATED,
+                WEB_OAUTH_ATTEMPT_WAITING_CALLBACK,
+            }
+
+    def trace(self, phase: str, **flags: Any) -> None:
+        if not EVENTPLUS_AUTH_DEBUG:
+            return
+        allowed_flags = {
+            "on_login",
+            "has_error",
+            "session_present",
+            "home_claimed",
+            "timeout_cancelled",
+            "timeout_fired",
+            "connected",
+        }
+        safe_flags = " ".join(
+            f"{key}={bool(value)}"
+            for key, value in flags.items()
+            if key in allowed_flags
+        )
+        elapsed = time.monotonic() - self.started_monotonic
+        page_ref = hex(id(self.page))[-6:]
+        platform = str(getattr(self.page, "platform", "unknown"))
+        web = bool(getattr(self.page, "web", False))
+        suffix = f" {safe_flags}" if safe_flags else ""
+        print(
+            "[AUTH_FLOW]",
+            f"cid={self.attempt_id[:8]}",
+            f"page={page_ref}",
+            f"phase={phase}",
+            f"t={elapsed:.3f}",
+            f"state={self.status}",
+            f"connected={self.connected}",
+            f"platform={platform}",
+            f"web={web}{suffix}",
+        )
+
+    def set_connected(self, connected: bool) -> None:
+        self.connected = connected
 
     def bind_authorization(self, authorization: SupabaseWebAuthorization) -> None:
         with self._transition_lock:
@@ -63,25 +161,58 @@ class WebOAuthAttempt:
             self.timeout_task = timeout_task
 
     def transition(self, target_status: str) -> bool:
-        if target_status not in {
-            WEB_OAUTH_ATTEMPT_COMPLETED,
-            WEB_OAUTH_ATTEMPT_CANCELLED,
-            WEB_OAUTH_ATTEMPT_EXPIRED,
-        }:
-            raise ValueError("Estado terminal OAuth web no soportado.")
-
         with self._transition_lock:
-            if self.status != WEB_OAUTH_ATTEMPT_PENDING:
+            allowed = WEB_OAUTH_ALLOWED_TRANSITIONS.get(self.status, set())
+            if target_status not in allowed:
                 return False
             self.status = target_status
             authorization = self.authorization
 
         if (
             target_status
-            in {WEB_OAUTH_ATTEMPT_CANCELLED, WEB_OAUTH_ATTEMPT_EXPIRED}
+            in {
+                WEB_OAUTH_ATTEMPT_CANCELLED,
+                WEB_OAUTH_ATTEMPT_EXPIRED,
+                WEB_OAUTH_ATTEMPT_FAILED,
+            }
             and authorization is not None
         ):
             authorization.invalidate()
+        self.trace("attempt_terminal_state" if target_status in WEB_OAUTH_TERMINAL_STATES else target_status.lower())
+        return True
+
+    def begin_exchange(self) -> bool:
+        with self._transition_lock:
+            if self.status not in {
+                WEB_OAUTH_ATTEMPT_CREATED,
+                WEB_OAUTH_ATTEMPT_WAITING_CALLBACK,
+            } or self.exchange_started:
+                return False
+            self.status = WEB_OAUTH_ATTEMPT_CALLBACK_RECEIVED
+            self.exchange_started = True
+        self.trace("on_login_success_or_error", on_login=False, has_error=False)
+        self.cancel_timeout()
+        with self._transition_lock:
+            if self.status != WEB_OAUTH_ATTEMPT_CALLBACK_RECEIVED:
+                return False
+            self.status = WEB_OAUTH_ATTEMPT_SESSION_EXCHANGING
+        self.trace("session_exchanging")
+        return True
+
+    def mark_waiting_callback(self) -> bool:
+        return self.transition(WEB_OAUTH_ATTEMPT_WAITING_CALLBACK)
+
+    def mark_callback_received(self, *, has_error: bool) -> bool:
+        with self._transition_lock:
+            if self.status in WEB_OAUTH_TERMINAL_STATES:
+                return False
+            if self.status in {
+                WEB_OAUTH_ATTEMPT_CREATED,
+                WEB_OAUTH_ATTEMPT_WAITING_CALLBACK,
+            }:
+                self.status = WEB_OAUTH_ATTEMPT_CALLBACK_RECEIVED
+        self.trace("on_login_enter", on_login=True, has_error=has_error)
+        self.cancel_timeout()
         return True
 
     def cancel_timeout(self) -> None:
@@ -89,7 +220,9 @@ class WebOAuthAttempt:
             timeout_task = self.timeout_task
             self.timeout_task = None
         if timeout_task is not None and not timeout_task.done():
+            self.trace("timeout_cancel_requested")
             timeout_task.cancel()
+            self.trace("timeout_cancelled", timeout_cancelled=True)
 
 
 def detect_oauth_strategy(page: Any) -> str:
@@ -165,6 +298,7 @@ class SupabaseWebAuthorization:
         authorization_url = get_oauth_url(
             self.provider.supabase,
             redirect_url=redirect_url,
+            select_account=True,
         )
         return authorization_url, self.state
 
@@ -183,7 +317,7 @@ class SupabaseWebAuthorization:
 
     async def request_token(self, code: str) -> None:
         attempt = self.provider.attempt
-        if attempt is not None and not attempt.transition(WEB_OAUTH_ATTEMPT_COMPLETED):
+        if attempt is not None and not attempt.begin_exchange():
             raise ValueError("Intento OAuth web ya no esta activo.")
         if self.consumed:
             raise ValueError("Callback OAuth ya fue procesado.")
@@ -192,13 +326,51 @@ class SupabaseWebAuthorization:
         if not code:
             raise ValueError("Callback OAuth sin codigo.")
         self.consumed = True
-        if attempt is not None:
-            attempt.cancel_timeout()
-        await asyncio.to_thread(
-            exchange_code_for_session,
-            self.provider.supabase,
-            code,
+        exchange_task = asyncio.create_task(
+            asyncio.to_thread(
+                exchange_code_for_session,
+                self.provider.supabase,
+                code,
+            )
         )
+        try:
+            await asyncio.shield(exchange_task)
+        except asyncio.CancelledError:
+            await exchange_task
+            if attempt is not None and not attempt.pending:
+                await asyncio.to_thread(
+                    sign_out_local_session,
+                    self.provider.supabase,
+                )
+            raise
+        except Exception:
+            if attempt is not None:
+                attempt.transition(WEB_OAUTH_ATTEMPT_FAILED)
+                attempt.cancel_timeout()
+            await asyncio.to_thread(
+                sign_out_local_session,
+                self.provider.supabase,
+            )
+            raise
+
+        if attempt is not None:
+            if attempt.status != WEB_OAUTH_ATTEMPT_SESSION_EXCHANGING:
+                await asyncio.to_thread(
+                    sign_out_local_session,
+                    self.provider.supabase,
+                )
+                attempt.trace("late_event_rejected")
+                raise ValueError("Intento OAuth web ya no esta activo.")
+            try:
+                session_present = (
+                    self.provider.supabase.auth.get_session() is not None
+                )
+            except Exception:
+                session_present = False
+            attempt.trace(
+                "supabase_session_present",
+                session_present=session_present,
+            )
 
     async def dehydrate_token(self, saved_token: str) -> None:
         del saved_token
@@ -316,12 +488,20 @@ def parse_oauth_callback_url(url: str) -> dict[str, Any]:
     }
 
 
-def get_oauth_url(supabase: Any, redirect_url: str | None = None) -> str:
+def get_oauth_url(
+    supabase: Any,
+    redirect_url: str | None = None,
+    *,
+    select_account: bool = False,
+) -> str:
     redirect_to = redirect_url or get_oauth_redirect_url()
+    options: dict[str, Any] = {"redirect_to": redirect_to}
+    if select_account:
+        options["query_params"] = {"prompt": "select_account"}
     response = supabase.auth.sign_in_with_oauth(
         {
             "provider": "google",
-            "options": {"redirect_to": redirect_to},
+            "options": options,
         }
     )
 
@@ -356,4 +536,9 @@ def get_current_user(supabase: Any) -> Any:
 
 
 def sign_out_local_session(supabase: Any) -> None:
-    supabase.auth.sign_out()
+    supabase.auth.sign_out({"scope": "local"})
+
+
+def sign_out_global_session(supabase: Any) -> None:
+    """Revoke all refresh tokens for the user; reserved for a future UI."""
+    supabase.auth.sign_out({"scope": "global"})

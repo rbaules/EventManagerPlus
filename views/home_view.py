@@ -36,6 +36,7 @@ from services.invitado_service import (
     puede_reversar_llegada,
     reversar_llegada,
 )
+from services.session_service import PageSessionController
 from views.arrivals_view import arrivals_view
 from views.dashboard_view import dashboard_view
 from views.invitados_view import invitados_view
@@ -64,6 +65,7 @@ def build_home_view(
     page: ft.Page,
     contexto_usuario: dict[str, Any],
     supabase: Any = None,
+    session_controller: PageSessionController | None = None,
 ) -> ft.Control:
     checkin_mode = is_checkin_mode()
     state: dict[str, Any] = {
@@ -1066,10 +1068,13 @@ def build_home_view(
 
     def logout() -> None:
         print("[EVENTOS][INFO] Cierre de sesion solicitado desde menu de usuario.")
-        try:
-            sign_out_local_session(supabase)
-        except Exception:
-            pass
+        if session_controller is not None:
+            session_controller.logout()
+        else:
+            try:
+                sign_out_local_session(supabase)
+            except Exception:
+                pass
         try:
             limpiar_contexto_sesion(page.session.store)
             print("[EVENTOS][INFO] Contexto de evento eliminado durante logout.")
@@ -1079,7 +1084,11 @@ def build_home_view(
         page.clean()
         from views.login_view import build_login_view
 
-        build_login_view(page, supabase)
+        build_login_view(
+            page,
+            supabase,
+            session_controller=session_controller,
+        )
         page.update()
 
     configure_navigation_bar()
