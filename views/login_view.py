@@ -644,6 +644,21 @@ def build_login_view(
 
     page.on_login = web_login_completed
 
+    async def prepare_server_session_after_exchange() -> None:
+        validation = await asyncio.to_thread(
+            session_controller.validate_current_session,
+            load_context=True,
+            claim_home=False,
+        )
+        if not validation.ok:
+            raise UsuarioContextoError(
+                validation.message or SESSION_INVALID_MESSAGE
+            )
+        if not session_controller.persist_server_session():
+            raise RuntimeError(
+                "No se pudo crear la sesion web server-side."
+            )
+
     async def run_web_login_flow() -> None:
         nonlocal current_web_attempt
         if current_web_attempt is not None and current_web_attempt.pending:
@@ -667,6 +682,7 @@ def build_login_view(
                 supabase,
                 redirect_url=EVENTPLUS_WEB_OAUTH_REDIRECT_URL,
                 attempt=attempt,
+                on_session_exchanged=prepare_server_session_after_exchange,
             )
             attempt.mark_waiting_callback()
             if attempt.timeout_eligible:

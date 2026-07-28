@@ -26,9 +26,15 @@ SUPABASE_OAUTH_REDIRECT_URL = os.getenv(
     "SUPABASE_OAUTH_REDIRECT_URL",
     "http://localhost:8765/auth/callback",
 ).strip()
+_DEFAULT_WEB_OAUTH_PORT = (
+    "8560"
+    if os.getenv("EVENTPLUS_ASGI", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+    else "8550"
+)
 EVENTPLUS_WEB_OAUTH_REDIRECT_URL = os.getenv(
     "EVENTPLUS_WEB_OAUTH_REDIRECT_URL",
-    "http://127.0.0.1:8550/auth/callback",
+    f"http://127.0.0.1:{_DEFAULT_WEB_OAUTH_PORT}/auth/callback",
 ).strip()
 EVENTPLUS_WEB_OAUTH_STATE_TTL_SECONDS = max(
     30,
@@ -42,6 +48,38 @@ EVENTPLUS_AUTH_DEBUG = (
     os.getenv("EVENTPLUS_AUTH_DEBUG", "false").strip().lower()
     in {"1", "true", "yes", "on"}
 )
+EVENTPLUS_SESSION_COOKIE_NAME = (
+    os.getenv("EVENTPLUS_SESSION_COOKIE_NAME", "eventplus_session").strip()
+    or "eventplus_session"
+)
+EVENTPLUS_SESSION_COOKIE_SECURE = (
+    os.getenv("EVENTPLUS_SESSION_COOKIE_SECURE", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+EVENTPLUS_SESSION_COOKIE_SAMESITE = (
+    os.getenv("EVENTPLUS_SESSION_COOKIE_SAMESITE", "lax").strip().lower()
+    or "lax"
+)
+if EVENTPLUS_SESSION_COOKIE_SAMESITE not in {"lax", "strict", "none"}:
+    raise RuntimeError(
+        "EVENTPLUS_SESSION_COOKIE_SAMESITE debe ser lax, strict o none."
+    )
+EVENTPLUS_SESSION_TTL_SECONDS = max(
+    60,
+    int(os.getenv("EVENTPLUS_SESSION_TTL_SECONDS", "28800")),
+)
+EVENTPLUS_SESSION_ROTATE_ON_RESTORE = (
+    os.getenv("EVENTPLUS_SESSION_ROTATE_ON_RESTORE", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+EVENTPLUS_SESSION_REPOSITORY = (
+    os.getenv("EVENTPLUS_SESSION_REPOSITORY", "memory").strip().lower()
+    or "memory"
+)
+if EVENTPLUS_SESSION_REPOSITORY != "memory":
+    raise RuntimeError(
+        "Esta version solo admite EVENTPLUS_SESSION_REPOSITORY=memory."
+    )
 
 
 def _configure_flet_web_oauth_endpoint() -> None:

@@ -7,7 +7,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from config import (
@@ -262,10 +262,12 @@ class SupabaseWebOAuthProvider:
         supabase: Any,
         redirect_url: str,
         attempt: WebOAuthAttempt | None = None,
+        on_session_exchanged: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.supabase = supabase
         self.redirect_url = redirect_url
         self.attempt = attempt
+        self.on_session_exchanged = on_session_exchanged
 
 
 class SupabaseWebAuthorization:
@@ -371,6 +373,18 @@ class SupabaseWebAuthorization:
                 "supabase_session_present",
                 session_present=session_present,
             )
+        if self.provider.on_session_exchanged is not None:
+            try:
+                await self.provider.on_session_exchanged()
+            except Exception:
+                if attempt is not None:
+                    attempt.transition(WEB_OAUTH_ATTEMPT_FAILED)
+                    attempt.cancel_timeout()
+                await asyncio.to_thread(
+                    sign_out_local_session,
+                    self.provider.supabase,
+                )
+                raise
 
     async def dehydrate_token(self, saved_token: str) -> None:
         del saved_token
@@ -385,10 +399,16 @@ async def start_web_oauth(
     supabase: Any,
     redirect_url: str = EVENTPLUS_WEB_OAUTH_REDIRECT_URL,
     attempt: WebOAuthAttempt | None = None,
+    on_session_exchanged: Callable[[], Awaitable[None]] | None = None,
 ) -> Any:
     if detect_oauth_strategy(page) != OAUTH_STRATEGY_WEB:
         raise ValueError("La estrategia OAuth web requiere una Page web.")
-    provider = SupabaseWebOAuthProvider(supabase, redirect_url, attempt)
+    provider = SupabaseWebOAuthProvider(
+        supabase,
+        redirect_url,
+        attempt,
+        on_session_exchanged,
+    )
     return await page.login(
         provider,
         fetch_user=False,

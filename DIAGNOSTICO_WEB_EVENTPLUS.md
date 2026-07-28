@@ -1249,3 +1249,222 @@ La verificación real del primer login con credenciales en Edge Invitado y Chrom
 ### Siguiente tarea recomendada
 
 Exportar e integrar EventPlus como aplicación ASGI y añadir una sesión server-side respaldada por identificador opaco en cookie HttpOnly/Secure/SameSite. Esa tarea debe definir expiración, rotación, invalidación, protección contra fijación, estrategia multiworker y pruebas reales de F5/nuevas pestañas antes de afirmar persistencia web completa.
+
+## Resultado de la Tarea 4 — ASGI y sesión web server-side
+
+**Fecha:** 26 de julio de 2026.
+
+### Arquitectura ASGI
+
+`asgi.py` es una entrada independiente que exporta `app` como aplicación FastAPI. Construye Flet mediante `ft.run(asgi_main, assets_dir="assets", export_asgi_app=True)` y lo monta en `/`. Las entradas existentes de escritorio y CLI web no cambiaron.
+
+La aplicación exterior publica `GET /health` sin crear una Page y `GET /session/logout` para invalidar la sesión y eliminar la cookie. El montaje conserva los endpoints internos de Flet 0.85.3, incluidos `/ws`, `/auth/callback` y los assets. `main()` se ejecuta una sola vez por nueva sesión Flet y no se abre una ventana desktop.
+
+Comando local:
+
+```powershell
+env\Scripts\python.exe -m uvicorn asgi:app --host 127.0.0.1 --port 8560
+```
+
+La entrada ASGI usa por defecto
+`http://127.0.0.1:8560/auth/callback`; para otro host o puerto debe definirse
+`EVENTPLUS_WEB_OAUTH_REDIRECT_URL` y registrarse exactamente en Supabase.
+
+### Cookie EventPlus
+
+La cookie contiene únicamente un identificador generado con `secrets.token_urlsafe(32)`. No contiene tokens, email, UUID Auth, cuenta, evento ni contexto.
+
+Propiedades:
+
+- nombre configurable;
+- `HttpOnly`;
+- `Path=/`;
+- `SameSite` configurable, `lax` por defecto;
+- `Secure` configurable y desactivado únicamente para HTTP local;
+- `Max-Age` igual al TTL server-side.
+
+El middleware ASGI lee la cookie tanto en HTTP como en el handshake WebSocket. Una cookie desconocida, expirada o perteneciente a un repositorio reiniciado se elimina en una respuesta HTTP controlada.
+
+### Repositorio server-side
+
+`services/server_session_service.py` define `SessionRepository` e implementa `InMemorySessionRepository`. El repositorio está encapsulado, utiliza un `RLock`, aplica expiración, genera IDs sin colisión, permite `create`, `get`, `update`, `rotate`, `delete`, `delete_expired`, `bind_page` y `unbind_page`, y coordina restauración/refresh con una sección serializada.
+
+Cada registro conserva exclusivamente en el servidor:
+
+- access token;
+- refresh token;
+- UUID Auth;
+- fechas de creación, actualización y expiración;
+- versión monotónica;
+- estado de revocación;
+- Pages asociadas.
+
+Se almacenan los valores mínimos de la sesión, no el objeto completo de supabase-py. Esto evita conservar referencias a clientes HTTP/Page y permite reemplazar tokens atómicamente después de `set_session()` o refresh. Los campos de tokens están excluidos de la representación del dataclass y nunca se imprimen.
+
+El repositorio en memoria es deliberadamente de un proceso: no sobrevive reinicios y no admite múltiples workers.
+
+### Login y emisión de cookie
+
+Flet 0.85.3 espera `SupabaseWebAuthorization.request_token()` dentro del request HTTP de `/auth/callback`, pero programa `page.on_login` como una tarea posterior. Por ello, EventPlus ejecuta un hook esperado dentro de `request_token()` después del intercambio Supabase y antes de devolver la respuesta:
+
+1. valida la sesión Supabase;
+2. revalida usuario y contexto EventPlus;
+3. crea un ID opaco nuevo, eliminando cualquier ID previo;
+4. guarda tokens exclusivamente en el repositorio;
+5. solicita al middleware agregar `Set-Cookie` a la respuesta del callback;
+6. permite que `on_login` reclame y construya Home.
+
+El ID anónimo o anterior no se reutiliza después del login, evitando fijación de sesión.
+
+### Restauración de una Page nueva
+
+El middleware obtiene el ID opaco del handshake WebSocket. `asgi_main()` crea siempre un cliente Supabase nuevo para esa Page y un `ServerSessionBinding`. Si el registro existe:
+
+1. serializa la operación bajo el repositorio;
+2. llama exactamente `client.auth.set_session(access_token, refresh_token)`, API validada en supabase-py 2.31.0;
+3. obtiene nuevamente sesión y usuario Auth;
+4. vuelve a cargar y validar usuario, cuentas, eventos y contexto EventPlus;
+5. construye Home una sola vez;
+6. actualiza tokens y TTL en el repositorio usando control de versión.
+
+El contexto guardado nunca se acepta como autoridad para restaurar. Si Auth, usuario o contexto fallan, se elimina el registro y se solicita borrar la cookie.
+
+### Refresh y concurrencia
+
+Varias Pages pueden compartir el mismo registro del navegador, pero cada una conserva su cliente Supabase exclusivo. Restauración y validación/refresh se ejecutan bajo la sección serializada del registro en esta implementación de un proceso. Después de la operación se actualizan tokens con `expected_version`; un resultado antiguo no puede sobrescribir una versión nueva.
+
+Logout incrementa primero la generación local, por lo que una restauración o tarea tardía no puede volver a reclamar Home. La eliminación del registro hace que cualquier otra Page asociada falle de forma controlada en su siguiente validación.
+
+`EVENTPLUS_SESSION_ROTATE_ON_RESTORE=true` rota el ID durante el `GET /` anterior al nuevo WebSocket, donde todavía es posible emitir la nueva cookie HTTP. El valor predeterminado es `false`; el login siempre rota creando un ID nuevo.
+
+### Logout
+
+El logout normal:
+
+1. invalida la generación y cancela tareas de la Page;
+2. ejecuta `sign_out({"scope": "local"})` en su cliente;
+3. elimina el registro server-side;
+4. navega a `/session/logout`;
+5. el endpoint responde con `Max-Age=0`, expiración pasada y redirección a `/`;
+6. la nueva Page muestra Login.
+
+Una sesión opaca distinta no se elimina aunque pertenezca al mismo usuario. Varias Pages que comparten el mismo ID representan una sola sesión del navegador y quedan invalidadas conjuntamente.
+
+### Variables
+
+```text
+EVENTPLUS_SESSION_COOKIE_NAME=eventplus_session
+EVENTPLUS_SESSION_COOKIE_SECURE=false
+EVENTPLUS_SESSION_COOKIE_SAMESITE=lax
+EVENTPLUS_SESSION_TTL_SECONDS=28800
+EVENTPLUS_SESSION_ROTATE_ON_RESTORE=false
+EVENTPLUS_SESSION_REPOSITORY=memory
+```
+
+Para HTTPS futuro, `EVENTPLUS_SESSION_COOKIE_SECURE` deberá ser `true`. Esta tarea solo admite `memory`.
+
+Se declararon directamente las versiones instaladas y verificadas:
+
+```text
+fastapi==0.139.0
+starlette==1.3.1
+uvicorn==0.51.0
+```
+
+Flet y Supabase permanecen en 0.85.3 y 2.31.0.
+
+### Pruebas
+
+`scripts/test_asgi_session_persistence.py` prueba health, importación sin desktop, rutas Flet/OAuth/WebSocket, atributos y opacidad de cookie, creación, restauración con clientes distintos, Pages coexistentes, expiración, revocación, rotación, rechazo del ID anterior, refresh serializado, protección contra escritura antigua, logout, aislamiento de IDs distintos, reinicio simulado y ausencia de tokens en logs o almacenamiento cliente.
+
+Las pruebas manuales deseadas —login ASGI real, F5, pestaña nueva, reapertura de pestaña/navegador, dos pestañas, dos navegadores, logout, inspección de cookie, reinicio y expiración— quedan documentadas pero no se afirman como ejecutadas automáticamente.
+
+### Comportamiento después de reinicio
+
+Al reiniciar Uvicorn, el navegador conserva temporalmente la cookie, pero el repositorio nuevo no contiene el ID. El siguiente request elimina la cookie y EventPlus muestra Login sin traceback ni loop. No existe persistencia Auth después del reinicio mientras el repositorio sea en memoria.
+
+### Limitaciones
+
+- Solo desarrollo local y un proceso/worker.
+- Tokens en memoria del proceso, sin cifrado externo ni persistencia.
+- Sin Redis, base de sesiones ni afinidad multiworker.
+- Sin RLS, Realtime, dominio, proxy, HTTPS público o despliegue.
+- La seguridad de datos continúa requiriendo RLS antes de Internet.
+- Las pruebas de navegador y OAuth real siguen siendo manuales.
+
+### Siguiente tarea recomendada
+
+Antes de cualquier exposición pública, implementar y verificar RLS en todas las tablas y operaciones usando `auth.uid()`. Después podrá definirse un repositorio persistente/multiworker y la infraestructura HTTPS, sin reutilizar la implementación en memoria como solución productiva.
+
+### Corrección del logout ASGI en la misma pestaña
+
+#### Defecto y causa raíz
+
+La primera implementación desmontaba el estado del controlador y llamaba:
+
+```python
+page.launch_url(
+    "/session/logout",
+    web_popup_window_name=ft.UrlTarget.SELF,
+)
+```
+
+En Flet 0.85.3, `Page.launch_url()` solo usa `web_popup_window_name` cuando `web_popup_window=True`. En el flujo normal delega a `UrlLauncher.launch_url(url)` sin transmitir el destino. En navegador, el launcher abrió una pestaña nueva; la original nunca navegó por `/session/logout`, mantuvo Home montado y no recibió la eliminación HTTP de la cookie.
+
+#### Navegación corregida
+
+El logout ya no utiliza `page.launch_url()`. Usa directamente la API instalada:
+
+```python
+await ft.UrlLauncher().launch_url(
+    "/session/logout",
+    web_only_window_name=ft.UrlTarget.SELF,
+)
+```
+
+`web_only_window_name` sí forma parte de la firma real de `UrlLauncher.launch_url()` en Flet 0.85.3 y envía `_self` al navegador. Antes de iniciar esa navegación, EventPlus limpia la Page original y monta Login en ella. La ruta ASGI elimina nuevamente cualquier registro identificable, responde con cookie expirada y redirige `/` en esa misma pestaña.
+
+#### Orden terminal del logout
+
+1. `PageSessionController.logout()` adquiere el lock de estado.
+2. Rechaza una segunda ejecución si `logging_out` o `logout_complete` ya están activos.
+3. Marca `logging_out`, incrementa la generación y deja la Page no autenticada.
+4. Elimina usuario, contexto y reclamación de Home.
+5. Extrae y cancela tareas e intento OAuth.
+6. Ejecuta `sign_out({"scope": "local"})` bajo el lock del cliente de esa Page.
+7. `ServerSessionBinding.delete()` desasocia primero la Page y elimina después el registro opaco.
+8. Limpia `page.session.store`.
+9. Marca el logout completado.
+10. `home_view` desmonta Home, construye Login en la Page original y actualiza la UI.
+11. Navega `_self` a `/session/logout`.
+12. El endpoint devuelve `Max-Age=0`, expiración pasada, `Path=/`, los mismos atributos y una redirección 303 a `/`.
+
+La operación es idempotente. Un segundo click no vuelve a revocar Auth, borrar el repositorio ni abrir otra navegación. Un login posterior validado reinicia las marcas terminales para permitir un futuro logout normal.
+
+#### Pestañas y carreras
+
+Dos Pages del mismo navegador pueden compartir el registro opaco. Logout en A lo elimina; B puede conservar visualmente Home hasta su próxima validación, pero `restore_and_run()` ya no encuentra el registro, limpia su binding y no puede recrearlo con tokens antiguos. La generación local impide que refresh o contexto tardíos reclamen Home.
+
+Las operaciones de restauración/refresh y eliminación se serializan con el lock del repositorio. Si una restauración comenzó primero, logout espera su finalización y elimina después la versión resultante. Si logout comenzó primero, la restauración no obtiene registro. En ambos órdenes el estado final es eliminado.
+
+Cookies distintas representan sesiones distintas. Eliminar A no modifica el registro B ni ejecuta sign-out sobre su cliente.
+
+#### Pruebas agregadas
+
+`scripts/test_asgi_session_persistence.py` comprueba además:
+
+- ausencia de `page.launch_url()` en el logout;
+- destino `_self` mediante `web_only_window_name`;
+- una sola ejecución e idempotencia;
+- Page original no autenticada;
+- Home desmontado y Login montado antes de navegar;
+- sign-out local;
+- desasociación y eliminación server-side;
+- atributos de eliminación de cookie;
+- carreras logout/refresh y logout/restauración;
+- imposibilidad de recrear el registro eliminado;
+- comportamiento de Pages con cookie compartida;
+- aislamiento de sesiones con IDs distintos;
+- ausencia de tokens o cookies completas en logs.
+
+Las pruebas manuales con credenciales reales —un solo logout, F5, dos pestañas y dos navegadores— continúan requiriendo interacción del usuario y no se presentan como ejecutadas automáticamente.

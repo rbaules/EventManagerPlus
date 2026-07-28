@@ -1068,8 +1068,14 @@ def build_home_view(
 
     def logout() -> None:
         print("[EVENTOS][INFO] Cierre de sesion solicitado desde menu de usuario.")
+        had_server_session = bool(
+            session_controller is not None
+            and session_controller.has_server_session
+        )
         if session_controller is not None:
-            session_controller.logout()
+            logout_started = session_controller.logout()
+            if not logout_started:
+                return
         else:
             try:
                 sign_out_local_session(supabase)
@@ -1090,6 +1096,14 @@ def build_home_view(
             session_controller=session_controller,
         )
         page.update()
+        if had_server_session and page.web:
+            async def navigate_to_server_logout() -> None:
+                await ft.UrlLauncher().launch_url(
+                    "/session/logout",
+                    web_only_window_name=ft.UrlTarget.SELF,
+                )
+
+            page.run_task(navigate_to_server_logout)
 
     configure_navigation_bar()
     home_control = build_shell()

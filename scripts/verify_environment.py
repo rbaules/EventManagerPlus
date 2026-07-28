@@ -14,8 +14,18 @@ EXPECTED_PACKAGES = {
     "flet-desktop": "0.85.3",
     "flet-web": "0.85.3",
     "supabase": "2.31.0",
+    "fastapi": "0.139.0",
+    "starlette": "1.3.1",
+    "uvicorn": "0.51.0",
 }
-REQUIRED_IMPORTS = ["flet", "supabase", "dotenv"]
+REQUIRED_IMPORTS = [
+    "flet",
+    "supabase",
+    "dotenv",
+    "fastapi",
+    "starlette",
+    "uvicorn",
+]
 
 
 def _project_root() -> Path:
@@ -77,6 +87,9 @@ def main() -> int:
             "ft.Alignment": hasattr(ft, "Alignment"),
             "ft.Alignment.CENTER_RIGHT": hasattr(ft.Alignment, "CENTER_RIGHT"),
             "ft.run": hasattr(ft, "run"),
+            "ft.run.export_asgi_app": (
+                "export_asgi_app" in inspect.signature(ft.run).parameters
+            ),
             "ft.Page.web": hasattr(ft.Page, "web"),
             "ft.Page.login": hasattr(ft.Page, "login"),
             "ft.Page.run_task": hasattr(ft.Page, "run_task"),
@@ -85,6 +98,18 @@ def main() -> int:
             "ft.Page.on_close": hasattr(ft.Page, "on_close"),
             "ft.Page.on_login": hasattr(ft.Page, "on_login"),
             "ft.LoginEvent": hasattr(ft, "LoginEvent"),
+            "ft.UrlLauncher": hasattr(ft, "UrlLauncher"),
+            "ft.UrlLauncher.launch_url": hasattr(
+                ft.UrlLauncher,
+                "launch_url",
+            ),
+            "ft.UrlLauncher.launch_url.web_only_window_name": (
+                "web_only_window_name"
+                in inspect.signature(
+                    ft.UrlLauncher.launch_url
+                ).parameters
+            ),
+            "ft.UrlTarget.SELF": hasattr(ft.UrlTarget, "SELF"),
             "ft.Page.login.authorization": (
                 "authorization" in inspect.signature(ft.Page.login).parameters
             ),
@@ -95,6 +120,34 @@ def main() -> int:
                 errors.append(f"Missing Flet API: {name}")
     except Exception as ex:
         errors.append(f"Could not inspect Flet API: {type(ex).__name__}: {ex}")
+
+    print("\nSupabase Auth API checks:")
+    try:
+        from supabase._sync.auth_client import SyncSupabaseAuthClient
+
+        auth_checks = {
+            "auth.set_session": hasattr(SyncSupabaseAuthClient, "set_session"),
+            "auth.set_session.access_token": (
+                "access_token"
+                in inspect.signature(
+                    SyncSupabaseAuthClient.set_session
+                ).parameters
+            ),
+            "auth.set_session.refresh_token": (
+                "refresh_token"
+                in inspect.signature(
+                    SyncSupabaseAuthClient.set_session
+                ).parameters
+            ),
+        }
+        for name, ok in auth_checks.items():
+            print(f"- {name}: {'OK' if ok else 'FAIL'}")
+            if not ok:
+                errors.append(f"Missing Supabase API: {name}")
+    except Exception as ex:
+        errors.append(
+            f"Could not inspect Supabase Auth API: {type(ex).__name__}: {ex}"
+        )
 
     print("\nSummary:")
     if errors:

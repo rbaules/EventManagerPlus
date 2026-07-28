@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 MODULES = [
+    "asgi",
     "app",
     "config",
     "db",
@@ -14,6 +15,8 @@ MODULES = [
     "services.evento_service",
     "services.invitado_service",
     "services.response_utils",
+    "services.server_session_service",
+    "services.session_service",
     "services.usuario_service",
     "components.app_shell",
     "components.bottom_navigation",

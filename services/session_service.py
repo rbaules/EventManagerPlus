@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import threading
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable
 
 from services.auth_service import (
     sign_out_global_session,
@@ -21,19 +21,6 @@ from services.usuario_service import UsuarioContextoError, cargar_contexto_usuar
 SESSION_INVALID_MESSAGE = (
     "Tu sesion vencio o dejo de ser valida. Inicia sesion nuevamente."
 )
-
-
-class SessionRepository(Protocol):
-    """Future server-side persistence boundary for an ASGI integration."""
-
-    def create(self, payload: Any, expires_at: int) -> str:
-        """Store server-side session data and return an opaque identifier."""
-
-    def restore(self, opaque_id: str) -> Any | None:
-        """Restore unexpired server-side session data by opaque identifier."""
-
-    def delete(self, opaque_id: str) -> None:
-        """Delete one server-side session."""
 
 
 @dataclass(frozen=True)
@@ -54,10 +41,12 @@ class PageSessionController:
         supabase: Any,
         *,
         context_loader: Callable[[Any, str], dict[str, Any]] = cargar_contexto_usuario,
+        server_session_binding: Any = None,
     ) -> None:
         self.page = page
         self.supabase = supabase
         self._context_loader = context_loader
+        self._server_session_binding = server_session_binding
         self._refresh_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._tasks: set[Any] = set()
@@ -67,6 +56,8 @@ class PageSessionController:
         self._authenticated = False
         self._closed = False
         self._connected = True
+        self._logging_out = False
+        self._logout_complete = False
         self.user: Any = None
         self.context: dict[str, Any] | None = None
 
@@ -79,6 +70,11 @@ class PageSessionController:
     def connected(self) -> bool:
         with self._state_lock:
             return self._connected and not self._closed
+
+    @property
+    def logging_out(self) -> bool:
+        with self._state_lock:
+            return self._logging_out
 
     @property
     def current_oauth_attempt(self) -> Any:
@@ -164,6 +160,28 @@ class PageSessionController:
         load_context: bool = True,
         claim_home: bool = False,
     ) -> SessionValidationResult:
+        if self._server_session_binding is not None:
+            result = self._server_session_binding.restore_and_run(
+                self.supabase,
+                lambda: self._validate_current_session(
+                    load_context=load_context,
+                    claim_home=claim_home,
+                ),
+            )
+            if isinstance(result, SessionValidationResult):
+                return result
+            return self._invalidate(SESSION_INVALID_MESSAGE)
+        return self._validate_current_session(
+            load_context=load_context,
+            claim_home=claim_home,
+        )
+
+    def _validate_current_session(
+        self,
+        *,
+        load_context: bool,
+        claim_home: bool,
+    ) -> SessionValidationResult:
         with self._state_lock:
             if self._closed:
                 return SessionValidationResult(False, SESSION_INVALID_MESSAGE)
@@ -207,6 +225,8 @@ class PageSessionController:
             self.user = user
             self.context = context
             self._authenticated = True
+            self._logging_out = False
+            self._logout_complete = False
             should_build_home = False
             if claim_home and self._home_generation != generation:
                 self._home_generation = generation
@@ -218,6 +238,20 @@ class PageSessionController:
             user=user,
             context=context,
             should_build_home=should_build_home,
+        )
+
+    def persist_server_session(self) -> bool:
+        if self._server_session_binding is None:
+            return True
+        return bool(
+            self._server_session_binding.persist_login(self.supabase)
+        )
+
+    @property
+    def has_server_session(self) -> bool:
+        return bool(
+            self._server_session_binding is not None
+            and self._server_session_binding.opaque_id
         )
 
     def _invalidate(self, message: str) -> SessionValidationResult:
@@ -294,8 +328,17 @@ class PageSessionController:
             self._invalidate(SESSION_INVALID_MESSAGE)
         return found_session
 
-    def logout(self, *, remote: bool = True, cancel_tasks: bool = True) -> None:
+    def logout(
+        self,
+        *,
+        remote: bool = True,
+        cancel_tasks: bool = True,
+        invalidate_server: bool = True,
+    ) -> bool:
         with self._state_lock:
+            if self._logging_out or self._logout_complete:
+                return False
+            self._logging_out = True
             self._generation += 1
             self._authenticated = False
             self._home_generation = None
@@ -311,13 +354,21 @@ class PageSessionController:
             for task in tasks:
                 if not task.done():
                     task.cancel()
-        limpiar_contexto_sesion(self.page.session.store)
         if remote:
             try:
                 with self._refresh_lock:
                     sign_out_local_session(self.supabase)
             except Exception:
                 pass
+        try:
+            if invalidate_server and self._server_session_binding is not None:
+                self._server_session_binding.delete()
+        finally:
+            limpiar_contexto_sesion(self.page.session.store)
+            with self._state_lock:
+                self._logging_out = False
+                self._logout_complete = True
+        return True
 
     def logout_global(self) -> None:
         """Explicit future administrative logout; not exposed in the UI."""
@@ -333,4 +384,6 @@ class PageSessionController:
             if self._closed:
                 return
             self._closed = True
-        self.logout(remote=False)
+        self.logout(remote=False, invalidate_server=False)
+        if self._server_session_binding is not None:
+            self._server_session_binding.close()
