@@ -1498,3 +1498,34 @@ diagnóstico de metadatos de solo lectura en
 `scripts/supabase_rls_diagnostics.sql`. Antes de aplicar cualquier etapa se
 debe obtener y revisar el inventario remoto real, resolver las decisiones
 pendientes y probar con JWT de identidades separadas en staging.
+
+## Plan de finalización funcional
+
+La auditoría funcional y técnica del 29 de julio de 2026 quedó documentada en
+`docs/FUNCTIONAL_COMPLETION_PLAN.md`. El núcleo operativo comprobado incluye
+autenticación, aislamiento de cliente y sesión, contexto de roles, selección
+de evento, consulta de invitados y registro/reversión de llegadas. Esto no
+equivale todavía a una versión administrable sin SQL ni lista para despliegue
+público.
+
+La brecha principal es la preparación administrativa del evento: cuentas,
+lugares, salones, eventos, mesas, invitaciones, usuarios y asignaciones no
+tienen flujos completos dentro de EventPlus. Preferencias es un placeholder;
+el Dashboard muestra contexto, no consume las vistas estadísticas; Realtime,
+carga masiva, exportación, reportes y auditoría funcional no están
+implementados. Las invitaciones son lectura auxiliar y las mesas se infieren
+desde invitados, sin consultar o mantener `evp_mes_mesa`.
+
+El orden recomendado separa dos líneas. P0 endurece las mutaciones actuales
+mediante RPC transaccionales y valida RLS SELECT por etapas. P1 elimina la
+carga manual con incrementos pequeños: lugares/salones, cuentas, eventos,
+mesas, invitaciones, importación y usuarios/asignaciones. En el entorno actual,
+que ya dispone de cuentas, el próximo módulo visible recomendado es
+**Lugares y salones por cuenta**; desbloquea la creación de eventos, permite
+probar escritura de Master/Administrador y solo lectura de Consulta, y puede
+entregarse sin activar RLS globalmente.
+
+RLS continúa diseñada pero no aplicada. Ningún estado remoto de políticas,
+grants, constraints, publicaciones o funciones debe darse por implementado
+hasta capturar y validar los metadatos descritos en
+`docs/RLS_METADATA_VALIDATION.md`.
