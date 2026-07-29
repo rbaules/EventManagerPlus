@@ -6,6 +6,13 @@ import unicodedata
 from typing import Any
 
 from config import is_checkin_mode
+from services.authorization_service import (
+    capacidades_contexto,
+    evento_autorizado,
+    puede_registrar_llegada,
+    puede_registrar_imprevisto as autorizado_registrar_imprevisto,
+    puede_revertir_llegada,
+)
 from services.evento_context_service import evento_key
 from services.response_utils import extract_data, safe_get, to_dict
 
@@ -217,13 +224,7 @@ def _rol_evento(contexto: dict[str, Any]) -> str:
 
 
 def _evento_autorizado(contexto: dict[str, Any]) -> bool:
-    key = _evento_activo_valido(contexto.get("evento_actual"))
-    if key is None:
-        return False
-    for evento in contexto.get("eventos_permitidos", []) or []:
-        if evento_key(evento) == key:
-            return True
-    return False
+    return evento_autorizado(contexto)
 
 
 def puede_administrar_invitados_planificados(contexto: dict[str, Any] | None) -> bool:
@@ -234,7 +235,7 @@ def puede_administrar_invitados_planificados(contexto: dict[str, Any] | None) ->
     fase = str(evento.get("fase_evento") or "")
     estado = str(evento.get("estado") or "Activo")
     permitido = (
-        rol in {"Master", "Administrador"}
+        capacidades_contexto(contexto).puede_crear_invitado
         and fase == "Pre_evento"
         and estado == "Activo"
         and _evento_autorizado(contexto)
@@ -249,65 +250,20 @@ def puede_administrar_invitados_planificados(contexto: dict[str, Any] | None) ->
     return permitido
 
 
-def _puede_operar_evento_en_proceso(
-    contexto: dict[str, Any] | None,
-    roles_permitidos: set[str],
-    etiqueta: str,
-) -> bool:
-    if not contexto or not contexto.get("usr_usuario_id"):
-        return False
-    evento = contexto.get("evento_actual") or {}
-    rol = _rol_evento(contexto)
-    fase = str(evento.get("fase_evento") or "")
-    estado = str(evento.get("estado") or "")
-    permitido = (
-        rol in roles_permitidos
-        and fase == "En_proceso"
-        and estado == "Activo"
-        and _evento_autorizado(contexto)
-        and _evento_activo_valido(evento) is not None
-    )
-    print(
-        "[INVITADOS][INFO] Autorizacion operativa:",
-        f"accion={etiqueta}",
-        f"rol={rol or 'Sin rol'}",
-        f"fase={fase or 'Sin fase'}",
-        f"estado={estado or 'Sin estado'}",
-        f"permitido={permitido}",
-    )
-    return permitido
-
-
 def puede_confirmar_llegada(contexto: dict[str, Any] | None) -> bool:
-    return _puede_operar_evento_en_proceso(
-        contexto,
-        {"Master", "Administrador", "Operador"},
-        "confirmar_llegada",
-    )
+    return puede_registrar_llegada(contexto)
 
 
 def puede_reversar_llegada(contexto: dict[str, Any] | None) -> bool:
-    return _puede_operar_evento_en_proceso(
-        contexto,
-        {"Master", "Administrador", "Operador"},
-        "reversar_llegada",
-    )
+    return puede_revertir_llegada(contexto)
 
 
 def puede_registrar_imprevisto(contexto: dict[str, Any] | None) -> bool:
-    return _puede_operar_evento_en_proceso(
-        contexto,
-        {"Master", "Administrador", "Operador"},
-        "registrar_imprevisto",
-    )
+    return autorizado_registrar_imprevisto(contexto)
 
 
 def puede_eliminar_imprevisto(contexto: dict[str, Any] | None) -> bool:
-    return _puede_operar_evento_en_proceso(
-        contexto,
-        {"Master", "Administrador", "Operador"},
-        "eliminar_imprevisto",
-    )
+    return capacidades_contexto(contexto).puede_eliminar_invitado and autorizado_registrar_imprevisto(contexto)
 
 
 def _resultado_operacion(estado: str, mensaje: str, invitado: dict[str, Any] | None = None) -> ResultadoOperacionInvitado:
@@ -328,7 +284,7 @@ def _validar_contexto_escritura(contexto: dict[str, Any] | None) -> ResultadoOpe
         return _resultado_operacion("event_required", "Selecciona un evento valido antes de administrar invitados.")
     if not _evento_autorizado(contexto):
         return _resultado_operacion("event_not_allowed", "No tienes acceso al evento activo.")
-    if _rol_evento(contexto) not in {"Master", "Administrador"}:
+    if not capacidades_contexto(contexto).puede_crear_invitado:
         return _resultado_operacion("role_denied", "No tienes permisos para modificar invitados planificados.")
     if str((contexto.get("evento_actual") or {}).get("fase_evento") or "") != "Pre_evento":
         return _resultado_operacion(
@@ -342,7 +298,6 @@ def _validar_contexto_escritura(contexto: dict[str, Any] | None) -> ResultadoOpe
 
 def _validar_contexto_operativo(
     contexto: dict[str, Any] | None,
-    roles_permitidos: set[str],
 ) -> ResultadoOperacionInvitado | None:
     if not contexto or not contexto.get("usr_usuario_id"):
         return _resultado_operacion("session_invalid", "La sesion no es valida. Inicia sesion nuevamente.")
@@ -350,7 +305,7 @@ def _validar_contexto_operativo(
         return _resultado_operacion("event_required", "Selecciona un evento valido antes de administrar invitados.")
     if not _evento_autorizado(contexto):
         return _resultado_operacion("event_not_allowed", "No tienes acceso al evento activo.")
-    if _rol_evento(contexto) not in roles_permitidos:
+    if not capacidades_contexto(contexto).puede_operar_evento:
         return _resultado_operacion("role_denied", "No tienes permisos para realizar esta accion.")
     evento = contexto.get("evento_actual") or {}
     if str(evento.get("fase_evento") or "") != "En_proceso":
@@ -963,7 +918,7 @@ def confirmar_llegada(
     invitado_original: dict[str, Any] | None,
     supabase: Any = None,
 ) -> ResultadoOperacionInvitado:
-    bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador", "Operador"})
+    bloqueo = _validar_contexto_operativo(contexto)
     if bloqueo:
         return bloqueo
     evento_activo = contexto.get("evento_actual") if contexto else None
@@ -1128,7 +1083,7 @@ def confirmar_llegadas_invitados(
     invitados_seleccionados: list[dict[str, Any]],
     supabase: Any = None,
 ) -> ResultadoConfirmacionGrupo:
-    bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador", "Operador"})
+    bloqueo = _validar_contexto_operativo(contexto)
     if bloqueo:
         return ResultadoConfirmacionGrupo(False, bloqueo.estado, bloqueo.mensaje, 0, 0, [])
     evento_activo = contexto.get("evento_actual") if contexto else None
@@ -1226,7 +1181,7 @@ def reversar_llegada(
     invitado_original: dict[str, Any] | None,
     supabase: Any = None,
 ) -> ResultadoOperacionInvitado:
-    bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador", "Operador"})
+    bloqueo = _validar_contexto_operativo(contexto)
     if bloqueo:
         return bloqueo
     evento_activo = contexto.get("evento_actual") if contexto else None
@@ -1300,7 +1255,7 @@ def crear_invitado_imprevisto(
     bloqueo_checkin = _bloquear_operacion_checkin("crear_invitado_imprevisto")
     if bloqueo_checkin:
         return bloqueo_checkin
-    bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador", "Operador"})
+    bloqueo = _validar_contexto_operativo(contexto)
     if bloqueo:
         return bloqueo
     datos, error = _validar_formulario(payload, requiere_invitacion=True)
@@ -1357,7 +1312,7 @@ def eliminar_invitado_imprevisto(
     bloqueo_checkin = _bloquear_operacion_checkin("eliminar_invitado_imprevisto")
     if bloqueo_checkin:
         return bloqueo_checkin
-    bloqueo = _validar_contexto_operativo(contexto, {"Master", "Administrador", "Operador"})
+    bloqueo = _validar_contexto_operativo(contexto)
     if bloqueo:
         return bloqueo
     evento_activo = contexto.get("evento_actual") if contexto else None

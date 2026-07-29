@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.authorization_service import (
+    ROL_ADMINISTRADOR,
+    ROL_CONSULTA,
+    ROL_OPERADOR,
+    capacidades_rol,
+    rol_cuenta_valido,
+    resumen_capacidades,
+)
 from services.response_utils import extract_data, safe_get, to_dict
 
 
@@ -235,16 +243,21 @@ def _consultar_cuentas_vinculadas(
     _trazar_filas("cuentas_vinculadas", filas)
     for row in filas:
         rol = str(safe_get(row, "ucu_rol", ""))
+        if not rol_cuenta_valido(rol):
+            raise UsuarioContextoError(
+                "Tu cuenta tiene un rol no reconocido. Contacta al administrador."
+            )
         cuenta = _cuenta_desde_row(row, rol)
         if cuenta and cuenta["estado"] == "Activo":
             cuentas.append(cuenta)
     return _dedupe_cuentas(cuentas)
 
 
-def _consultar_eventos_asignados_operador(
+def _consultar_eventos_asignados(
     supabase: Any,
     usr_usuario_id: str,
     cuenta_id: int,
+    rol: str,
 ) -> list[dict[str, Any]]:
     response = (
         supabase
@@ -258,15 +271,29 @@ def _consultar_eventos_asignados_operador(
 
     eventos: list[dict[str, Any]] = []
     filas = _extraer_filas(response)
-    _trazar_filas(f"eventos_asignados_operador_cuenta_{cuenta_id}", filas)
+    _trazar_filas(f"eventos_asignados_{rol.lower()}_cuenta_{cuenta_id}", filas)
     for row in filas:
         evento_id = _normalizar_id(safe_get(row, "uev_evento_id"))
         if evento_id is None:
             continue
-        evento = _consultar_evento_activo(supabase, cuenta_id, evento_id, "Operador")
+        evento = _consultar_evento_activo(supabase, cuenta_id, evento_id, rol)
         if evento:
             eventos.append(evento)
     return eventos
+
+
+def _consultar_eventos_asignados_operador(
+    supabase: Any,
+    usr_usuario_id: str,
+    cuenta_id: int,
+) -> list[dict[str, Any]]:
+    """Compatibilidad interna para pruebas y llamadas históricas de Operador."""
+    return _consultar_eventos_asignados(
+        supabase,
+        usr_usuario_id,
+        cuenta_id,
+        ROL_OPERADOR,
+    )
 
 
 def _rol_global(cuentas: list[dict[str, Any]]) -> str:
@@ -377,11 +404,15 @@ def cargar_contexto_usuario(supabase: Any, auth_user_id: str) -> dict[str, Any]:
             raise UsuarioContextoError(
                 "Tu usuario existe, pero no tiene cuentas activas asignadas."
             )
+        if any(not rol_cuenta_valido(cuenta.get("rol")) for cuenta in cuentas_permitidas):
+            raise UsuarioContextoError(
+                "Tu cuenta tiene un rol no reconocido. Contacta al administrador."
+            )
 
         eventos_permitidos = []
         try:
             for cuenta in cuentas_permitidas:
-                if cuenta["rol"] in {"Administrador", "Consulta"}:
+                if cuenta["rol"] == ROL_ADMINISTRADOR:
                     eventos_permitidos.extend(
                         _consultar_eventos_por_cuenta(
                             supabase,
@@ -389,12 +420,13 @@ def cargar_contexto_usuario(supabase: Any, auth_user_id: str) -> dict[str, Any]:
                             cuenta["rol"],
                         )
                     )
-                elif cuenta["rol"] == "Operador":
+                elif cuenta["rol"] in {ROL_OPERADOR, ROL_CONSULTA}:
                     eventos_permitidos.extend(
-                        _consultar_eventos_asignados_operador(
+                        _consultar_eventos_asignados(
                             supabase,
                             usr_usuario_id,
                             cuenta["cuenta_id"],
+                            cuenta["rol"],
                         )
                     )
         except Exception as ex:
@@ -425,15 +457,16 @@ def cargar_contexto_usuario(supabase: Any, auth_user_id: str) -> dict[str, Any]:
     if not eventos_permitidos:
         print("[CONTEXTO][WARNING] Usuario sin eventos disponibles; se abrira Dashboard en estado vacio.")
 
-    puede_administrar_usuarios = rol_global_calculado in {"Master", "Administrador"}
+    capacidades = capacidades_rol(evento_actual["rol"] if evento_actual else rol_global_calculado)
+    puede_administrar_usuarios = capacidades.puede_administrar
     puede_registrar_llegadas = bool(
         evento_actual
-        and evento_actual["rol"] in {"Master", "Administrador", "Operador"}
+        and capacidades.puede_registrar_llegada
         and evento_actual["fase_evento"] == "En_proceso"
         and evento_actual["estado"] == "Activo"
     )
 
-    return {
+    contexto = {
         "usr_usuario_id": safe_get(usuario, "usr_usuario_id"),
         "usr_usuario_auth_uuid": safe_get(usuario, "usr_usuario_auth_uuid"),
         "usr_nombre_usuario": safe_get(usuario, "usr_nombre_usuario"),
@@ -451,6 +484,8 @@ def cargar_contexto_usuario(supabase: Any, auth_user_id: str) -> dict[str, Any]:
         "puede_registrar_llegadas": puede_registrar_llegadas,
         "puede_administrar_usuarios": puede_administrar_usuarios,
     }
+    contexto["capacidades"] = resumen_capacidades(contexto)
+    return contexto
 
 
 def buscar_usuario_eventplus_por_email(

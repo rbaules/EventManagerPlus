@@ -893,6 +893,20 @@ Todas las verificaciones obligatorias pasaron:
 
 Los arranques FULL escritorio, CHECKIN escritorio, FULL web en 8550 y CHECKIN web en 8551 iniciaron sin traceback inmediato y fueron detenidos de forma controlada.
 
+## Rol Consulta (implementación local, 28 de julio de 2026)
+
+Se incorporó autorización central explícita para `Administrador`, `Operador` y
+`Consulta`; Master continúa derivándose únicamente de
+`usr_es_usuario_master`. Consulta conserva las cuentas autorizadas, carga solo
+eventos con asignación activa en `evp_uev_usuario_evento`, puede consultar
+Dashboard/invitados/mesas/detalle y no recibe ninguna capacidad de escritura.
+
+Las operaciones Python de alta/edición/desactivación de invitados,
+confirmación individual o grupal, reversión e imprevistos deniegan Consulta
+antes de alcanzar Supabase. La navegación oculta Registro de llegadas y las
+vistas ocultan acciones de mutación. La propuesta SQL y RLS permanece sin
+aplicar; la validación de metadatos remotos sigue pendiente.
+
 ### Configuración manual requerida en Supabase
 
 Para FULL web local:
@@ -1468,3 +1482,19 @@ Cookies distintas representan sesiones distintas. Eliminar A no modifica el regi
 - ausencia de tokens o cookies completas en logs.
 
 Las pruebas manuales con credenciales reales —un solo logout, F5, dos pestañas y dos navegadores— continúan requiriendo interacción del usuario y no se presentan como ejecutadas automáticamente.
+
+# Plan de la Tarea 5 — Row Level Security
+
+Fecha de diseño: 27 de julio de 2026.
+
+RLS fue **diseñada y permanece pendiente de aplicación**. No se ejecutó SQL,
+no se habilitó RLS y no se modificó Supabase. El inventario, modelo de
+autorización, matriz de políticas, protección por columnas, RPC recomendadas,
+pruebas, activación gradual y rollback están en
+`docs/RLS_SECURITY_DESIGN.md`.
+
+Se generaron propuestas no ejecutadas en `supabase/migrations/` y un
+diagnóstico de metadatos de solo lectura en
+`scripts/supabase_rls_diagnostics.sql`. Antes de aplicar cualquier etapa se
+debe obtener y revisar el inventario remoto real, resolver las decisiones
+pendientes y probar con JWT de identidades separadas en staging.

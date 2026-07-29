@@ -162,7 +162,8 @@ Reglas:
 
 - Administrador tiene acceso a todos los eventos de sus cuentas.
 - Operador debe estar vinculado además a eventos en `evp_uev_usuario_evento`.
-- Consulta puede ver pero no modificar.
+- Consulta requiere asignaciones activas en `evp_uev_usuario_evento` y puede
+  ver, pero no modificar, los eventos asignados.
 
 ---
 
@@ -319,7 +320,7 @@ uev_estado: Activo, Suspendido, Inactivo
 
 Reglas:
 
-- Un Operador debe existir primero en `evp_ucu_usuario_cuenta`.
+- Un Operador o Consulta debe existir primero en `evp_ucu_usuario_cuenta`.
 - Administrador no necesita registros en esta tabla.
 - Master no necesita registros en esta tabla.
 
@@ -505,7 +506,9 @@ Devuelve `true` si el usuario autenticado puede ver el evento.
 Regla implementada:
 
 - Master puede ver todo.
-- Administrador y Consulta pueden ver eventos de sus cuentas.
+- Administrador puede ver todos los eventos de sus cuentas.
+- Operador y Consulta solo pueden ver eventos asignados en
+  `evp_uev_usuario_evento`.
 - Operador puede ver eventos asignados en `evp_uev_usuario_evento`.
 
 ---

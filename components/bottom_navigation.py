@@ -30,7 +30,11 @@ def bottom_navigation(
     on_select: Callable[[str], None],
 ) -> ft.NavigationBar:
     print("[NAVEGACION][INFO] Aplicando estilo visual a la barra.")
-    nav_items = _CHECKIN_NAV_ITEMS if is_checkin_mode() else _NAV_ITEMS
+    base_items = _CHECKIN_NAV_ITEMS if is_checkin_mode() else _NAV_ITEMS
+    nav_items = tuple(
+        item for item in base_items
+        if item[0] != "arrivals" or can_register_arrivals
+    )
     if is_checkin_mode():
         print("[CHECKIN][INFO] Navegacion disponible: Invitados, Registrar llegadas")
     selected_keys = [item[0] for item in nav_items]

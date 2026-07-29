@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.authorization_service import capacidades_contexto, resumen_capacidades
 
 EVENTOS_DISPONIBLES_SESSION_KEY = "eventos_disponibles"
 USUARIO_CONTEXTO_SESSION_KEY = "usuario_contexto"
@@ -41,20 +42,21 @@ def establecer_evento_activo(
             contexto["cuenta_actual"] = cuenta
             break
 
+    capacidades = capacidades_contexto(contexto)
     contexto["puede_registrar_llegadas"] = bool(
-        evento_activo.get("rol") in {"Master", "Administrador", "Operador"}
+        capacidades.puede_registrar_llegada
         and evento_activo.get("fase_evento") == "En_proceso"
         and evento_activo.get("estado") == "Activo"
     )
-    contexto["puede_administrar_usuarios"] = (
-        contexto.get("rol_global_calculado") in {"Master", "Administrador"}
-    )
+    contexto["puede_administrar_usuarios"] = capacidades.puede_administrar
+    contexto["capacidades"] = resumen_capacidades(contexto)
     return evento_activo
 
 
 def limpiar_evento_activo(contexto: dict[str, Any]) -> None:
     contexto["evento_actual"] = None
     contexto["puede_registrar_llegadas"] = False
+    contexto["capacidades"] = resumen_capacidades(contexto)
 
 
 def sincronizar_evento_activo(

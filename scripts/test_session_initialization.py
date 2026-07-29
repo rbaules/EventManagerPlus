@@ -82,7 +82,12 @@ def run_with(cuentas: list[dict[str, Any]], eventos_por_cuenta: dict[int, list[d
             "_consultar_eventos_por_cuenta": lambda client, cuenta_id, rol: [
                 dict(evento, rol=rol) for evento in eventos_por_cuenta.get(cuenta_id, [])
             ],
-            "_consultar_eventos_asignados_operador": lambda client, user_id, cuenta_id: [],
+            "_consultar_eventos_asignados": (
+                lambda client, user_id, cuenta_id, rol: [
+                    dict(evento, rol=rol)
+                    for evento in eventos_por_cuenta.get(cuenta_id, [])
+                ]
+            ),
         }
     )
     try:

@@ -12,6 +12,7 @@
 - [ ] Master.
 - [ ] Administrador.
 - [ ] Operador.
+- [ ] Consulta: solo eventos asignados, navegación y detalle sin mutaciones.
 
 ## OAuth
 

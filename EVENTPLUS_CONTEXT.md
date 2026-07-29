@@ -259,8 +259,12 @@ evp_ucu_usuario_cuenta.ucu_rol = 'Consulta'
 
 Reglas:
 
-- Puede consultar información.
-- No debe modificar datos operativos.
+- Es un rol de cuenta, no Master ni un estado de usuario.
+- Solo accede a eventos asignados en `evp_uev_usuario_evento`, igual que
+  Operador en alcance de lectura.
+- Puede usar Dashboard, buscar invitados o mesas y abrir detalles.
+- Es estrictamente de solo lectura: no crea, edita, elimina, confirma o
+  revierte llegadas, registra imprevistos ni ejecuta servicios de escritura.
 
 ---
 

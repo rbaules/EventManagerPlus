@@ -1,0 +1,37 @@
+-- PROPUESTA DE ROLLBACK NO EJECUTADA.
+begin;
+drop policy if exists evp_rls_usr_select on public.evp_usr_usuario;
+drop policy if exists evp_rls_ucu_select on public.evp_ucu_usuario_cuenta;
+drop policy if exists evp_rls_ucu_insert on public.evp_ucu_usuario_cuenta;
+drop policy if exists evp_rls_ucu_update on public.evp_ucu_usuario_cuenta;
+drop policy if exists evp_rls_ucu_delete on public.evp_ucu_usuario_cuenta;
+drop policy if exists evp_rls_uev_select on public.evp_uev_usuario_evento;
+drop policy if exists evp_rls_uev_insert on public.evp_uev_usuario_evento;
+drop policy if exists evp_rls_uev_update on public.evp_uev_usuario_evento;
+drop policy if exists evp_rls_uev_delete on public.evp_uev_usuario_evento;
+drop policy if exists evp_rls_cta_select on public.evp_cta_cuenta;
+drop policy if exists evp_rls_cta_update on public.evp_cta_cuenta;
+drop policy if exists evp_rls_eve_select on public.evp_eve_evento;
+drop policy if exists evp_rls_eve_insert on public.evp_eve_evento;
+drop policy if exists evp_rls_eve_update on public.evp_eve_evento;
+drop policy if exists evp_rls_eve_delete on public.evp_eve_evento;
+drop policy if exists evp_rls_lug_all on public.evp_lug_lugar;
+drop policy if exists evp_rls_sal_all on public.evp_sal_salon;
+drop policy if exists evp_rls_mes_all on public.evp_mes_mesa;
+drop policy if exists evp_rls_inv_select on public.evp_inv_invitacion;
+drop policy if exists evp_rls_inv_mutate on public.evp_inv_invitacion;
+drop policy if exists evp_rls_ivt_select on public.evp_ivt_invitado;
+drop policy if exists evp_rls_ivt_insert_admin on public.evp_ivt_invitado;
+drop policy if exists evp_rls_ivt_update_admin on public.evp_ivt_invitado;
+drop policy if exists evp_rls_ivt_delete on public.evp_ivt_invitado;
+drop policy if exists evp_rls_pai_select on public.evp_pai_pais;
+drop function if exists public.evp_rls_puede_operar_evento(integer, integer);
+drop function if exists public.evp_rls_puede_administrar_evento(integer, integer);
+drop function if exists public.evp_rls_tiene_evento(integer, integer);
+drop function if exists public.evp_rls_tiene_cuenta(integer);
+drop function if exists public.evp_rls_rol_cuenta(integer);
+drop function if exists public.evp_rls_es_master();
+drop function if exists public.evp_rls_usuario_id();
+-- No se deshabilita RLS automáticamente: podría haber políticas ajenas posteriores.
+-- No se restauran grants previos desconocidos. Restaurarlos desde el inventario previo.
+commit;
