@@ -15,6 +15,7 @@ def app_shell(
     on_select: Callable[[str], None],
     on_logout: Callable[[], None],
     on_change_context: Callable[[], None] | None = None,
+    on_manage_locations: Callable[[], None] | None = None,
 ) -> ft.Control:
     return ft.SafeArea(
         content=ft.Column(
@@ -24,6 +25,7 @@ def app_shell(
                     on_preferences=lambda: on_select("preferences"),
                     on_logout=on_logout,
                     on_change_context=on_change_context,
+                    on_manage_locations=on_manage_locations,
                 ),
                 ft.Container(
                     content=content,

@@ -6,6 +6,7 @@ from typing import Any
 import flet as ft
 
 from config import is_checkin_mode
+from services.authorization_service import puede_administrar_lugares
 
 
 def _get(source: dict[str, Any] | None, key: str, default: str = "-") -> Any:
@@ -33,6 +34,7 @@ def _avatar_menu(
     on_preferences: Callable[[], None],
     on_logout: Callable[[], None],
     on_change_context: Callable[[], None] | None = None,
+    on_manage_locations: Callable[[], None] | None = None,
 ) -> ft.Control:
     nombre = _get(contexto, "usr_nombre_usuario", "Usuario")
     iniciales = calcular_iniciales_usuario(nombre)
@@ -59,7 +61,16 @@ def _avatar_menu(
             ),
         ]
     else:
-        items = [
+        items = []
+        if on_manage_locations and puede_administrar_lugares(contexto):
+            items.append(
+                ft.PopupMenuItem(
+                    content="Lugares y salones",
+                    icon=ft.Icons.LOCATION_CITY,
+                    on_click=lambda e: on_manage_locations(),
+                )
+            )
+        items.extend([
             ft.PopupMenuItem(
                 content="Preferencias",
                 icon=ft.Icons.SETTINGS,
@@ -70,7 +81,7 @@ def _avatar_menu(
                 icon=ft.Icons.LOGOUT,
                 on_click=lambda e: on_logout(),
             ),
-        ]
+        ])
 
     return ft.PopupMenuButton(
         content=avatar,
@@ -84,6 +95,7 @@ def event_header(
     on_preferences: Callable[[], None],
     on_logout: Callable[[], None],
     on_change_context: Callable[[], None] | None = None,
+    on_manage_locations: Callable[[], None] | None = None,
 ) -> ft.Container:
     cuenta = contexto.get("cuenta_actual") or {}
     evento = contexto.get("evento_actual") or {}
@@ -155,7 +167,13 @@ def event_header(
                                 tight=True,
                                 expand=True,
                             ),
-                            _avatar_menu(contexto, on_preferences, on_logout, on_change_context),
+                            _avatar_menu(
+                                contexto,
+                                on_preferences,
+                                on_logout,
+                                on_change_context,
+                                on_manage_locations,
+                            ),
                         ],
                         alignment=ft.MainAxisAlignment.END,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,

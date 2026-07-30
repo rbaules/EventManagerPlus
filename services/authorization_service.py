@@ -24,14 +24,36 @@ class Capacidades:
     puede_editar_invitado: bool
     puede_eliminar_invitado: bool
     puede_registrar_imprevisto: bool
+    puede_administrar_lugares: bool
+    puede_crear_lugar: bool
+    puede_editar_lugar: bool
+    puede_desactivar_lugar: bool
+    puede_crear_salon: bool
+    puede_editar_salon: bool
+    puede_desactivar_salon: bool
 
 
-_SIN_CAPACIDADES = Capacidades(False, False, False, False, False, False, False, False, False)
+_SIN_CAPACIDADES = Capacidades(
+    False, False, False, False, False, False, False, False, False,
+    False, False, False, False, False, False, False,
+)
 _CAPACIDADES_POR_ROL = {
-    ROL_MASTER: Capacidades(True, True, True, True, True, True, True, True, True),
-    ROL_ADMINISTRADOR: Capacidades(True, True, True, True, True, True, True, True, True),
-    ROL_OPERADOR: Capacidades(True, False, True, True, True, False, False, True, True),
-    ROL_CONSULTA: Capacidades(True, False, False, False, False, False, False, False, False),
+    ROL_MASTER: Capacidades(
+        True, True, True, True, True, True, True, True, True,
+        True, True, True, True, True, True, True,
+    ),
+    ROL_ADMINISTRADOR: Capacidades(
+        True, True, True, True, True, True, True, True, True,
+        True, True, True, True, True, True, True,
+    ),
+    ROL_OPERADOR: Capacidades(
+        True, False, True, True, True, False, False, True, True,
+        False, False, False, False, False, False, False,
+    ),
+    ROL_CONSULTA: Capacidades(
+        True, False, False, False, False, False, False, False, False,
+        False, False, False, False, False, False, False,
+    ),
 }
 
 
@@ -118,6 +140,34 @@ def puede_eliminar_invitado(contexto: dict[str, Any] | None) -> bool:
 
 def puede_registrar_imprevisto(contexto: dict[str, Any] | None) -> bool:
     return capacidades_contexto(contexto).puede_registrar_imprevisto and evento_operativo(contexto)
+
+
+def puede_administrar_lugares(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_administrar_lugares
+
+
+def puede_crear_lugar(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_crear_lugar
+
+
+def puede_editar_lugar(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_editar_lugar
+
+
+def puede_desactivar_lugar(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_desactivar_lugar
+
+
+def puede_crear_salon(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_crear_salon
+
+
+def puede_editar_salon(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_editar_salon
+
+
+def puede_desactivar_salon(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_desactivar_salon
 
 
 def resumen_capacidades(contexto: dict[str, Any] | None) -> dict[str, bool]:

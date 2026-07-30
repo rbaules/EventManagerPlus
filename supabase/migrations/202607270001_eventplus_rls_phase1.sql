@@ -181,14 +181,55 @@ drop policy if exists evp_rls_eve_delete on public.evp_eve_evento;
 create policy evp_rls_eve_delete on public.evp_eve_evento for delete to authenticated
 using (public.evp_rls_es_master());
 
--- Tablas con cuenta.
+-- Lugares/salones: lectura administrativa o ligada a un evento asignado.
+-- Escritura solo Master/Administrador. No se crea política DELETE.
 drop policy if exists evp_rls_lug_all on public.evp_lug_lugar;
-create policy evp_rls_lug_all on public.evp_lug_lugar for all to authenticated
-using (public.evp_rls_tiene_cuenta(lug_cuenta_id))
+drop policy if exists evp_rls_lug_select on public.evp_lug_lugar;
+create policy evp_rls_lug_select on public.evp_lug_lugar for select to authenticated
+using (
+  public.evp_rls_rol_cuenta(lug_cuenta_id) in ('Master','Administrador')
+  or (
+    public.evp_rls_rol_cuenta(lug_cuenta_id) in ('Operador','Consulta')
+    and exists (
+      select 1
+      from public.evp_eve_evento e
+      where e.eve_cuenta_id = lug_cuenta_id
+        and e.eve_lugar_id = lug_lugar_id
+        and public.evp_rls_tiene_evento(e.eve_cuenta_id, e.eve_evento_id)
+    )
+  )
+);
+drop policy if exists evp_rls_lug_insert on public.evp_lug_lugar;
+create policy evp_rls_lug_insert on public.evp_lug_lugar for insert to authenticated
 with check (public.evp_rls_rol_cuenta(lug_cuenta_id) in ('Master','Administrador'));
+drop policy if exists evp_rls_lug_update on public.evp_lug_lugar;
+create policy evp_rls_lug_update on public.evp_lug_lugar for update to authenticated
+using (public.evp_rls_rol_cuenta(lug_cuenta_id) in ('Master','Administrador'))
+with check (public.evp_rls_rol_cuenta(lug_cuenta_id) in ('Master','Administrador'));
+
 drop policy if exists evp_rls_sal_all on public.evp_sal_salon;
-create policy evp_rls_sal_all on public.evp_sal_salon for all to authenticated
-using (public.evp_rls_tiene_cuenta(sal_cuenta_id))
+drop policy if exists evp_rls_sal_select on public.evp_sal_salon;
+create policy evp_rls_sal_select on public.evp_sal_salon for select to authenticated
+using (
+  public.evp_rls_rol_cuenta(sal_cuenta_id) in ('Master','Administrador')
+  or (
+    public.evp_rls_rol_cuenta(sal_cuenta_id) in ('Operador','Consulta')
+    and exists (
+      select 1
+      from public.evp_eve_evento e
+      where e.eve_cuenta_id = sal_cuenta_id
+        and e.eve_lugar_id = sal_lugar_id
+        and e.eve_salon_id = sal_salon_id
+        and public.evp_rls_tiene_evento(e.eve_cuenta_id, e.eve_evento_id)
+    )
+  )
+);
+drop policy if exists evp_rls_sal_insert on public.evp_sal_salon;
+create policy evp_rls_sal_insert on public.evp_sal_salon for insert to authenticated
+with check (public.evp_rls_rol_cuenta(sal_cuenta_id) in ('Master','Administrador'));
+drop policy if exists evp_rls_sal_update on public.evp_sal_salon;
+create policy evp_rls_sal_update on public.evp_sal_salon for update to authenticated
+using (public.evp_rls_rol_cuenta(sal_cuenta_id) in ('Master','Administrador'))
 with check (public.evp_rls_rol_cuenta(sal_cuenta_id) in ('Master','Administrador'));
 
 -- Tablas con evento.
@@ -229,6 +270,8 @@ grant select on public.evp_usr_usuario, public.evp_ucu_usuario_cuenta,
   public.evp_uev_usuario_evento, public.evp_cta_cuenta, public.evp_lug_lugar,
   public.evp_sal_salon, public.evp_eve_evento, public.evp_mes_mesa,
   public.evp_inv_invitacion, public.evp_ivt_invitado, public.evp_pai_pais
+to authenticated;
+grant insert, update on public.evp_lug_lugar, public.evp_sal_salon
 to authenticated;
 -- Las mutaciones de invitado quedan revocadas hasta instalar RPC transaccionales.
 

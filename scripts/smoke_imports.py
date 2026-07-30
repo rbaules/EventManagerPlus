@@ -10,11 +10,12 @@ MODULES = [
     "app",
     "config",
     "db",
-        "services.auth_service",
-        "services.authorization_service",
-        "services.evento_context_service",
+    "services.auth_service",
+    "services.authorization_service",
+    "services.evento_context_service",
     "services.evento_service",
     "services.invitado_service",
+    "services.lugar_service",
     "services.response_utils",
     "services.server_session_service",
     "services.session_service",
@@ -28,6 +29,7 @@ MODULES = [
     "views.home_view",
     "views.invitados_view",
     "views.login_view",
+    "views.lugares_view",
 ]
 
 
@@ -57,6 +59,7 @@ def main() -> int:
     from views.dashboard_view import dashboard_view
     from views.home_view import build_home_view
     from views.invitados_view import invitados_view
+    from views.lugares_view import lugares_view
 
     contexto = {
         "usr_nombre_usuario": "Usuario Demo",
@@ -128,6 +131,29 @@ def main() -> int:
             lambda value=None: None,
             lambda: None,
             lambda: None,
+            lambda value=None: None,
+            lambda value=None: None,
+            lambda value=None: None,
+            lambda value=None: None,
+            lambda value=None: None,
+            lambda value=None: None,
+            lambda value=None: None,
+            lambda: None,
+        ),
+        lugares_view(
+            contexto,
+            "empty",
+            "",
+            [],
+            None,
+            [],
+            [],
+            None,
+            "",
+            False,
+            True,
+            lambda: None,
+            lambda value=None: None,
             lambda value=None: None,
             lambda value=None: None,
             lambda value=None: None,

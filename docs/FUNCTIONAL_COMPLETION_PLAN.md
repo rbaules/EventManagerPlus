@@ -54,8 +54,8 @@ sesiones al reiniciar y no sirve aún para escalado horizontal.
 | 10 | Llegadas grupales | Implementado y probado / no atómico | Selección por invitación y confirmación parcial. El propio diseño reconoce que puede confirmar unas filas y omitir otras. |
 | 11 | Invitados imprevistos | Implementado y probado | Alta e inactivación en `En_proceso`; deshabilitado en CHECKIN por regla actual. Requiere RPC y aclarar si CHECKIN debe permitirlo. |
 | 12 | Mesas | Solo lectura indirecta / carga manual | La búsqueda obtiene IDs distintos desde `evp_ivt_invitado`; no consulta `evp_mes_mesa`, no muestra nombres reales ni mantiene mesas. |
-| 13 | Lugares | Solo existe en base de datos / carga manual | `evp_lug_lugar`, trigger e IDs documentados; sin servicio ni UI. |
-| 14 | Salones | Solo existe en base de datos / carga manual | `evp_sal_salon`; sin servicio ni UI. |
+| 13 | Lugares | Implementado y probado | Módulo FULL para Master/Admin: listado, alta, edición y cambio de estado por cuenta; sin DELETE. |
+| 14 | Salones | Implementado y probado | Administración dentro del lugar, capacidades, aislamiento tenant y bloqueo por eventos abiertos. |
 | 15 | Países | Solo existe en base de datos | Catálogo `evp_pai_pais`; sin servicio/UI. RLS SELECT autenticado está diseñada. |
 | 16 | Cuentas | Solo lectura en contexto / carga manual | Se leen cuentas autorizadas. No hay alta, edición o desactivación. Crear cuenta debe ser decisión Master. |
 | 17 | Eventos | Solo lectura y selección / carga manual | `evento_service` consulta eventos; no crea, edita, cambia fase/estado ni cierra eventos. |
@@ -257,7 +257,7 @@ Pruebas específicas faltantes:
 
 ### P1 — administrar sin SQL manual
 
-1. Lugares y salones.
+1. Lugares y salones. **Implementado localmente; RLS remota pendiente.**
 2. Eventos y configuración/fases.
 3. Mesas.
 4. Invitaciones.

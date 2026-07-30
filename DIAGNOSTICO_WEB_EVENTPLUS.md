@@ -9,6 +9,12 @@ Alcance: auditoría estática y pruebas controladas, sin modificar código, conf
 
 EventPlus es una aplicación Flet funcional y modular, con dos modos de ejecución (`FULL` y `CHECKIN`), autenticación Google OAuth mediante Supabase, selección de cuenta/evento, Dashboard, consulta y mantenimiento de invitados y registro/reversión de llegadas. La aplicación ya puede levantarse localmente como sitio web dinámico con el CLI de Flet.
 
+Actualización del 29 de julio de 2026: FULL incorpora administración de lugares
+y salones para Master/Administrador, con aislamiento por cuenta, capacidades
+centralizadas, baja lógica y bloqueo por eventos abiertos. Operador, Consulta y
+CHECKIN no exponen el módulo. El SQL RLS relacionado permanece como propuesta
+local no aplicada y no existe política DELETE.
+
 Sin embargo, **no debe desplegarse todavía como aplicación web multiusuario**. El bloqueo principal es que `db.py` crea y conserva un único `supabase.Client` global mediante `@lru_cache(maxsize=1)`. El estado de autenticación (access token y refresh token mantenidos internamente por `supabase-py`) queda ligado a ese cliente compartido por todo el proceso. En un servidor web, el login o logout de una persona puede sustituir o invalidar la sesión de otra y todas las consultas podrían ejecutarse con la identidad equivocada.
 
 El segundo bloqueo es el flujo OAuth actual. Para escritorio inicia un `HTTPServer` local en `127.0.0.1:8765`, abre el navegador del sistema con `webbrowser.open()` y entrega el resultado mediante una cola estática de proceso. Este diseño no es apto para Internet, contenedores, varios workers, varios usuarios ni múltiples intentos simultáneos. En navegador, `localhost` identifica el dispositivo del usuario, no necesariamente el servidor desplegado.

@@ -8,6 +8,7 @@ from config import is_checkin_mode
 from components.app_shell import app_shell
 from components.bottom_navigation import bottom_navigation
 from services.auth_service import sign_out_local_session
+from services.authorization_service import puede_administrar_lugares
 from services.evento_context_service import (
     guardar_contexto_sesion,
     guardar_eventos_disponibles,
@@ -37,9 +38,21 @@ from services.invitado_service import (
     reversar_llegada,
 )
 from services.session_service import PageSessionController
+from services.lugar_service import (
+    actualizar_lugar,
+    actualizar_salon,
+    cambiar_estado_lugar,
+    cambiar_estado_salon,
+    crear_lugar,
+    crear_salon,
+    listar_lugares,
+    listar_paises,
+    listar_salones,
+)
 from views.arrivals_view import arrivals_view
 from views.dashboard_view import dashboard_view
 from views.invitados_view import invitados_view
+from views.lugares_view import lugares_view
 
 
 def _placeholder(title: str, message: str) -> ft.Control:
@@ -102,9 +115,48 @@ def build_home_view(
         "arrivals_saving": False,
         "arrivals_request_id": 0,
         "arrivals_event_key": None,
+        "lugares_estado": "idle",
+        "lugares_mensaje": "",
+        "lugares": [],
+        "lugares_paises": [],
+        "lugar_seleccionado": None,
+        "lugares_salones": [],
+        "lugares_form": None,
+        "lugares_form_message": "",
+        "lugares_saving": False,
     }
 
     def build_content() -> ft.Control:
+        if state["selected"] == "locations":
+            if checkin_mode or not puede_administrar_lugares(contexto_usuario):
+                return _placeholder(
+                    "Acceso denegado",
+                    "Tu rol o modo de aplicacion no permite administrar lugares y salones.",
+                )
+            return lugares_view(
+                contexto=contexto_usuario,
+                estado=state["lugares_estado"],
+                mensaje=state["lugares_mensaje"],
+                lugares=state["lugares"],
+                lugar_seleccionado=state["lugar_seleccionado"],
+                salones=state["lugares_salones"],
+                paises=state["lugares_paises"],
+                form=state["lugares_form"],
+                form_message=state["lugares_form_message"],
+                saving=state["lugares_saving"],
+                can_manage=puede_administrar_lugares(contexto_usuario),
+                on_retry=cargar_lugares,
+                on_select_place=seleccionar_lugar,
+                on_new_place=abrir_form_crear_lugar,
+                on_edit_place=abrir_form_editar_lugar,
+                on_change_place_state=confirmar_estado_lugar,
+                on_new_room=abrir_form_crear_salon,
+                on_edit_room=abrir_form_editar_salon,
+                on_change_room_state=confirmar_estado_salon,
+                on_save_form=guardar_form_lugares,
+                on_cancel_form=cancelar_form_lugares,
+            )
+
         if state["selected"] == "guests":
             can_manage_planned = False if checkin_mode else puede_administrar_invitados_planificados(contexto_usuario)
             can_manage_unexpected = False if checkin_mode else puede_registrar_imprevisto(contexto_usuario)
@@ -203,6 +255,7 @@ def build_home_view(
             on_select=select_tab,
             on_logout=logout,
             on_change_context=cambiar_contexto_evento,
+            on_manage_locations=lambda: select_tab("locations"),
         )
 
     def configure_navigation_bar() -> None:
@@ -643,6 +696,183 @@ def build_home_view(
 
         page.show_dialog(dialog)
 
+    def cargar_lugares() -> None:
+        if checkin_mode or not puede_administrar_lugares(contexto_usuario):
+            state["lugares_estado"] = "denied"
+            state["lugares_mensaje"] = "No tienes permisos para administrar lugares y salones."
+            render()
+            return
+        if state["lugares_estado"] == "loading":
+            return
+        state["lugares_estado"] = "loading"
+        state["lugares_mensaje"] = "Cargando lugares..."
+        render()
+
+        def worker() -> None:
+            resultado = listar_lugares(supabase, contexto_usuario)
+            paises = listar_paises(supabase)
+            state["lugares_estado"] = resultado.estado if resultado.ok else "error"
+            state["lugares_mensaje"] = resultado.mensaje
+            state["lugares"] = resultado.items if resultado.ok else []
+            state["lugares_paises"] = paises.items if paises.ok else []
+            seleccionado = state.get("lugar_seleccionado")
+            if seleccionado:
+                actualizado = next(
+                    (
+                        item
+                        for item in state["lugares"]
+                        if item.get("lugar_id") == seleccionado.get("lugar_id")
+                    ),
+                    None,
+                )
+                state["lugar_seleccionado"] = actualizado
+                if actualizado:
+                    cargar_salones(actualizado, render_after=False)
+                else:
+                    state["lugares_salones"] = []
+            render()
+
+        page.run_thread(worker)
+
+    def cargar_salones(lugar: dict[str, Any], *, render_after: bool = True) -> None:
+        resultado = listar_salones(
+            supabase,
+            contexto_usuario,
+            lugar.get("lugar_id"),
+        )
+        state["lugares_salones"] = resultado.items if resultado.ok else []
+        if not resultado.ok:
+            state["lugares_mensaje"] = resultado.mensaje
+        if render_after:
+            render()
+
+    def seleccionar_lugar(lugar: dict[str, Any]) -> None:
+        state["lugar_seleccionado"] = lugar
+        state["lugares_form"] = None
+        state["lugares_form_message"] = ""
+        cargar_salones(lugar)
+
+    def abrir_form_crear_lugar() -> None:
+        if not puede_administrar_lugares(contexto_usuario):
+            state["lugares_form_message"] = "No tienes permisos para crear lugares."
+            render()
+            return
+        state["lugares_form"] = {"modo": "crear_lugar", "item": {}}
+        state["lugares_form_message"] = ""
+        render()
+
+    def abrir_form_editar_lugar(lugar: dict[str, Any]) -> None:
+        if not puede_administrar_lugares(contexto_usuario):
+            state["lugares_form_message"] = "No tienes permisos para editar lugares."
+            render()
+            return
+        state["lugares_form"] = {"modo": "editar_lugar", "item": dict(lugar)}
+        state["lugares_form_message"] = ""
+        render()
+
+    def abrir_form_crear_salon() -> None:
+        if not state.get("lugar_seleccionado"):
+            state["lugares_mensaje"] = "Selecciona un lugar antes de agregar un salon."
+            render()
+            return
+        state["lugares_form"] = {"modo": "crear_salon", "item": {}}
+        state["lugares_form_message"] = ""
+        render()
+
+    def abrir_form_editar_salon(salon: dict[str, Any]) -> None:
+        state["lugares_form"] = {"modo": "editar_salon", "item": dict(salon)}
+        state["lugares_form_message"] = ""
+        render()
+
+    def cancelar_form_lugares() -> None:
+        state["lugares_form"] = None
+        state["lugares_form_message"] = ""
+        render()
+
+    def guardar_form_lugares(payload: dict[str, Any]) -> None:
+        form = state.get("lugares_form")
+        if not form or state["lugares_saving"]:
+            return
+        state["lugares_saving"] = True
+        state["lugares_form_message"] = ""
+        render()
+
+        def worker() -> None:
+            try:
+                modo = form.get("modo")
+                if modo == "crear_lugar":
+                    resultado = crear_lugar(supabase, contexto_usuario, payload)
+                elif modo == "editar_lugar":
+                    resultado = actualizar_lugar(
+                        supabase,
+                        contexto_usuario,
+                        (form.get("item") or {}).get("lugar_id"),
+                        payload,
+                    )
+                elif modo == "crear_salon":
+                    resultado = crear_salon(
+                        supabase,
+                        contexto_usuario,
+                        (state.get("lugar_seleccionado") or {}).get("lugar_id"),
+                        payload,
+                    )
+                else:
+                    item = form.get("item") or {}
+                    resultado = actualizar_salon(
+                        supabase,
+                        contexto_usuario,
+                        item.get("lugar_id"),
+                        item.get("salon_id"),
+                        payload,
+                    )
+                state["lugares_form_message"] = resultado.mensaje
+                if resultado.ok:
+                    state["lugares_form"] = None
+                    cargar_lugares()
+            finally:
+                state["lugares_saving"] = False
+                render()
+
+        page.run_thread(worker)
+
+    def confirmar_estado_lugar(lugar: dict[str, Any], estado: str) -> None:
+        mostrar_dialogo_confirmacion(
+            f"{'Activar' if estado == 'Activo' else 'Desactivar'} lugar",
+            "Se verificaran eventos activos o no cerrados antes de aplicar el cambio.",
+            "Confirmar",
+            lambda: ejecutar_estado_lugar(lugar, estado),
+        )
+
+    def ejecutar_estado_lugar(lugar: dict[str, Any], estado: str) -> None:
+        resultado = cambiar_estado_lugar(
+            supabase,
+            contexto_usuario,
+            lugar.get("lugar_id"),
+            estado,
+        )
+        state["lugares_mensaje"] = resultado.mensaje
+        cargar_lugares()
+
+    def confirmar_estado_salon(salon: dict[str, Any], estado: str) -> None:
+        mostrar_dialogo_confirmacion(
+            f"{'Activar' if estado == 'Activo' else 'Desactivar'} salon",
+            "Se verificaran eventos activos o no cerrados antes de aplicar el cambio.",
+            "Confirmar",
+            lambda: ejecutar_estado_salon(salon, estado),
+        )
+
+    def ejecutar_estado_salon(salon: dict[str, Any], estado: str) -> None:
+        resultado = cambiar_estado_salon(
+            supabase,
+            contexto_usuario,
+            salon.get("lugar_id"),
+            salon.get("salon_id"),
+            estado,
+        )
+        state["lugares_mensaje"] = resultado.mensaje
+        if state.get("lugar_seleccionado"):
+            cargar_salones(state["lugar_seleccionado"])
+
     def confirmar_reversion_llegada(invitado: dict[str, Any]) -> None:
         mostrar_dialogo_confirmacion(
             "Reversar llegada",
@@ -1021,6 +1251,14 @@ def build_home_view(
         render()
 
     def select_tab(tab: str) -> None:
+        if tab == "locations":
+            if checkin_mode or not puede_administrar_lugares(contexto_usuario):
+                state["selected"] = "locations"
+                render()
+                return
+            state["selected"] = "locations"
+            cargar_lugares()
+            return
         if not (contexto_usuario.get("cuenta_actual") and contexto_usuario.get("evento_actual")):
             if tab == "guests":
                 state["selected"] = "guests"

@@ -286,6 +286,11 @@ evp_inv_invitacion
 evp_ivt_invitado
 ```
 
+`evp_lug_lugar` y `evp_sal_salon` disponen de administración en modo FULL para
+Master y Administrador: alta, edición y cambio de estado sin DELETE físico. El
+servicio filtra por la cuenta activa autorizada y deja los IDs relativos a los
+triggers. Operador, Consulta y CHECKIN no exponen este módulo.
+
 ---
 
 ## 10. Consecutivos relativos

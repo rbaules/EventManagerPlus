@@ -46,8 +46,8 @@ rol de cuenta estrictamente de lectura: no es Master ni equivale a inactividad.
 | `evp_usr_usuario` | `usr_usuario_id` | Auth UUID; defaults a cuenta/evento | `usr_estado`, master | SELECT |
 | `evp_ucu_usuario_cuenta` | cuenta + usuario | cuenta, usuario | `ucu_estado`, `ucu_rol` | SELECT |
 | `evp_pai_pais` | `pai_pais_id` | ninguna; catálogo | — | no usada |
-| `evp_lug_lugar` | cuenta + lugar | cuenta, país | `lug_estado` | no usada |
-| `evp_sal_salon` | cuenta + lugar + salón | cuenta/lugar | `sal_estado` | no usada |
+| `evp_lug_lugar` | cuenta + lugar | cuenta, país | `lug_estado` | módulo FULL Master/Admin |
+| `evp_sal_salon` | cuenta + lugar + salón | cuenta/lugar | `sal_estado` | módulo FULL Master/Admin |
 | `evp_eve_evento` | cuenta + evento | cuenta, lugar/salón | `eve_estado`, `eve_fase_evento` | SELECT |
 | `evp_uev_usuario_evento` | cuenta + evento + usuario | cuenta/evento/usuario | `uev_estado` | SELECT |
 | `evp_mes_mesa` | cuenta + evento + mesa | cuenta/evento | `mes_estado` | no usada directamente |
