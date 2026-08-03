@@ -1,8 +1,17 @@
 # Plan de finalización funcional de EventPlus
 
+> Actualización 2026-07-30: Administración de eventos implementada en FULL para
+> Master/Administrador. Incluye CRUD lógico, ubicación validada, fases
+> `Pre_evento → En_proceso → Post_evento`, predeterminado por usuario y pruebas.
+> RPC/RLS siguen pendientes. Véase `docs/EVENTOS_ADMIN_MODULE.md`.
+
 Estado de la auditoría: 29 de julio de 2026. Este documento describe el
 repositorio local; no afirma el estado remoto de Supabase cuando no existe
 evidencia exportada. No se ejecutó SQL ni se aplicó RLS durante esta auditoría.
+
+> Esquema autoritativo: `C:\WORKSPACE\EVENTPLUS\esquema.sql`. El módulo usa los
+> valores completos del CHECK. El default vigente `Otro` fue aplicado manualmente
+> en Supabase el 2 de agosto de 2026 y es compatible con la restricción.
 
 ## 1. Resumen ejecutivo
 

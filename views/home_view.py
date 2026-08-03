@@ -8,7 +8,7 @@ from config import is_checkin_mode
 from components.app_shell import app_shell
 from components.bottom_navigation import bottom_navigation
 from services.auth_service import sign_out_local_session
-from services.authorization_service import puede_administrar_lugares
+from services.authorization_service import puede_administrar_lugares, puede_ver_administracion_eventos
 from services.evento_context_service import (
     guardar_contexto_sesion,
     guardar_eventos_disponibles,
@@ -17,7 +17,18 @@ from services.evento_context_service import (
     sincronizar_evento_activo,
     establecer_evento_activo,
 )
-from services.evento_service import obtener_eventos_disponibles
+from services.evento_service import (
+    actualizar_evento,
+    cambiar_estado_evento,
+    cerrar_evento,
+    crear_evento,
+    establecer_evento_predeterminado,
+    iniciar_evento,
+    listar_eventos_administrables,
+    listar_lugares_disponibles,
+    listar_salones_disponibles,
+    obtener_eventos_disponibles,
+)
 from services.invitado_service import (
     INVITADOS_PAGE_SIZE,
     actualizar_invitado_planificado,
@@ -53,6 +64,7 @@ from views.arrivals_view import arrivals_view
 from views.dashboard_view import dashboard_view
 from views.invitados_view import invitados_view
 from views.lugares_view import lugares_view
+from views.eventos_admin_view import eventos_admin_view
 
 
 def _placeholder(title: str, message: str) -> ft.Control:
@@ -72,6 +84,14 @@ def _placeholder(title: str, message: str) -> ft.Control:
             color=ft.Colors.OUTLINE_VARIANT,
         ),
     )
+
+
+def _registrar_resultado_form_evento(state: dict[str, Any], result: Any) -> None:
+    """Aplica siempre una respuesta visible al estado del formulario de eventos."""
+    state["eventos_admin_form_message"] = result.mensaje
+    state["eventos_admin_mensaje"] = result.mensaje
+    if result.ok:
+        state["eventos_admin_form"] = None
 
 
 def build_home_view(
@@ -124,9 +144,50 @@ def build_home_view(
         "lugares_form": None,
         "lugares_form_message": "",
         "lugares_saving": False,
+        "eventos_admin_estado": "idle",
+        "eventos_admin_mensaje": "",
+        "eventos_admin_items": [],
+        "eventos_admin_lugares": [],
+        "eventos_admin_salones": [],
+        "eventos_admin_form": None,
+        "eventos_admin_form_message": "",
+        "eventos_admin_saving": False,
+        "eventos_admin_filtros": {"busqueda": "", "fase": "Todas", "estado": "Todos", "desde": "", "hasta": ""},
     }
 
     def build_content() -> ft.Control:
+        if state["selected"] == "events_admin":
+            if checkin_mode or not puede_ver_administracion_eventos(contexto_usuario):
+                return eventos_admin_view(
+                    contexto_usuario, "denied", "", [], [], [], None, "", False, {},
+                    cargar_eventos_admin, abrir_form_crear_evento, abrir_form_editar_evento,
+                    cargar_salones_evento, guardar_form_evento, cancelar_form_evento,
+                    aplicar_filtros_eventos, solicitar_estado_evento, solicitar_inicio_evento,
+                    solicitar_cierre_evento, hacer_evento_predeterminado,
+                )
+            return eventos_admin_view(
+                contexto=contexto_usuario,
+                estado=state["eventos_admin_estado"],
+                mensaje=state["eventos_admin_mensaje"],
+                eventos=state["eventos_admin_items"],
+                lugares=state["eventos_admin_lugares"],
+                salones=state["eventos_admin_salones"],
+                form=state["eventos_admin_form"],
+                form_message=state["eventos_admin_form_message"],
+                saving=state["eventos_admin_saving"],
+                filtros=state["eventos_admin_filtros"],
+                on_retry=cargar_eventos_admin,
+                on_new=abrir_form_crear_evento,
+                on_edit=abrir_form_editar_evento,
+                on_place_change=cargar_salones_evento,
+                on_save=guardar_form_evento,
+                on_cancel=cancelar_form_evento,
+                on_filter=aplicar_filtros_eventos,
+                on_state=solicitar_estado_evento,
+                on_start=solicitar_inicio_evento,
+                on_close=solicitar_cierre_evento,
+                on_default=hacer_evento_predeterminado,
+            )
         if state["selected"] == "locations":
             if checkin_mode or not puede_administrar_lugares(contexto_usuario):
                 return _placeholder(
@@ -256,6 +317,7 @@ def build_home_view(
             on_logout=logout,
             on_change_context=cambiar_contexto_evento,
             on_manage_locations=lambda: select_tab("locations"),
+            on_manage_events=lambda: select_tab("events_admin"),
         )
 
     def configure_navigation_bar() -> None:
@@ -1170,6 +1232,270 @@ def build_home_view(
         state["selected"] = "dashboard"
         render()
 
+    def cargar_eventos_admin(mensaje_exito: str = "") -> None:
+        if checkin_mode or not puede_ver_administracion_eventos(contexto_usuario):
+            state["eventos_admin_estado"] = "denied"
+            render()
+            return
+        state["eventos_admin_estado"] = "loading"
+        state["eventos_admin_mensaje"] = mensaje_exito or "Cargando eventos..."
+        render()
+
+        def worker() -> None:
+            try:
+                result = listar_eventos_administrables(
+                    contexto_usuario,
+                    contexto_usuario.get("cuenta_actual"),
+                    supabase,
+                )
+                state["eventos_admin_items"] = result.eventos
+                state["eventos_admin_estado"] = result.estado if result.ok else "error"
+                state["eventos_admin_mensaje"] = mensaje_exito or result.mensaje
+                if result.ok:
+                    places = listar_lugares_disponibles(
+                        contexto_usuario,
+                        contexto_usuario.get("cuenta_actual"),
+                        supabase,
+                    )
+                    rooms: list[dict[str, Any]] = []
+                    for place in places:
+                        rooms.extend(
+                            listar_salones_disponibles(
+                                contexto_usuario,
+                                place.get("lug_lugar_id"),
+                                contexto_usuario.get("cuenta_actual"),
+                                supabase,
+                            )
+                        )
+                    state["eventos_admin_lugares"] = places
+                    state["eventos_admin_salones"] = rooms
+            finally:
+                render()
+
+        page.run_thread(worker)
+
+    def abrir_form_crear_evento() -> None:
+        from views.eventos_admin_view import EventFormState
+        state["eventos_admin_form"] = {
+            "modo": "crear",
+            "evento": {"tipo_evento": "Otro", "estado": "Activo"},
+            "estado_form": EventFormState.desde_evento("crear"),
+        }
+        state["eventos_admin_form_message"] = ""
+        state["eventos_admin_salones"] = []
+        render()
+
+    def abrir_form_editar_evento(evento: dict[str, Any]) -> None:
+        from views.eventos_admin_view import EventFormState
+        state["eventos_admin_form"] = {
+            "modo": "editar",
+            "evento": dict(evento),
+            "estado_form": EventFormState.desde_evento("editar", evento),
+        }
+        state["eventos_admin_form_message"] = ""
+        salon_id = evento.get("salon_id")
+        cargar_salones_evento(evento.get("lugar_id"), renderizar=False)
+        state["eventos_admin_form"]["estado_form"].salon_id = salon_id
+        render()
+
+    def cargar_salones_evento(lugar_id: Any, valores: dict[str, Any] | None = None, renderizar: bool = False) -> list[dict[str, Any]]:
+        try:
+            form = state.get("eventos_admin_form")
+            if form and valores:
+                form["estado_form"].actualizar(valores)
+            state["eventos_admin_salones"] = listar_salones_disponibles(
+                contexto_usuario,
+                lugar_id,
+                contexto_usuario.get("cuenta_actual"),
+                supabase,
+            )
+            if form:
+                form["estado_form"].lugar_id = lugar_id
+                validos = {str(item.get("sal_salon_id")) for item in state["eventos_admin_salones"]}
+                if form["estado_form"].salon_id is not None and str(form["estado_form"].salon_id) not in validos:
+                    form["estado_form"].salon_id = None
+        except Exception as ex:
+            print("[EVENTOS_ADMIN][ERROR] cargar_salones", type(ex).__name__, str(ex))
+            state["eventos_admin_salones"] = []
+            state["eventos_admin_form_message"] = "No fue posible cargar los salones del lugar."
+        if renderizar:
+            render()
+        return state["eventos_admin_salones"]
+
+    def cancelar_form_evento() -> None:
+        state["eventos_admin_form"] = None
+        state["eventos_admin_form_message"] = ""
+        cargar_eventos_admin()
+
+    def _sincronizar_evento_modificado(evento: dict[str, Any] | None) -> None:
+        if not evento:
+            return
+        key = (evento.get("cuenta_id"), evento.get("evento_id"))
+        state["eventos_admin_items"] = [
+            dict(evento) if (item.get("cuenta_id"), item.get("evento_id")) == key else item
+            for item in state["eventos_admin_items"]
+        ]
+        context_items = contexto_usuario.get("eventos_permitidos") or []
+        found_context = False
+        for index, item in enumerate(context_items):
+            if (item.get("cuenta_id"), item.get("evento_id")) == key:
+                context_items[index] = {**item, **evento}
+                found_context = True
+        if not found_context:
+            role = (contexto_usuario.get("cuenta_actual") or {}).get("rol") or contexto_usuario.get("rol_global_calculado")
+            context_items.append({**evento, "rol": role})
+            contexto_usuario["eventos_permitidos"] = context_items
+        found_dashboard = False
+        for index, item in enumerate(state["eventos"]):
+            if (item.get("cuenta_id"), item.get("evento_id")) == key:
+                state["eventos"][index] = {**item, **evento}
+                found_dashboard = True
+        if not found_dashboard:
+            state["eventos"].append({**evento, "rol": (contexto_usuario.get("cuenta_actual") or {}).get("rol")})
+        if (
+            (contexto_usuario.get("evento_actual") or {}).get("cuenta_id"),
+            (contexto_usuario.get("evento_actual") or {}).get("evento_id"),
+        ) == key:
+            establecer_evento_activo(contexto_usuario, evento)
+            reset_invitados()
+            reset_llegadas()
+        guardar_contexto_sesion(page.session.store, contexto_usuario)
+
+    def guardar_form_evento(payload: dict[str, Any]) -> None:
+        form = state.get("eventos_admin_form")
+        if not form or state["eventos_admin_saving"]:
+            if not form:
+                state["eventos_admin_mensaje"] = "El formulario ya no esta disponible. Vuelve a abrirlo."
+                render()
+            return
+        state["eventos_admin_saving"] = True
+        state["eventos_admin_form_message"] = "Guardando..."
+        print("[EVENTOS_ADMIN][INFO] Inicio de guardado:", f"modo={form.get('modo')}")
+        render()
+
+        def worker() -> None:
+            try:
+                if form["modo"] == "crear":
+                    print("[EVENTOS_ADMIN][INFO] Llamando crear_evento.")
+                    result = crear_evento(contexto_usuario, payload, contexto_usuario.get("cuenta_actual"), supabase)
+                else:
+                    original = form["evento"]
+                    editable = {
+                        key: value
+                        for key, value in payload.items()
+                        if key not in {"fase_evento", "estado"}
+                    }
+                    result = actualizar_evento(
+                        contexto_usuario,
+                        original.get("evento_id"),
+                        editable,
+                        contexto_usuario.get("cuenta_actual"),
+                        supabase,
+                    )
+                print(
+                    "[EVENTOS_ADMIN][INFO] Resultado de guardado:",
+                    f"modo={form.get('modo')}",
+                    f"estado={result.estado}",
+                    f"ok={result.ok}",
+                )
+                _registrar_resultado_form_evento(state, result)
+                if result.ok:
+                    _sincronizar_evento_modificado(result.evento)
+                    refreshed = listar_eventos_administrables(
+                        contexto_usuario,
+                        contexto_usuario.get("cuenta_actual"),
+                        supabase,
+                    )
+                    if refreshed.ok:
+                        state["eventos_admin_items"] = refreshed.eventos
+                        state["eventos_admin_estado"] = refreshed.estado
+                        state["eventos_admin_mensaje"] = result.mensaje
+                    else:
+                        state["eventos_admin_estado"] = "ready"
+                        state["eventos_admin_mensaje"] = (
+                            f"{result.mensaje} No fue posible recargar la lista: "
+                            f"{refreshed.mensaje}"
+                        )
+                    return
+            except Exception as ex:
+                print(
+                    "[EVENTOS_ADMIN][ERROR] Excepcion inesperada al guardar:",
+                    type(ex).__name__,
+                    str(ex),
+                )
+                message = "Ocurrio un error inesperado al guardar el evento. Intenta nuevamente."
+                state["eventos_admin_form_message"] = message
+                state["eventos_admin_mensaje"] = message
+            finally:
+                state["eventos_admin_saving"] = False
+                render()
+
+        page.run_thread(worker)
+
+    def aplicar_filtros_eventos(filters: dict[str, str]) -> None:
+        state["eventos_admin_filtros"] = filters
+        render()
+
+    def _ejecutar_accion_evento(action: Any, event: dict[str, Any], *args: Any) -> None:
+        if state["eventos_admin_saving"]:
+            return
+        state["eventos_admin_saving"] = True
+        state["eventos_admin_mensaje"] = "Procesando..."
+        render()
+
+        def worker() -> None:
+            try:
+                result = action(
+                    contexto_usuario,
+                    event.get("evento_id"),
+                    *args,
+                    contexto_usuario.get("cuenta_actual"),
+                    supabase,
+                )
+                state["eventos_admin_mensaje"] = result.mensaje
+                if result.ok:
+                    _sincronizar_evento_modificado(result.evento)
+                    if result.evento and result.evento.get("estado") != "Activo":
+                        current = contexto_usuario.get("evento_actual") or {}
+                        if (current.get("cuenta_id"), current.get("evento_id")) == (
+                            result.evento.get("cuenta_id"),
+                            result.evento.get("evento_id"),
+                        ):
+                            limpiar_evento_activo(contexto_usuario)
+                            guardar_contexto_sesion(page.session.store, contexto_usuario)
+            finally:
+                state["eventos_admin_saving"] = False
+                render()
+
+        page.run_thread(worker)
+
+    def solicitar_estado_evento(event: dict[str, Any], estado: str) -> None:
+        mostrar_dialogo_confirmacion(
+            f"{'Activar' if estado == 'Activo' else 'Desactivar'} evento",
+            "Confirma el cambio de estado administrativo. Si es el evento activo, se limpiará la selección.",
+            "Confirmar",
+            lambda: _ejecutar_accion_evento(cambiar_estado_evento, event, estado),
+        )
+
+    def solicitar_inicio_evento(event: dict[str, Any]) -> None:
+        mostrar_dialogo_confirmacion(
+            "Iniciar evento",
+            "El evento pasará a En_proceso y habilitará las operaciones de check-in autorizadas.",
+            "Iniciar",
+            lambda: _ejecutar_accion_evento(iniciar_evento, event),
+        )
+
+    def solicitar_cierre_evento(event: dict[str, Any]) -> None:
+        mostrar_dialogo_confirmacion(
+            "Cerrar evento",
+            "El evento pasará a Post_evento y dejará de admitir nuevas llegadas.",
+            "Cerrar",
+            lambda: _ejecutar_accion_evento(cerrar_evento, event),
+        )
+
+    def hacer_evento_predeterminado(event: dict[str, Any]) -> None:
+        _ejecutar_accion_evento(establecer_evento_predeterminado, event)
+
     def cargar_eventos() -> None:
         if state["eventos_loading"]:
             return
@@ -1251,6 +1577,10 @@ def build_home_view(
         render()
 
     def select_tab(tab: str) -> None:
+        if tab == "events_admin":
+            state["selected"] = "events_admin"
+            cargar_eventos_admin()
+            return
         if tab == "locations":
             if checkin_mode or not puede_administrar_lugares(contexto_usuario):
                 state["selected"] = "locations"

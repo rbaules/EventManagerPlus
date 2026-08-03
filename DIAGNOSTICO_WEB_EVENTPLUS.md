@@ -1,6 +1,17 @@
 # Diagnóstico técnico para migración web de EventPlus
 
+## Administración de eventos — 2026-07-30
+
+Integrada exclusivamente en FULL mediante el menú administrativo del encabezado.
+No modifica autenticación, OAuth, ASGI, cookies ni sesión server-side. Continúa
+usando el cliente Supabase creado por Page y pasado explícitamente al servicio.
+CHECKIN no importa ni navega directamente al módulo administrativo.
+
 Fecha de auditoría: 25 de julio de 2026  
+Esquema autoritativo: `C:\WORKSPACE\EVENTPLUS\esquema.sql`. El CHECK de tipo exige
+`Boda`, `Cumpleaños`, `Quinceaños`, `Corporativo` u `Otro`. El default vigente
+es `Otro` y satisface la restricción.
+
 Repositorio auditado: `C:\WORKSPACE\EVENTPLUS`  
 Entorno validado: Python 3.14.6, Flet 0.85.3, Supabase 2.31.0  
 Alcance: auditoría estática y pruebas controladas, sin modificar código, configuración ni dependencias.

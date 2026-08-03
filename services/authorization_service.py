@@ -31,28 +31,42 @@ class Capacidades:
     puede_crear_salon: bool
     puede_editar_salon: bool
     puede_desactivar_salon: bool
+    puede_ver_administracion_eventos: bool
+    puede_crear_evento: bool
+    puede_editar_evento: bool
+    puede_cambiar_ubicacion_evento: bool
+    puede_activar_evento: bool
+    puede_desactivar_evento: bool
+    puede_iniciar_evento: bool
+    puede_cerrar_evento: bool
+    puede_establecer_evento_predeterminado: bool
 
 
 _SIN_CAPACIDADES = Capacidades(
     False, False, False, False, False, False, False, False, False,
     False, False, False, False, False, False, False,
+    False, False, False, False, False, False, False, False, False,
 )
 _CAPACIDADES_POR_ROL = {
     ROL_MASTER: Capacidades(
         True, True, True, True, True, True, True, True, True,
         True, True, True, True, True, True, True,
+        True, True, True, True, True, True, True, True, True,
     ),
     ROL_ADMINISTRADOR: Capacidades(
         True, True, True, True, True, True, True, True, True,
         True, True, True, True, True, True, True,
+        True, True, True, True, True, True, True, True, True,
     ),
     ROL_OPERADOR: Capacidades(
         True, False, True, True, True, False, False, True, True,
         False, False, False, False, False, False, False,
+        False, False, False, False, False, False, False, False, False,
     ),
     ROL_CONSULTA: Capacidades(
         True, False, False, False, False, False, False, False, False,
         False, False, False, False, False, False, False,
+        False, False, False, False, False, False, False, False, False,
     ),
 }
 
@@ -168,6 +182,42 @@ def puede_editar_salon(contexto: dict[str, Any] | None) -> bool:
 
 def puede_desactivar_salon(contexto: dict[str, Any] | None) -> bool:
     return capacidades_contexto(contexto).puede_desactivar_salon
+
+
+def puede_ver_administracion_eventos(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_ver_administracion_eventos
+
+
+def puede_crear_evento(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_crear_evento
+
+
+def puede_editar_evento(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_editar_evento
+
+
+def puede_cambiar_ubicacion_evento(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_cambiar_ubicacion_evento
+
+
+def puede_activar_evento(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_activar_evento
+
+
+def puede_desactivar_evento(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_desactivar_evento
+
+
+def puede_iniciar_evento(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_iniciar_evento
+
+
+def puede_cerrar_evento(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_cerrar_evento
+
+
+def puede_establecer_evento_predeterminado(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_establecer_evento_predeterminado
 
 
 def resumen_capacidades(contexto: dict[str, Any] | None) -> dict[str, bool]:

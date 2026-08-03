@@ -1,5 +1,14 @@
 # EVENTPLUS_SCHEMA_CONTEXT_v1_1.md
 
+## Nota de implementación 2026-07-30
+
+Administración de eventos usa exclusivamente las columnas documentadas en 4.7.
+El 2 de agosto de 2026 se corrigió manualmente en Supabase el default de
+`eve_tipo_evento` a `Otro`. `Cerrado` se conserva como valor
+terminal reconocido, mientras la acción ordinaria de cierre transiciona de
+`En_proceso` a `Post_evento`. Metadatos completos pueden verificarse con
+`scripts/eventos_schema_diagnostics.sql`.
+
 ## 1. Propósito de este archivo
 
 Este archivo complementa `EVENTPLUS_CONTEXT.md`.
@@ -263,7 +272,7 @@ eve_evento_id integer NOT NULL
 eve_nombre_evento varchar(50) NOT NULL
 eve_nombre_evento_abrev varchar(20)
 eve_fase_evento varchar(20) NOT NULL DEFAULT 'Pre_evento'
-eve_tipo_evento varchar(1) NOT NULL DEFAULT 'O'
+eve_tipo_evento varchar(15) NOT NULL DEFAULT 'Otro'
 eve_lugar_id integer NOT NULL
 eve_salon_id integer NOT NULL
 eve_cant_mesas integer
@@ -282,9 +291,12 @@ Valores válidos:
 
 ```text
 eve_fase_evento: Pre_evento, En_proceso, Post_evento, Cerrado
-eve_tipo_evento: B, Q, A, C, O
+eve_tipo_evento: Boda, Cumpleaños, Quinceaños, Corporativo, Otro
 eve_estado: Activo, Suspendido, Inactivo
 ```
+
+`esquema.sql` es la exportación autoritativa actual. El default `Otro` satisface
+`chk_eve_tipo_evento`; ya no existe incompatibilidad entre ambos.
 
 Reglas:
 

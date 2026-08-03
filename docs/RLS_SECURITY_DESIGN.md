@@ -1,5 +1,22 @@
 # Diseño de seguridad RLS de EventPlus
 
+## Administración de eventos — diseño futuro
+
+Master/Administrador: SELECT, INSERT y UPDATE solo dentro del alcance y con
+`WITH CHECK` que conserve `eve_cuenta_id`. Operador/Consulta: SELECT únicamente
+de eventos asignados; ninguna escritura administrativa. Anon: sin acceso.
+DELETE directo no se concede.
+
+Fuente autoritativa: `C:\WORKSPACE\EVENTPLUS\esquema.sql`. `eve_tipo_evento`
+debe ser `Boda`, `Cumpleaños`, `Quinceaños`, `Corporativo` u `Otro`.
+
+Crear, cambiar ubicación/estado, iniciar y cerrar deben migrar a RPC
+`SECURITY DEFINER` endurecidas antes de activar RLS. Cada RPC debe resolver
+`auth.uid()`, validar rol/tenant, bloquear columnas protegidas y comparar
+fase/estado actual para concurrencia. El predeterminado debe actualizar
+exclusivamente la fila propia de `evp_usr_usuario`. Este diseño no ha sido
+aplicado remotamente.
+
 Estado: **diseñado, no aplicado**. Fecha: 27 de julio de 2026.
 
 ## Alcance, evidencia y limitaciones

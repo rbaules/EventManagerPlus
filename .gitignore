@@ -13,3 +13,11 @@ dist/
 *.aab
 *.jks
 *.keystore
+
+# Supabase CLI local metadata
+supabase/.temp/
+supabase/**/.temp/
+
+# Runtime and test logs
+logs/
+.tmp_*.log

@@ -1,5 +1,21 @@
 # EVENTPLUS_CONTEXT.md
 
+## Actualización: administración de eventos (2026-07-30)
+
+FULL expone Administración de eventos en el menú de usuario únicamente para
+Master y Administrador. El servicio filtra por la cuenta activa, no acepta
+`cuenta_id` desde formularios y sincroniza `evento_actual` después de cambios.
+Operador, Consulta y CHECKIN no exponen el módulo. El ciclo permitido es
+`Pre_evento → En_proceso → Post_evento`; no hay reapertura. El predeterminado se
+guarda solo en `evp_usr_usuario` para el usuario actual.
+
+### Esquema autoritativo
+
+`C:\WORKSPACE\EVENTPLUS\esquema.sql` es la fuente de verdad actual.
+`eve_tipo_evento` admite `Boda`, `Cumpleaños`, `Quinceaños`, `Corporativo` y `Otro`.
+Su default vigente es `Otro`, aplicado manualmente en Supabase el 2 de agosto de
+2026 y validado mediante una nueva exportación completa del esquema.
+
 ## 1. Objetivo del proyecto
 
 EventPlus es una aplicación web desarrollada en **Python + Flet + Supabase** para controlar la entrada de invitados a eventos.
