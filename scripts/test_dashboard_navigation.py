@@ -49,7 +49,8 @@ def test_metricas_dashboard() -> None:
     assert data.porcentaje_invitados == 60.0
     assert data.total_mesas == 3
     assert data.mesas_con_invitados == 2
-    assert data.mesas_completas == 1 and data.porcentaje_mesas == 50.0
+    assert data.mesas_completas == 1 and round(data.porcentaje_mesas, 2) == 33.33
+    assert data.mesas_pendientes == 2
     assert data.mesas_parciales == 1 and data.mesas_sin_llegadas == 0
     assert data.invitados_con_novedad == 3
     assert data.invitados_pendientes == 2 and data.porcentaje_pendientes == 40.0
@@ -68,7 +69,7 @@ def test_intervalos_limites_y_medianoche() -> None:
     ]
     intervals = construir_intervalos_llegadas(start.isoformat(), arrivals)
     assert len(intervals) == 8
-    assert [item.cantidad for item in intervals] == [2, 1, 1, 0, 0, 0, 0, 0]
+    assert [item.cantidad for item in intervals] == [1, 1, 1, 0, 0, 0, 0, 0]
     assert intervals[1].inicio.date() != intervals[0].inicio.date()
     assert construir_intervalos_llegadas(None, arrivals) == ()
 

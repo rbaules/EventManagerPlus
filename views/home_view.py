@@ -356,6 +356,7 @@ def build_home_view(
             contexto_usuario, estado=state["dashboard_estado"],
             indicadores=state["dashboard_indicadores"], mensaje=state["dashboard_mensaje"],
             on_retry=cargar_dashboard, ultima_actualizacion=state["dashboard_ultima_actualizacion"],
+            on_select_event=lambda: navigate("event_selection"),
         )
 
     def build_shell() -> ft.Control:

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from services.authorization_service import puede_consultar
 from services.evento_context_service import evento_key
 from services.response_utils import extract_data, safe_get, to_dict
 
@@ -26,6 +27,7 @@ class IndicadoresDashboard:
     total_mesas: int = 0
     mesas_con_invitados: int = 0
     mesas_completas: int = 0
+    mesas_pendientes: int = 0
     mesas_parciales: int = 0
     mesas_sin_llegadas: int = 0
     porcentaje_mesas_completas: float = 0.0
@@ -115,9 +117,9 @@ def construir_intervalos_llegadas(
     for llegada in llegadas:
         value = llegada if llegada.tzinfo is not None else llegada.replace(tzinfo=timezone.utc)
         value = value.astimezone(inicio.tzinfo)
-        if value >= limite:
+        if value < inicio or value >= limite:
             continue
-        index = 0 if value < inicio else int((value - inicio).total_seconds() // 900)
+        index = int((value - inicio).total_seconds() // 900)
         if 0 <= index < 8:
             cantidades[index] += 1
     return tuple(
@@ -183,6 +185,7 @@ def calcular_indicadores_dashboard(
             llegadas_por_mesa.setdefault(mesa_id, []).append(bool(safe_get(row, "ivt_llegada_confirmada", False)))
     mesas_con_invitados = len(llegadas_por_mesa)
     mesas_completas = sum(all(values) for values in llegadas_por_mesa.values())
+    mesas_pendientes = len(mesas_activas) - mesas_completas
     mesas_parciales = sum(len(values) >= 2 and any(values) and not all(values) for values in llegadas_por_mesa.values())
     mesas_sin_llegadas = sum(not any(values) for values in llegadas_por_mesa.values())
 
@@ -195,9 +198,10 @@ def calcular_indicadores_dashboard(
         total_mesas=len(mesas_activas),
         mesas_con_invitados=mesas_con_invitados,
         mesas_completas=mesas_completas,
+        mesas_pendientes=mesas_pendientes,
         mesas_parciales=mesas_parciales,
         mesas_sin_llegadas=mesas_sin_llegadas,
-        porcentaje_mesas_completas=(mesas_completas / mesas_con_invitados * 100) if mesas_con_invitados else 0.0,
+        porcentaje_mesas_completas=(mesas_completas / len(mesas_activas) * 100) if mesas_activas else 0.0,
         invitados_con_novedades=invitados_con_novedades,
         primera_llegada=_hora(timestamps[0], zona) if timestamps else "Sin llegadas",
         ultima_llegada=_hora(timestamps[-1], zona) if timestamps else "Sin llegadas",
@@ -211,6 +215,8 @@ def obtener_indicadores_dashboard(contexto: dict[str, Any] | None, supabase: Any
     key = evento_key(evento)
     if key is None:
         return ResultadoDashboard(False, "event_required", "Selecciona un evento activo.")
+    if not puede_consultar(contexto):
+        return ResultadoDashboard(False, "forbidden", "No tienes acceso de consulta a este evento.")
     if supabase is None:
         return ResultadoDashboard(False, "connection_error", "No existe una conexión de datos disponible.")
     try:
