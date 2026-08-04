@@ -52,6 +52,17 @@ class ResultadoDependencias:
     eventos: list[dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class ResultadoCatalogoLugares:
+    ok: bool
+    estado: str
+    mensaje: str
+    lugares: list[dict[str, Any]]
+    paises: list[dict[str, Any]]
+    lugar_seleccionado: dict[str, Any] | None
+    salones: list[dict[str, Any]]
+
+
 def _texto(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
 
@@ -364,6 +375,31 @@ def listar_salones(supabase: Any, contexto: dict[str, Any] | None, lugar_id: Any
         return ResultadoLista(False, "connection_error", "No fue posible cargar los salones.", [])
     items = [item for row in rows if (item := _salon(row))]
     return ResultadoLista(True, "ready" if items else "empty", "", items)
+
+
+def refrescar_catalogo_lugares(
+    supabase: Any,
+    contexto: dict[str, Any] | None,
+    lugar_seleccionado_id: Any = None,
+) -> ResultadoCatalogoLugares:
+    lugares = listar_lugares(supabase, contexto)
+    paises = listar_paises(supabase)
+    if not lugares.ok:
+        return ResultadoCatalogoLugares(False, lugares.estado, lugares.mensaje, [], paises.items if paises.ok else [], None, [])
+    selected_id = _id(lugar_seleccionado_id)
+    selected = next((item for item in lugares.items if _id(item.get("lugar_id")) == selected_id), None)
+    salones: list[dict[str, Any]] = []
+    mensaje = lugares.mensaje
+    if selected:
+        rooms = listar_salones(supabase, contexto, selected_id)
+        if not rooms.ok:
+            return ResultadoCatalogoLugares(False, rooms.estado, rooms.mensaje, lugares.items, paises.items if paises.ok else [], selected, [])
+        salones = rooms.items
+        mensaje = rooms.mensaje or mensaje
+    return ResultadoCatalogoLugares(
+        True, "ready" if lugares.items else "empty", mensaje,
+        lugares.items, paises.items if paises.ok else [], selected, salones,
+    )
 
 
 def obtener_salon(supabase: Any, contexto: dict[str, Any] | None, lugar_id: Any, salon_id: Any, cuenta_activa: dict[str, Any] | None = None) -> ResultadoOperacion:

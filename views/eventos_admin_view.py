@@ -76,6 +76,7 @@ def _form(
     on_place_change: Any,
     on_save: Any,
     on_cancel: Any,
+    show_title: bool = True,
 ) -> ft.Control:
     form_state = form.get("estado_form")
     if not isinstance(form_state, EventFormState):
@@ -169,7 +170,7 @@ def _form(
     return ft.Container(
         content=ft.Column(
             [
-                ft.Text("Crear evento" if form.get("modo") == "crear" else "Editar evento", size=21, weight=ft.FontWeight.BOLD),
+                ft.Text("Crear evento" if form.get("modo") == "crear" else "Editar evento", size=21, weight=ft.FontWeight.BOLD, visible=show_title),
                 ft.ResponsiveRow(
                     [
                         ft.Container(nombre, col={"xs": 12, "md": 8}),
@@ -212,6 +213,7 @@ def _card(
     on_start: Any,
     on_close: Any,
     on_default: Any,
+    on_detail: Any = None,
 ) -> ft.Control:
     phase = str(event.get("fase_evento") or "")
     state = str(event.get("estado") or "")
@@ -221,6 +223,7 @@ def _card(
     event_id = event.get("evento_id")
     abbreviated_name = str(event.get("nombre_evento_abrev") or "").strip()
     actions: list[ft.Control] = [
+        ft.IconButton(icon=ft.Icons.VISIBILITY, tooltip="Ver detalle", on_click=lambda e: on_detail(event) if on_detail else None),
         ft.OutlinedButton(content="Editar", icon=ft.Icons.EDIT, disabled=phase in {"Post_evento", "Cerrado"}, on_click=lambda e: on_edit(event)),
         ft.OutlinedButton(
             content="Desactivar" if active else "Activar",
@@ -295,6 +298,7 @@ def eventos_admin_view(
     on_start: Any,
     on_close: Any,
     on_default: Any,
+    on_detail: Any = None,
 ) -> ft.Control:
     cuenta = contexto.get("cuenta_actual") or {}
     if not cuenta:
@@ -330,12 +334,7 @@ def eventos_admin_view(
     controls: list[ft.Control] = [
         ft.Row(
             [
-                ft.Column(
-                    [
-                        ft.Text("Administración de eventos", size=26, weight=ft.FontWeight.BOLD),
-                        ft.Text(f"Cuenta activa: {cuenta.get('nombre_cuenta') or cuenta.get('cuenta_id')}", color=ft.Colors.ON_SURFACE_VARIANT),
-                    ]
-                ),
+                ft.Text("Administración de eventos", size=26, weight=ft.FontWeight.BOLD),
                 ft.Button(content="Crear evento", icon=ft.Icons.ADD, on_click=lambda e: on_new()),
             ],
             wrap=True,
@@ -343,8 +342,6 @@ def eventos_admin_view(
     ]
     if mensaje:
         controls.append(ft.Text(mensaje, color=ft.Colors.ON_SURFACE_VARIANT))
-    if form:
-        controls.append(_form(form, lugares, salones, saving, form_message, on_place_change, on_save, on_cancel))
     controls.append(
         ft.ResponsiveRow(
             [
@@ -360,7 +357,63 @@ def eventos_admin_view(
         )
     )
     controls.extend(
-        [_card(item, places, rooms, contexto.get("usr_evento_id_default"), on_edit, on_state, on_start, on_close, on_default) for item in visible]
+        [_card(item, places, rooms, contexto.get("usr_evento_id_default"), on_edit, on_state, on_start, on_close, on_default, on_detail) for item in visible]
         or [_state("Sin resultados", "No hay eventos que coincidan con los filtros.", ft.Icons.EVENT_BUSY)]
     )
     return ft.ListView(controls=controls, spacing=14, expand=True)
+
+
+def evento_form_view(
+    form: dict[str, Any], lugares: list[dict[str, Any]], salones: list[dict[str, Any]],
+    saving: bool, message: str, on_place_change: Any, on_save: Any, on_back: Any,
+) -> ft.Control:
+    title = "Crear evento" if form.get("modo") == "crear" else "Editar evento"
+    return ft.ListView(
+        controls=[
+            ft.Row([
+                ft.IconButton(icon=ft.Icons.ARROW_BACK, tooltip="Regresar a eventos", on_click=lambda e: on_back()),
+                ft.Text(title, size=26, weight=ft.FontWeight.BOLD),
+            ]),
+            _form(form, lugares, salones, saving, message, on_place_change, on_save, on_back, False),
+        ], spacing=16, expand=True,
+    )
+
+
+def evento_detail_view(
+    evento: dict[str, Any] | None, lugares: list[dict[str, Any]],
+    salones: list[dict[str, Any]], on_back: Any, on_edit: Any,
+) -> ft.Control:
+    if not evento:
+        return _state("Evento no disponible", "No se encontró el evento autorizado solicitado.", ft.Icons.EVENT_BUSY)
+    places = {int(x.get("lug_lugar_id")): str(x.get("lug_nombre_lugar")) for x in lugares}
+    rooms = {(int(x.get("sal_lugar_id")), int(x.get("sal_salon_id"))): str(x.get("sal_nombre_salon")) for x in salones}
+    lugar_id = int(evento.get("lugar_id") or 0)
+    salon_id = int(evento.get("salon_id") or 0)
+    rows = [
+        ("Nombre", evento.get("nombre_evento")), ("Nombre abreviado", evento.get("nombre_evento_abrev")),
+        ("Tipo", evento.get("tipo_evento")), ("Fase", evento.get("fase_evento")),
+        ("Estado", evento.get("estado")),
+        ("Inicio", evento.get("fecha_hora_inicio_legible") or evento.get("fecha_hora_inicio")),
+        ("Fin", evento.get("fecha_hora_fin_legible") or evento.get("fecha_hora_fin")),
+        ("Lugar", places.get(lugar_id, "No disponible")),
+        ("Salón", rooms.get((lugar_id, salon_id), "No disponible")),
+        ("Cantidad de mesas", evento.get("cant_mesas")),
+    ]
+    return ft.ListView(
+        controls=[
+            ft.Row([
+                ft.IconButton(icon=ft.Icons.ARROW_BACK, tooltip="Regresar a eventos", on_click=lambda e: on_back()),
+                ft.Text("Detalle del evento", size=26, weight=ft.FontWeight.BOLD, expand=True),
+                ft.Button(content="Editar", icon=ft.Icons.EDIT, on_click=lambda e: on_edit(evento)),
+            ]),
+            ft.Container(
+                content=ft.ResponsiveRow([
+                    ft.Container(
+                        ft.Column([ft.Text(label, size=12, color=ft.Colors.ON_SURFACE_VARIANT), ft.Text(str(value or "-"), selectable=True)]),
+                        col={"xs": 12, "sm": 6},
+                    ) for label, value in rows
+                ]),
+                padding=16, border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT), border_radius=12,
+            ),
+        ], spacing=16, expand=True,
+    )

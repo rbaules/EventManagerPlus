@@ -175,10 +175,10 @@ def assert_ui_builds() -> None:
         establecer_evento_activo(contexto, evento)
 
     controls = [
-        dashboard_view(base_context([]), eventos_estado="ready", eventos=[]),
-        dashboard_view(contexto, eventos_estado="ready", eventos=[evento] if evento else []),
-        dashboard_view(contexto, eventos_estado="loading", eventos=[]),
-        dashboard_view(contexto, eventos_estado="error", eventos_mensaje="Error controlado"),
+        dashboard_view(base_context([]), estado="event_required"),
+        dashboard_view(contexto, estado="ready"),
+        dashboard_view(contexto, estado="loading"),
+        dashboard_view(contexto, estado="error", mensaje="Error controlado", on_retry=lambda: None),
         event_header(base_context([]), lambda: None, lambda: None),
         event_header(contexto, lambda: None, lambda: None),
         build_home_view(DummyPage(), contexto),

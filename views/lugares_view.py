@@ -330,16 +330,7 @@ def lugares_view(
     controls: list[ft.Control] = [
         ft.Row(
             [
-                ft.Column(
-                    [
-                        ft.Text("Lugares y salones", size=26, weight=ft.FontWeight.BOLD),
-                        ft.Text(
-                            f"Cuenta activa: {cuenta.get('nombre_cuenta') or cuenta.get('cuenta_id')}",
-                            color=ft.Colors.ON_SURFACE_VARIANT,
-                        ),
-                    ],
-                    expand=True,
-                ),
+                ft.Text("Lugares y salones", size=26, weight=ft.FontWeight.BOLD, expand=True),
                 ft.Button(content="Agregar lugar", icon=ft.Icons.ADD_LOCATION, on_click=lambda e: on_new_place()),
             ],
             vertical_alignment=ft.CrossAxisAlignment.START,
@@ -347,11 +338,6 @@ def lugares_view(
     ]
     if mensaje:
         controls.append(ft.Text(mensaje, color=ft.Colors.ON_SURFACE_VARIANT))
-    if form:
-        if form.get("modo") in {"crear_lugar", "editar_lugar"}:
-            controls.append(_formulario_lugar(form, paises, saving, form_message, on_save_form, on_cancel_form))
-        else:
-            controls.append(_formulario_salon(form, saving, form_message, on_save_form, on_cancel_form))
     if not lugares_visibles:
         controls.append(_state("Sin lugares", "Esta cuenta todavía no tiene lugares registrados.", ft.Icons.LOCATION_OFF))
     else:
@@ -402,3 +388,28 @@ def lugares_view(
             )
         )
     return ft.ListView(controls=controls, spacing=16, expand=True)
+
+
+def lugar_form_view(
+    form: dict[str, Any], paises: list[dict[str, Any]], saving: bool,
+    message: str, on_save: Any, on_back: Any,
+) -> ft.Control:
+    modo = str(form.get("modo") or "")
+    title = {
+        "crear_lugar": "Agregar lugar", "editar_lugar": "Editar lugar",
+        "crear_salon": "Agregar salón", "editar_salon": "Editar salón",
+    }.get(modo, "Formulario")
+    panel = (
+        _formulario_lugar(form, paises, saving, message, on_save, on_back)
+        if modo in {"crear_lugar", "editar_lugar"}
+        else _formulario_salon(form, saving, message, on_save, on_back)
+    )
+    return ft.ListView(
+        controls=[
+            ft.Row([
+                ft.IconButton(icon=ft.Icons.ARROW_BACK, tooltip="Regresar a lugares y salones", on_click=lambda e: on_back()),
+                ft.Text(title, size=26, weight=ft.FontWeight.BOLD),
+            ]),
+            panel,
+        ], spacing=16, expand=True,
+    )

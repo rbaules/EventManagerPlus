@@ -29,6 +29,14 @@ def buscar_evento_por_key(
     return None
 
 
+def es_evento_autorizado(
+    eventos: list[dict[str, Any]],
+    evento: dict[str, Any] | None,
+) -> bool:
+    key = evento_key(evento)
+    return key is not None and buscar_evento_por_key(eventos, key) is not None
+
+
 def establecer_evento_activo(
     contexto: dict[str, Any],
     evento: dict[str, Any],

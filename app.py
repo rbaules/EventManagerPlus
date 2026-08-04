@@ -27,8 +27,15 @@ def main(
         server_session_binding=server_session_binding,
     )
 
+    def notify_home(callback_name: str) -> None:
+        for control in list(page.controls):
+            callback = control.data.get(callback_name) if isinstance(control.data, dict) else None
+            if callable(callback):
+                callback()
+
     def disconnected(_event: ft.ControlEvent) -> None:
         session_controller.set_connected(False)
+        notify_home("pause_dashboard")
 
     async def connected(_event: ft.ControlEvent) -> None:
         if not session_controller.authenticated:
@@ -36,6 +43,7 @@ def main(
             return
         result = await session_controller.validate_after_reconnect()
         if result.ok:
+            notify_home("resume_dashboard")
             return
         await _show_login_after_invalid_session(
             page,
@@ -45,6 +53,7 @@ def main(
         )
 
     def closed(_event: ft.ControlEvent) -> None:
+        notify_home("pause_dashboard")
         session_controller.close()
 
     page.on_disconnect = disconnected

@@ -85,9 +85,9 @@ def construir_fila_llegada(
 
     accion: ft.Control
     if llegada and can_reverse_arrival:
-        accion = ft.OutlinedButton(
-            content="Revertir llegada",
-            icon=ft.Icons.UNDO,
+        accion = ft.IconButton(
+            icon=ft.Icons.RESTORE,
+            tooltip="Revertir llegada",
             disabled=is_saving,
             on_click=lambda e: on_reverse_arrival(invitado),
         )
@@ -190,19 +190,7 @@ def arrivals_view(
     controls: list[ft.Control] = [
         ft.Row(
             [
-                ft.Column(
-                    [
-                        ft.Text("Registrar llegadas", size=26, weight=ft.FontWeight.BOLD),
-                        ft.Text(
-                            f"{_get(evento, 'nombre_evento', 'Evento activo')} - {_get(evento, 'fase_evento', 'Sin fase')}",
-                            size=14,
-                            color=ft.Colors.ON_SURFACE_VARIANT,
-                        ),
-                    ],
-                    spacing=4,
-                    expand=True,
-                ),
-                _chip("Evento en proceso"),
+                ft.Text("Registrar llegadas", size=26, weight=ft.FontWeight.BOLD, expand=True),
             ],
             vertical_alignment=ft.CrossAxisAlignment.START,
         ),

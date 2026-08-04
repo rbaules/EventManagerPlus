@@ -108,10 +108,9 @@ def _invitado_card(invitado: dict[str, Any], on_detail: Any) -> ft.Control:
                     col={"xs": 6, "sm": 2, "md": 2},
                 ),
                 ft.Container(
-                    content=ft.OutlinedButton(
-                        content="Detalle",
+                    content=ft.IconButton(
                         icon=ft.Icons.PERSON,
-                        height=44,
+                        tooltip="Ver detalle",
                         on_click=lambda e: on_detail(invitado),
                     ),
                     alignment=ft.Alignment.CENTER_RIGHT,
@@ -138,10 +137,9 @@ def _invitado_card_admin(invitado: dict[str, Any], on_detail: Any, on_edit: Any,
     if isinstance(content, ft.ResponsiveRow):
         content.controls.append(
             ft.Container(
-                content=ft.OutlinedButton(
-                    content="Editar",
+                content=ft.IconButton(
                     icon=ft.Icons.EDIT,
-                    height=44,
+                    tooltip="Editar invitado",
                     on_click=lambda e: on_edit(invitado),
                 ),
                 alignment=ft.Alignment.CENTER_RIGHT,
@@ -171,6 +169,7 @@ def _detail_panel(
     is_saving: bool,
     on_delete_unexpected: Any,
     on_close: Any,
+    show_header: bool = True,
 ) -> ft.Control:
     if not invitado:
         return ft.Container()
@@ -187,14 +186,16 @@ def _detail_panel(
             )
         )
 
-    detalles: list[ft.Control] = [
-        ft.Row(
+    detalles: list[ft.Control] = []
+    if show_header:
+        detalles.append(ft.Row(
             [
                 ft.Text("Detalle del invitado", size=18, weight=ft.FontWeight.BOLD, expand=True),
                 ft.TextButton(content="Cerrar", icon=ft.Icons.CLOSE, on_click=lambda e: on_close()),
             ],
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        ),
+        ))
+    detalles.extend([
         _detail_row("Nombre", invitado.get("nombre_completo")),
         _detail_row("Llegada", invitado.get("estado_llegada")),
         _detail_row("Fecha de llegada", invitado.get("fecha_hora_conf_llegada")),
@@ -206,7 +207,7 @@ def _detail_panel(
         _detail_row("Telefono", invitado.get("telefono")),
         _detail_row("Novedad", "Si" if invitado.get("tiene_novedad") else "No"),
         _detail_row("Descripcion de novedad", invitado.get("descripcion_novedad")),
-    ]
+    ])
     if acciones:
         detalles.append(ft.Row(acciones, spacing=8, wrap=True))
 
@@ -351,6 +352,66 @@ def _form_panel(
     )
 
 
+def invitado_detail_view(
+    invitado: dict[str, Any] | None,
+    can_delete_unexpected: bool,
+    is_saving: bool,
+    mensaje: str,
+    on_delete_unexpected: Any,
+    on_back: Any,
+) -> ft.Control:
+    if not invitado:
+        return ft.ListView(
+            controls=[
+                ft.Row([
+                    ft.IconButton(icon=ft.Icons.ARROW_BACK, tooltip="Regresar", on_click=lambda e: on_back()),
+                    ft.Text("Detalle del invitado", size=26, weight=ft.FontWeight.BOLD),
+                ]),
+                ft.Text(mensaje or "No fue posible cargar el invitado.", color=ft.Colors.ERROR),
+            ],
+            spacing=16,
+            expand=True,
+        )
+    return ft.ListView(
+        controls=[
+            ft.Row([
+                ft.IconButton(icon=ft.Icons.ARROW_BACK, tooltip="Regresar a invitados", on_click=lambda e: on_back()),
+                ft.Text("Detalle del invitado", size=26, weight=ft.FontWeight.BOLD),
+            ]),
+            _detail_panel(invitado, can_delete_unexpected, is_saving, on_delete_unexpected, on_back, False),
+        ],
+        spacing=16,
+        expand=True,
+    )
+
+
+def invitado_form_view(
+    form_state: dict[str, Any],
+    invitaciones: list[dict[str, Any]],
+    can_manage: bool,
+    is_saving: bool,
+    form_message: str,
+    on_save: Any,
+    on_back: Any,
+) -> ft.Control:
+    title = {
+        "crear": "Agregar invitado planificado",
+        "editar": "Editar invitado",
+        "imprevisto": "Agregar invitado imprevisto",
+    }.get(str(form_state.get("modo")), "Invitado")
+    return ft.ListView(
+        controls=[
+            ft.Row([
+                ft.IconButton(icon=ft.Icons.ARROW_BACK, tooltip="Regresar a invitados", on_click=lambda e: on_back()),
+                ft.Text(title, size=26, weight=ft.FontWeight.BOLD),
+            ]),
+            _form_panel(form_state, invitaciones, can_manage, is_saving, form_message, on_save, on_back),
+        ],
+        spacing=16,
+        expand=True,
+    )
+
+
 def invitados_view(
     contexto: dict[str, Any],
     estado: str,
@@ -451,18 +512,7 @@ def invitados_view(
     controls: list[ft.Control] = [
         ft.Row(
             [
-                ft.Column(
-                    [
-                        ft.Text("Invitados", size=26, weight=ft.FontWeight.BOLD),
-                        ft.Text(
-                            f"{_get(evento, 'nombre_evento', 'Evento activo')} - {_get(evento, 'fase_evento', 'Sin fase')}",
-                            size=14,
-                            color=ft.Colors.ON_SURFACE_VARIANT,
-                        ),
-                    ],
-                    spacing=4,
-                    expand=True,
-                ),
+                ft.Text("Invitados", size=26, weight=ft.FontWeight.BOLD, expand=True),
                 _chip(f"Mostrando {len(invitados)}"),
                 _chip("Operacion habilitada" if (can_manage_planned or can_confirm_arrival or can_manage_unexpected or can_delete_unexpected) else "Modo consulta"),
             ],
@@ -540,20 +590,7 @@ def invitados_view(
             )
         )
 
-    if form_state:
-        form_can_manage = can_manage_unexpected if form_state.get("modo") == "imprevisto" else can_manage_planned
-        controls.append(
-            _form_panel(
-                form_state,
-                invitaciones,
-                form_can_manage,
-                is_saving,
-                form_message,
-                on_save_guest,
-                on_cancel_form,
-            )
-        )
-    elif form_message:
+    if form_message:
         controls.append(ft.Text(form_message, size=13, color=ft.Colors.ON_SURFACE_VARIANT))
 
     if estado == "loading":
@@ -610,17 +647,6 @@ def invitados_view(
                     ),
                 ],
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            )
-        )
-
-    if invitado_detalle:
-        controls.append(
-            _detail_panel(
-                invitado_detalle,
-                can_delete_unexpected,
-                is_saving,
-                on_delete_unexpected,
-                on_close_detail,
             )
         )
 

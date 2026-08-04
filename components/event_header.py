@@ -36,6 +36,7 @@ def _avatar_menu(
     on_change_context: Callable[[], None] | None = None,
     on_manage_locations: Callable[[], None] | None = None,
     on_manage_events: Callable[[], None] | None = None,
+    on_select_event: Callable[[], None] | None = None,
 ) -> ft.Control:
     nombre = _get(contexto, "usr_nombre_usuario", "Usuario")
     iniciales = calcular_iniciales_usuario(nombre)
@@ -63,6 +64,14 @@ def _avatar_menu(
         ]
     else:
         items = []
+        if on_select_event:
+            items.append(
+                ft.PopupMenuItem(
+                    content="Seleccionar evento activo",
+                    icon=ft.Icons.EVENT_REPEAT,
+                    on_click=lambda e: on_select_event(),
+                )
+            )
         if on_manage_locations and puede_administrar_lugares(contexto):
             items.append(
                 ft.PopupMenuItem(
@@ -106,6 +115,7 @@ def event_header(
     on_change_context: Callable[[], None] | None = None,
     on_manage_locations: Callable[[], None] | None = None,
     on_manage_events: Callable[[], None] | None = None,
+    on_select_event: Callable[[], None] | None = None,
 ) -> ft.Container:
     cuenta = contexto.get("cuenta_actual") or {}
     evento = contexto.get("evento_actual") or {}
@@ -184,6 +194,7 @@ def event_header(
                                 on_change_context,
                                 on_manage_locations,
                                 on_manage_events,
+                                on_select_event,
                             ),
                         ],
                         alignment=ft.MainAxisAlignment.END,

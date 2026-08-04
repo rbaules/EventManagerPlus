@@ -588,14 +588,9 @@ def test_tarjeta_layout_intrinseco_y_listado_scroll() -> None:
     header = one.controls[0]
     assert isinstance(header, ft.Row) and header.wrap is True
     header_details = header.controls[0]
-    assert isinstance(header_details, ft.Column)
-    assert header_details.expand is None and header_details.height is None
-    assert header_details.alignment not in {
-        ft.MainAxisAlignment.END,
-        ft.MainAxisAlignment.SPACE_AROUND,
-        ft.MainAxisAlignment.SPACE_BETWEEN,
-        ft.MainAxisAlignment.SPACE_EVENLY,
-    }
+    assert isinstance(header_details, ft.Text)
+    assert header_details.value == "Administración de eventos"
+    assert not any("Cuenta activa:" in str(control.value) for control in _tree(one) if isinstance(control, ft.Text))
     assert isinstance(one.controls[1], ft.ResponsiveRow)
     assert one.controls[1].height is None and one.controls[1].expand is not True
     assert any(

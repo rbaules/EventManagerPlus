@@ -29,6 +29,7 @@ from services.lugar_service import (
     crear_salon,
     listar_lugares,
     listar_salones,
+    refrescar_catalogo_lugares,
 )
 from views.lugares_view import lugares_view
 
@@ -464,6 +465,34 @@ def test_capacidades_existentes_y_arquitectura() -> None:
     assert "lugar_service" not in (ROOT / "asgi.py").read_text(encoding="utf-8")
 
 
+def test_recarga_inmediata_lugares_y_salones() -> None:
+    db = FakeSupabase()
+    admin = contexto(ROL_ADMINISTRADOR)
+    initial = refrescar_catalogo_lugares(db, admin, 1)
+    assert initial.ok and initial.lugar_seleccionado and initial.lugar_seleccionado["lugar_id"] == 1
+    assert len({item["lugar_id"] for item in initial.lugares}) == len(initial.lugares)
+
+    created_place = crear_lugar(db, admin, {**LUGAR_PAYLOAD, "nombre": "Centro Nuevo"})
+    assert created_place.ok and created_place.item
+    refreshed_place = refrescar_catalogo_lugares(db, admin, created_place.item["lugar_id"])
+    assert refreshed_place.lugar_seleccionado and refreshed_place.lugar_seleccionado["nombre"] == "Centro Nuevo"
+    updated_place = actualizar_lugar(db, admin, created_place.item["lugar_id"], {**LUGAR_PAYLOAD, "nombre": "Centro Editado"})
+    assert updated_place.ok
+    refreshed_place = refrescar_catalogo_lugares(db, admin, created_place.item["lugar_id"])
+    assert refreshed_place.lugar_seleccionado and refreshed_place.lugar_seleccionado["nombre"] == "Centro Editado"
+
+    created_room = crear_salon(db, admin, created_place.item["lugar_id"], {**SALON_PAYLOAD, "nombre": "Salón Nuevo"})
+    assert created_room.ok and created_room.item
+    refreshed_room = refrescar_catalogo_lugares(db, admin, created_place.item["lugar_id"])
+    assert any(item["nombre"] == "Salón Nuevo" for item in refreshed_room.salones)
+    updated_room = actualizar_salon(db, admin, created_place.item["lugar_id"], created_room.item["salon_id"], {**SALON_PAYLOAD, "nombre": "Salón Editado"})
+    assert updated_room.ok
+    refreshed_room = refrescar_catalogo_lugares(db, admin, created_place.item["lugar_id"])
+    assert refreshed_room.lugar_seleccionado and refreshed_room.lugar_seleccionado["lugar_id"] == created_place.item["lugar_id"]
+    assert any(item["nombre"] == "Salón Editado" for item in refreshed_room.salones)
+    assert len({item["salon_id"] for item in refreshed_room.salones}) == len(refreshed_room.salones)
+
+
 def main() -> int:
     test_listados_roles_y_tenant()
     test_crear_lugar_duplicados_y_roles()
@@ -471,6 +500,7 @@ def main() -> int:
     test_salones_validaciones_roles_y_dependencias()
     test_ui_roles_y_checkin()
     test_capacidades_existentes_y_arquitectura()
+    test_recarga_inmediata_lugares_y_salones()
     print("OK - lugares/salones: tenant, roles, CRUD lógico, dependencias, UI y CHECKIN.")
     return 0
 

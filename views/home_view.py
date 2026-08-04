@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime
 from typing import Any
 
 import flet as ft
@@ -9,6 +11,7 @@ from components.app_shell import app_shell
 from components.bottom_navigation import bottom_navigation
 from services.auth_service import sign_out_local_session
 from services.authorization_service import puede_administrar_lugares, puede_ver_administracion_eventos
+from services.dashboard_service import DashboardRefreshController, IndicadoresDashboard, obtener_indicadores_dashboard
 from services.evento_context_service import (
     guardar_contexto_sesion,
     guardar_eventos_disponibles,
@@ -16,6 +19,7 @@ from services.evento_context_service import (
     limpiar_evento_activo,
     sincronizar_evento_activo,
     establecer_evento_activo,
+    es_evento_autorizado,
 )
 from services.evento_service import (
     actualizar_evento,
@@ -49,6 +53,7 @@ from services.invitado_service import (
     reversar_llegada,
 )
 from services.session_service import PageSessionController
+from services.navigation_service import ROUTES, parse_app_route, route_for
 from services.lugar_service import (
     actualizar_lugar,
     actualizar_salon,
@@ -56,15 +61,15 @@ from services.lugar_service import (
     cambiar_estado_salon,
     crear_lugar,
     crear_salon,
-    listar_lugares,
-    listar_paises,
     listar_salones,
+    refrescar_catalogo_lugares,
 )
 from views.arrivals_view import arrivals_view
 from views.dashboard_view import dashboard_view
-from views.invitados_view import invitados_view
-from views.lugares_view import lugares_view
-from views.eventos_admin_view import eventos_admin_view
+from views.invitados_view import invitado_detail_view, invitado_form_view, invitados_view
+from views.lugares_view import lugar_form_view, lugares_view
+from views.eventos_admin_view import evento_detail_view, evento_form_view, eventos_admin_view
+from views.event_selection_view import event_selection_view
 
 
 def _placeholder(title: str, message: str) -> ft.Control:
@@ -108,6 +113,13 @@ def build_home_view(
         "eventos_mensaje": "Cargando eventos...",
         "eventos_loading": False,
         "eventos_consulta_iniciada": False,
+        "dashboard_estado": "idle",
+        "dashboard_mensaje": "",
+        "dashboard_indicadores": IndicadoresDashboard(),
+        "dashboard_event_key": None,
+        "dashboard_ultima_actualizacion": "",
+        "dashboard_refresh": DashboardRefreshController(),
+        "session_active": True,
         "invitados_estado": "idle",
         "invitados": [],
         "invitados_mensaje": "",
@@ -153,9 +165,53 @@ def build_home_view(
         "eventos_admin_form_message": "",
         "eventos_admin_saving": False,
         "eventos_admin_filtros": {"busqueda": "", "fase": "Todas", "estado": "Todos", "desde": "", "hasta": ""},
+        "route_identifier": None,
+        "route_action": None,
+        "previous_section": "dashboard",
     }
 
     def build_content() -> ft.Control:
+        if state["selected"] == "event_selection":
+            return event_selection_view(
+                eventos=state["eventos"], evento_actual=contexto_usuario.get("evento_actual"),
+                estado=state["eventos_estado"], mensaje=state["eventos_mensaje"],
+                on_select=confirmar_seleccion_evento, on_back=lambda: navigate("dashboard"),
+                on_retry=cargar_eventos,
+            )
+        if state["selected"] == "guest_detail":
+            return invitado_detail_view(
+                state["invitado_detalle"],
+                False if checkin_mode else puede_eliminar_imprevisto(contexto_usuario),
+                state["invitado_saving"], state["invitados_mensaje"],
+                confirmar_eliminacion_imprevisto, lambda: navigate("guests"),
+            )
+        if state["selected"] == "guest_form" and state.get("invitado_form"):
+            form = state["invitado_form"]
+            can_manage = (
+                puede_registrar_imprevisto(contexto_usuario)
+                if form.get("modo") == "imprevisto"
+                else puede_administrar_invitados_planificados(contexto_usuario)
+            )
+            return invitado_form_view(
+                form, state["invitaciones"], can_manage, state["invitado_saving"],
+                state["invitado_form_message"], guardar_form_invitado, cancelar_form_invitado,
+            )
+        if state["selected"] == "event_form" and state.get("eventos_admin_form"):
+            return evento_form_view(
+                state["eventos_admin_form"], state["eventos_admin_lugares"], state["eventos_admin_salones"],
+                state["eventos_admin_saving"], state["eventos_admin_form_message"],
+                cargar_salones_evento, guardar_form_evento, cancelar_form_evento,
+            )
+        if state["selected"] == "event_detail":
+            return evento_detail_view(
+                buscar_evento_admin(state.get("route_identifier")), state["eventos_admin_lugares"],
+                state["eventos_admin_salones"], lambda: navigate("events_admin"), abrir_form_editar_evento,
+            )
+        if state["selected"] == "location_form" and state.get("lugares_form"):
+            return lugar_form_view(
+                state["lugares_form"], state["lugares_paises"], state["lugares_saving"],
+                state["lugares_form_message"], guardar_form_lugares, cancelar_form_lugares,
+            )
         if state["selected"] == "events_admin":
             if checkin_mode or not puede_ver_administracion_eventos(contexto_usuario):
                 return eventos_admin_view(
@@ -163,7 +219,7 @@ def build_home_view(
                     cargar_eventos_admin, abrir_form_crear_evento, abrir_form_editar_evento,
                     cargar_salones_evento, guardar_form_evento, cancelar_form_evento,
                     aplicar_filtros_eventos, solicitar_estado_evento, solicitar_inicio_evento,
-                    solicitar_cierre_evento, hacer_evento_predeterminado,
+                    solicitar_cierre_evento, hacer_evento_predeterminado, abrir_detalle_evento,
                 )
             return eventos_admin_view(
                 contexto=contexto_usuario,
@@ -179,6 +235,7 @@ def build_home_view(
                 on_retry=cargar_eventos_admin,
                 on_new=abrir_form_crear_evento,
                 on_edit=abrir_form_editar_evento,
+                on_detail=abrir_detalle_evento,
                 on_place_change=cargar_salones_evento,
                 on_save=guardar_form_evento,
                 on_cancel=cancelar_form_evento,
@@ -296,12 +353,9 @@ def build_home_view(
             )
 
         return dashboard_view(
-            contexto_usuario,
-            eventos_estado=state["eventos_estado"],
-            eventos=state["eventos"],
-            eventos_mensaje=state["eventos_mensaje"],
-            on_select_event=select_event,
-            on_retry_events=cargar_eventos,
+            contexto_usuario, estado=state["dashboard_estado"],
+            indicadores=state["dashboard_indicadores"], mensaje=state["dashboard_mensaje"],
+            on_retry=cargar_dashboard, ultima_actualizacion=state["dashboard_ultima_actualizacion"],
         )
 
     def build_shell() -> ft.Control:
@@ -318,6 +372,7 @@ def build_home_view(
             on_change_context=cambiar_contexto_evento,
             on_manage_locations=lambda: select_tab("locations"),
             on_manage_events=lambda: select_tab("events_admin"),
+            on_select_event=lambda: select_tab("event_selection"),
         )
 
     def configure_navigation_bar() -> None:
@@ -334,14 +389,166 @@ def build_home_view(
         )
 
     def render() -> None:
+        _sincronizar_actualizacion_dashboard()
         home_control = build_shell()
         if home_control is None:
             raise RuntimeError("build_home_view devolvio None; se esperaba un control Flet.")
 
+        home_control.data = _home_callbacks()
         configure_navigation_bar()
         page.clean()
         page.add(home_control)
         page.update()
+
+    def _marca_actualizacion() -> str:
+        now = datetime.now().astimezone()
+        hour = now.hour % 12 or 12
+        suffix = "a. m." if now.hour < 12 else "p. m."
+        return f"Actualizado {hour}:{now.minute:02d} {suffix}"
+
+    async def _actualizar_dashboard_periodicamente(generation: int) -> None:
+        try:
+            while (
+                state["session_active"]
+                and state["selected"] == "dashboard"
+                and state["dashboard_refresh"].is_current(generation)
+            ):
+                await asyncio.sleep(30)
+                if (
+                    not state["session_active"]
+                    or state["selected"] != "dashboard"
+                    or not state["dashboard_refresh"].is_current(generation)
+                ):
+                    break
+                key = evento_activo_key()
+                if key is None:
+                    break
+                result = await asyncio.to_thread(obtener_indicadores_dashboard, contexto_usuario, supabase)
+                if key != evento_activo_key() or state["selected"] != "dashboard":
+                    continue
+                state["dashboard_estado"] = result.estado if result.ok else "error"
+                state["dashboard_mensaje"] = result.mensaje
+                if result.ok:
+                    state["dashboard_indicadores"] = result.indicadores
+                    state["dashboard_event_key"] = key
+                    state["dashboard_ultima_actualizacion"] = _marca_actualizacion()
+                render()
+        except asyncio.CancelledError:
+            pass
+        except Exception as ex:
+            print("[DASHBOARD][ERROR] actualizacion automatica", type(ex).__name__, str(ex))
+        finally:
+            state["dashboard_refresh"].finish(generation)
+
+    def _detener_actualizacion_dashboard() -> None:
+        state["dashboard_refresh"].stop()
+
+    def _pausar_home() -> None:
+        state["session_active"] = False
+        _detener_actualizacion_dashboard()
+
+    def _reanudar_home() -> None:
+        state["session_active"] = True
+        _sincronizar_actualizacion_dashboard()
+
+    def _home_callbacks() -> dict[str, Any]:
+        return {
+            "start_eventos": cargar_eventos,
+            "pause_dashboard": _pausar_home,
+            "resume_dashboard": _reanudar_home,
+        }
+
+    def _sincronizar_actualizacion_dashboard() -> None:
+        should_run = bool(
+            state["session_active"]
+            and state["selected"] == "dashboard"
+            and contexto_usuario.get("evento_actual")
+        )
+        controller = state["dashboard_refresh"]
+        task = controller.task
+        if not should_run:
+            if task is not None:
+                _detener_actualizacion_dashboard()
+            return
+        if task is None or task.done():
+            controller.start(page, _actualizar_dashboard_periodicamente)
+
+    def cargar_dashboard() -> None:
+        key = evento_activo_key()
+        if key is None:
+            state["dashboard_estado"] = "event_required"
+            state["dashboard_indicadores"] = IndicadoresDashboard()
+            render()
+            return
+        if state["dashboard_estado"] == "loading" and state["dashboard_event_key"] == key:
+            return
+        state["dashboard_estado"] = "loading"
+        state["dashboard_mensaje"] = "Cargando indicadores..."
+        state["dashboard_event_key"] = key
+        render()
+
+        def worker() -> None:
+            result = obtener_indicadores_dashboard(contexto_usuario, supabase)
+            if key != evento_activo_key():
+                return
+            state["dashboard_estado"] = result.estado if result.ok else "error"
+            state["dashboard_mensaje"] = result.mensaje
+            state["dashboard_indicadores"] = result.indicadores
+            state["dashboard_event_key"] = key
+            if result.ok:
+                state["dashboard_ultima_actualizacion"] = _marca_actualizacion()
+            render()
+
+        page.run_thread(worker)
+
+    def navigate(section: str, identifier: Any = None, action: str | None = None) -> None:
+        current = state.get("selected")
+        if current not in {"guest_detail", "guest_form", "event_detail", "event_form"}:
+            state["previous_section"] = current or "dashboard"
+        state["route_identifier"] = None if identifier is None else str(identifier)
+        state["route_action"] = action
+        state["selected"] = section
+        if section == "guest_detail":
+            route = route_for("guests", identifier)
+        elif section == "guest_form":
+            route = route_for("guests", identifier or "nuevo", action)
+        elif section == "event_detail":
+            route = route_for("events_admin", identifier)
+        elif section == "event_form":
+            route = route_for("events_admin", identifier or "nuevo", action)
+        elif section == "location_form":
+            route = route_for("locations", "form", action or str(identifier or ""))
+        else:
+            route = ROUTES.get(section, ROUTES["dashboard"])
+        if str(getattr(page, "route", "") or "") != route:
+            page.go(route)
+        else:
+            render()
+
+    def handle_route_change(e: ft.RouteChangeEvent) -> None:
+        section, identifier, action = parse_app_route(getattr(e, "route", None) or page.route)
+        state["route_identifier"] = identifier
+        state["route_action"] = action
+        if section == "guests" and identifier:
+            if identifier in {"nuevo", "imprevisto"} or action == "editar":
+                state["selected"] = "guest_form"
+            else:
+                state["selected"] = "guest_detail"
+                if not state.get("invitado_detalle") or str(state["invitado_detalle"].get("invitado_uuid")) != identifier:
+                    cargar_detalle_invitado_uuid(identifier, navegar=False)
+                    return
+        elif section == "events_admin" and identifier:
+            state["selected"] = "event_form" if identifier == "nuevo" or action == "editar" else "event_detail"
+        elif section == "locations" and identifier == "form":
+            state["selected"] = "location_form"
+        else:
+            state["selected"] = section
+        if section == "dashboard" and contexto_usuario.get("evento_actual") and state["dashboard_event_key"] != evento_activo_key():
+            cargar_dashboard()
+            return
+        render()
+
+    page.on_route_change = handle_route_change
 
     def reset_invitados() -> None:
         state["invitados_estado"] = "idle"
@@ -373,6 +580,10 @@ def build_home_view(
         state["arrivals_saving"] = False
         state["arrivals_request_id"] += 1
         state["arrivals_event_key"] = None
+
+    def invalidar_dashboard() -> None:
+        state["dashboard_event_key"] = None
+        state["dashboard_ultima_actualizacion"] = ""
 
     def evento_activo_key() -> tuple[int, int] | None:
         from services.evento_context_service import evento_key
@@ -501,14 +712,13 @@ def build_home_view(
         print("[INVITADOS][INFO] Cargando lote adicional.")
         cargar_invitados(reset=False)
 
-    def seleccionar_invitado_detalle(invitado: dict[str, Any]) -> None:
+    def cargar_detalle_invitado_uuid(invitado_uuid: str, navegar: bool = True) -> None:
         active_key = evento_activo_key()
         if active_key is None:
             state["invitado_detalle"] = None
             state["invitados_mensaje"] = "Selecciona un evento antes de consultar los invitados."
             render()
             return
-        invitado_uuid = str(invitado.get("invitado_uuid", ""))
         print("[INVITADOS][INFO] Invitado seleccionado para detalle.")
         resultado = obtener_invitado_por_id(
             contexto_usuario.get("evento_actual"),
@@ -517,11 +727,17 @@ def build_home_view(
         )
         if resultado.ok:
             state["invitado_detalle"] = resultado.invitado
+            if navegar:
+                navigate("guest_detail", invitado_uuid)
+                return
         else:
             state["invitado_detalle"] = None
             state["invitados_mensaje"] = resultado.mensaje
             state["invitados_estado"] = "error" if resultado.estado == "connection_error" else state["invitados_estado"]
         render()
+
+    def seleccionar_invitado_detalle(invitado: dict[str, Any]) -> None:
+        cargar_detalle_invitado_uuid(str(invitado.get("invitado_uuid", "")))
 
     def abrir_form_crear_invitado() -> None:
         print("[INVITADOS][INFO] Intento de abrir formulario: operacion=crear")
@@ -555,7 +771,7 @@ def build_home_view(
         }
         state["invitado_form_message"] = ""
         state["invitado_detalle"] = None
-        render()
+        navigate("guest_form", "nuevo")
 
     def abrir_form_crear_imprevisto() -> None:
         print("[INVITADOS][INFO] Apertura del formulario imprevisto.")
@@ -589,7 +805,7 @@ def build_home_view(
         }
         state["invitado_form_message"] = ""
         state["invitado_detalle"] = None
-        render()
+        navigate("guest_form", "imprevisto")
 
     def abrir_form_editar_invitado(invitado: dict[str, Any]) -> None:
         print("[INVITADOS][INFO] Intento de abrir formulario: operacion=editar")
@@ -632,7 +848,7 @@ def build_home_view(
         }
         state["invitado_form_message"] = ""
         state["invitado_detalle"] = None
-        render()
+        navigate("guest_form", invitado_actual.get("invitado_uuid"), "editar")
 
     def guardar_form_invitado(payload: dict[str, Any]) -> None:
         if checkin_mode:
@@ -668,11 +884,13 @@ def build_home_view(
                         supabase=supabase,
                     )
                 if resultado.ok:
+                    invalidar_dashboard()
                     state["invitado_form"] = None
                     state["invitado_form_message"] = resultado.mensaje
                     state["invitado_detalle"] = None
                     print("[INVITADOS][INFO]", resultado.mensaje)
                     cargar_invitados(reset=True)
+                    navigate("guests")
                     return
                 state["invitado_form_message"] = resultado.mensaje
                 print("[INVITADOS][WARNING] Guardado rechazado:", resultado.estado)
@@ -707,6 +925,7 @@ def build_home_view(
                 resultado = operacion(contexto_usuario, invitado, supabase=supabase)
                 state["invitado_form_message"] = resultado.mensaje
                 if resultado.ok:
+                    invalidar_dashboard()
                     if cerrar_detalle:
                         state["invitado_detalle"] = None
                     elif resultado.invitado:
@@ -758,6 +977,17 @@ def build_home_view(
 
         page.show_dialog(dialog)
 
+    def _refrescar_lugares_desde_fuente() -> bool:
+        selected_id = (state.get("lugar_seleccionado") or {}).get("lugar_id")
+        resultado = refrescar_catalogo_lugares(supabase, contexto_usuario, selected_id)
+        state["lugares_estado"] = resultado.estado if resultado.ok else "error"
+        state["lugares_mensaje"] = resultado.mensaje
+        state["lugares"] = resultado.lugares
+        state["lugares_paises"] = resultado.paises
+        state["lugar_seleccionado"] = resultado.lugar_seleccionado
+        state["lugares_salones"] = resultado.salones
+        return resultado.ok
+
     def cargar_lugares() -> None:
         if checkin_mode or not puede_administrar_lugares(contexto_usuario):
             state["lugares_estado"] = "denied"
@@ -771,27 +1001,7 @@ def build_home_view(
         render()
 
         def worker() -> None:
-            resultado = listar_lugares(supabase, contexto_usuario)
-            paises = listar_paises(supabase)
-            state["lugares_estado"] = resultado.estado if resultado.ok else "error"
-            state["lugares_mensaje"] = resultado.mensaje
-            state["lugares"] = resultado.items if resultado.ok else []
-            state["lugares_paises"] = paises.items if paises.ok else []
-            seleccionado = state.get("lugar_seleccionado")
-            if seleccionado:
-                actualizado = next(
-                    (
-                        item
-                        for item in state["lugares"]
-                        if item.get("lugar_id") == seleccionado.get("lugar_id")
-                    ),
-                    None,
-                )
-                state["lugar_seleccionado"] = actualizado
-                if actualizado:
-                    cargar_salones(actualizado, render_after=False)
-                else:
-                    state["lugares_salones"] = []
+            _refrescar_lugares_desde_fuente()
             render()
 
         page.run_thread(worker)
@@ -821,7 +1031,7 @@ def build_home_view(
             return
         state["lugares_form"] = {"modo": "crear_lugar", "item": {}}
         state["lugares_form_message"] = ""
-        render()
+        navigate("location_form", action="crear_lugar")
 
     def abrir_form_editar_lugar(lugar: dict[str, Any]) -> None:
         if not puede_administrar_lugares(contexto_usuario):
@@ -830,7 +1040,7 @@ def build_home_view(
             return
         state["lugares_form"] = {"modo": "editar_lugar", "item": dict(lugar)}
         state["lugares_form_message"] = ""
-        render()
+        navigate("location_form", action="editar_lugar")
 
     def abrir_form_crear_salon() -> None:
         if not state.get("lugar_seleccionado"):
@@ -839,17 +1049,17 @@ def build_home_view(
             return
         state["lugares_form"] = {"modo": "crear_salon", "item": {}}
         state["lugares_form_message"] = ""
-        render()
+        navigate("location_form", action="crear_salon")
 
     def abrir_form_editar_salon(salon: dict[str, Any]) -> None:
         state["lugares_form"] = {"modo": "editar_salon", "item": dict(salon)}
         state["lugares_form_message"] = ""
-        render()
+        navigate("location_form", action="editar_salon")
 
     def cancelar_form_lugares() -> None:
         state["lugares_form"] = None
         state["lugares_form_message"] = ""
-        render()
+        navigate("locations")
 
     def guardar_form_lugares(payload: dict[str, Any]) -> None:
         form = state.get("lugares_form")
@@ -890,7 +1100,8 @@ def build_home_view(
                 state["lugares_form_message"] = resultado.mensaje
                 if resultado.ok:
                     state["lugares_form"] = None
-                    cargar_lugares()
+                    if _refrescar_lugares_desde_fuente():
+                        navigate("locations")
             finally:
                 state["lugares_saving"] = False
                 render()
@@ -1147,6 +1358,8 @@ def build_home_view(
                 state["arrivals_mensaje"] = resultado.mensaje
                 state["arrivals_integrantes"] = resultado.invitados
                 state["arrivals_seleccionados"] = set()
+                if resultado.ok:
+                    invalidar_dashboard()
                 print("[INVITADOS][INFO] Resultado confirmacion multiple:", resultado.estado)
             finally:
                 state["arrivals_saving"] = False
@@ -1188,6 +1401,7 @@ def build_home_view(
                 resultado = reversar_llegada(contexto_usuario, invitado, supabase=supabase)
                 state["arrivals_mensaje"] = resultado.mensaje
                 if resultado.ok:
+                    invalidar_dashboard()
                     grupo = cargar_grupo_invitacion(
                         contexto_usuario.get("evento_actual"),
                         resultado.invitado or invitado,
@@ -1221,12 +1435,12 @@ def build_home_view(
         print("[INVITADOS][INFO] Formulario cancelado.")
         state["invitado_form"] = None
         state["invitado_form_message"] = ""
-        render()
+        navigate("guests")
 
     def cerrar_detalle_invitado() -> None:
         state["invitado_detalle"] = None
         state["invitado_form"] = None
-        render()
+        navigate("guests")
 
     def go_dashboard() -> None:
         state["selected"] = "dashboard"
@@ -1283,7 +1497,7 @@ def build_home_view(
         }
         state["eventos_admin_form_message"] = ""
         state["eventos_admin_salones"] = []
-        render()
+        navigate("event_form", "nuevo")
 
     def abrir_form_editar_evento(evento: dict[str, Any]) -> None:
         from views.eventos_admin_view import EventFormState
@@ -1296,7 +1510,17 @@ def build_home_view(
         salon_id = evento.get("salon_id")
         cargar_salones_evento(evento.get("lugar_id"), renderizar=False)
         state["eventos_admin_form"]["estado_form"].salon_id = salon_id
-        render()
+        navigate("event_form", evento.get("evento_id"), "editar")
+
+    def buscar_evento_admin(evento_id: Any) -> dict[str, Any] | None:
+        try:
+            target = int(evento_id)
+        except (TypeError, ValueError):
+            return None
+        return next((item for item in state["eventos_admin_items"] if int(item.get("evento_id") or -1) == target), None)
+
+    def abrir_detalle_evento(evento: dict[str, Any]) -> None:
+        navigate("event_detail", evento.get("evento_id"))
 
     def cargar_salones_evento(lugar_id: Any, valores: dict[str, Any] | None = None, renderizar: bool = False) -> list[dict[str, Any]]:
         try:
@@ -1325,6 +1549,7 @@ def build_home_view(
     def cancelar_form_evento() -> None:
         state["eventos_admin_form"] = None
         state["eventos_admin_form_message"] = ""
+        navigate("events_admin")
         cargar_eventos_admin()
 
     def _sincronizar_evento_modificado(evento: dict[str, Any] | None) -> None:
@@ -1416,6 +1641,7 @@ def build_home_view(
                             f"{result.mensaje} No fue posible recargar la lista: "
                             f"{refreshed.mensaje}"
                         )
+                    navigate("events_admin")
                     return
             except Exception as ex:
                 print(
@@ -1542,10 +1768,21 @@ def build_home_view(
                                 f"evento={evento_activo.get('evento_id')}",
                             )
                             print("[CHECKIN][INFO] Entrada directa a Registrar llegadas.")
+                        else:
+                            state["selected"] = "dashboard"
+                            state["dashboard_event_key"] = None
+                            result_dashboard = obtener_indicadores_dashboard(contexto_usuario, supabase)
+                            state["dashboard_estado"] = result_dashboard.estado if result_dashboard.ok else "error"
+                            state["dashboard_mensaje"] = result_dashboard.mensaje
+                            state["dashboard_indicadores"] = result_dashboard.indicadores
+                            state["dashboard_event_key"] = evento_activo_key()
+                            if result_dashboard.ok:
+                                state["dashboard_ultima_actualizacion"] = _marca_actualizacion()
                     elif not resultado.eventos:
                         print("[EVENTOS][INFO] Consulta de eventos vacia.")
                     else:
                         print("[EVENTOS][INFO] Esperando seleccion explicita de evento.")
+                        state["selected"] = "event_selection"
                 else:
                     print("[EVENTOS][ERROR]", resultado.estado, resultado.mensaje)
             finally:
@@ -1555,11 +1792,16 @@ def build_home_view(
         page.run_thread(worker)
 
     def select_event(evento: dict[str, Any]) -> None:
+        if not es_evento_autorizado(state["eventos"], evento):
+            state["eventos_mensaje"] = "El evento solicitado no pertenece a tus eventos autorizados."
+            render()
+            return
         evento_activo = establecer_evento_activo(contexto_usuario, evento)
         contexto_usuario["evento_activo_seleccionado"] = True
         guardar_contexto_sesion(page.session.store, contexto_usuario)
         reset_invitados()
         reset_llegadas()
+        state["dashboard_event_key"] = None
         if checkin_mode:
             state["selected"] = "arrivals"
             preparar_llegadas()
@@ -1574,42 +1816,65 @@ def build_home_view(
                 f"cuenta={evento_activo.get('cuenta_id')}",
                 f"evento={evento_activo.get('evento_id')}",
             )
-        render()
+        if checkin_mode:
+            render()
+        else:
+            navigate("dashboard")
+            cargar_dashboard()
+
+    def confirmar_seleccion_evento(evento: dict[str, Any]) -> None:
+        if evento_key(evento) == evento_activo_key():
+            return
+        mostrar_dialogo_confirmacion(
+            "Cambiar evento activo",
+            f"¿Deseas trabajar con {evento.get('nombre_evento') or 'el evento seleccionado'}?",
+            "Cambiar evento",
+            lambda: select_event(evento),
+        )
 
     def select_tab(tab: str) -> None:
+        if tab == "dashboard":
+            navigate("dashboard")
+            cargar_dashboard()
+            return
+        if tab == "event_selection":
+            state["selected"] = "event_selection"
+            navigate("event_selection")
+            if not state["eventos"]:
+                cargar_eventos()
+            return
         if tab == "events_admin":
-            state["selected"] = "events_admin"
+            navigate("events_admin")
             cargar_eventos_admin()
             return
         if tab == "locations":
             if checkin_mode or not puede_administrar_lugares(contexto_usuario):
-                state["selected"] = "locations"
+                navigate("locations")
                 render()
                 return
-            state["selected"] = "locations"
+            navigate("locations")
             cargar_lugares()
             return
         if not (contexto_usuario.get("cuenta_actual") and contexto_usuario.get("evento_actual")):
             if tab == "guests":
-                state["selected"] = "guests"
+                navigate("guests")
                 cargar_invitados(reset=True)
                 return
-            state["selected"] = "dashboard"
-            render()
+            navigate("dashboard")
             return
 
         if tab == "guests":
-            state["selected"] = "guests"
+            navigate("guests")
             cargar_invitados(reset=True)
             return
 
         if tab == "arrivals" and not contexto_usuario.get("puede_registrar_llegadas"):
-            state["selected"] = "arrivals"
+            navigate("arrivals")
             preparar_llegadas()
             render()
             return
         if tab == "arrivals":
-            state["selected"] = "arrivals"
+            navigate("arrivals")
             preparar_llegadas()
             render()
             return
@@ -1618,8 +1883,7 @@ def build_home_view(
                 print("[CHECKIN][WARN] Operacion bloqueada en modo CHECKIN: preferencias")
                 return
             print("[EVENTOS][INFO] Apertura de Preferencias desde menu de usuario.")
-        state["selected"] = tab
-        render()
+        navigate(tab)
 
     def cambiar_contexto_evento() -> None:
         print("[CHECKIN][INFO] Cambio de evento solicitado desde menu de usuario.")
@@ -1628,14 +1892,16 @@ def build_home_view(
         guardar_contexto_sesion(page.session.store, contexto_usuario)
         reset_invitados()
         reset_llegadas()
-        state["selected"] = "dashboard"
+        state["selected"] = "event_selection"
         state["eventos_consulta_iniciada"] = False
         state["eventos_estado"] = "loading"
         state["eventos_mensaje"] = "Selecciona un evento para continuar."
+        navigate("event_selection")
         cargar_eventos()
 
     def logout() -> None:
         print("[EVENTOS][INFO] Cierre de sesion solicitado desde menu de usuario.")
+        _pausar_home()
         had_server_session = bool(
             session_controller is not None
             and session_controller.has_server_session
@@ -1675,5 +1941,5 @@ def build_home_view(
 
     configure_navigation_bar()
     home_control = build_shell()
-    home_control.data = {"start_eventos": cargar_eventos}
+    home_control.data = _home_callbacks()
     return home_control
