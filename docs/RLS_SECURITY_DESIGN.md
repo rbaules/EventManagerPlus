@@ -1,5 +1,21 @@
 # Diseño de seguridad RLS de EventPlus
 
+## Importación Excel — diseño futuro, no aplicado
+
+La importación no usará INSERT directos desde Python. Una única RPC futura
+recibirá selectores de cuenta/evento no confiables y un payload JSON sin IDs de
+tenant; derivará al usuario desde `auth.uid()`, exigirá usuario Activo y rol
+Master o Administrador dentro del alcance, y revalidará evento `Activo` en
+`Pre_evento` y ausencia total de mesas, invitaciones e invitados. Operador,
+Consulta y `anon` no tendrán EXECUTE.
+
+La función deberá ser `SECURITY DEFINER` con `search_path` fijo, límites de
+payload, locks contra concurrencia y rollback natural ante cualquier excepción.
+Debe omitir IDs internos para usar los triggers vigentes, revocar EXECUTE de
+`public`/`anon` y concederlo únicamente a `authenticated`. Su diseño SQL,
+políticas y pruebas transaccionales siguen pendientes; nada de esto fue aplicado
+remotamente. Véase `docs/EXCEL_IMPORT_DESIGN.md`.
+
 ## Administración de eventos — diseño futuro
 
 Master/Administrador: SELECT, INSERT y UPDATE solo dentro del alcance y con

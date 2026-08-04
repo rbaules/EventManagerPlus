@@ -1,5 +1,22 @@
 # Diagnóstico técnico para migración web de EventPlus
 
+## Diseño 7A — importación Excel (2026-08-03)
+
+La carga masiva continúa no implementada, pero ya tiene diseño técnico basado en
+`esquema.sql`: nueve columnas, claves externas temporales, validación completa,
+preview sin escritura y futura RPC atómica. La primera versión propuesta bloquea
+eventos con cualquier mesa, invitación o invitado existente y solo admite
+Master/Admin en FULL con evento Activo/`Pre_evento`. `openpyxl` no está aún en
+dependencias. Detalle: `docs/EXCEL_IMPORT_DESIGN.md`.
+
+## Dashboard real — 2026-08-03
+
+El diagnóstico anterior que describía el Dashboard como contexto básico queda
+superado: ahora consulta invitados y mesas activos del evento autorizado,
+calcula KPI, horarios e intervalos reales y presenta visualizaciones responsive.
+Las vistas resumen se auditaron, pero no contienen todos los campos requeridos.
+Detalle técnico y límites: `docs/DASHBOARD_MODULE.md`.
+
 ## Administración de eventos — 2026-07-30
 
 Integrada exclusivamente en FULL mediante el menú administrativo del encabezado.

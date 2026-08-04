@@ -1,5 +1,22 @@
 # EVENTPLUS_CONTEXT.md
 
+## Diseño de importación Excel (2026-08-03)
+
+Se diseñó, sin implementar, una carga XLSX de mesas, invitaciones e invitados
+para el evento activo. Las nueve columnas aprobadas son suficientes; sus códigos
+son referencias externas y los IDs reales los generarán los triggers. La futura
+v1 será exclusiva de FULL, Master/Administrador, evento Activo en `Pre_evento`,
+sin datos previos, con preview local y una sola RPC transaccional. No se agregó
+`openpyxl` ni se modificó Supabase. Véase `docs/EXCEL_IMPORT_DESIGN.md`.
+
+## Actualización: Dashboard operativo (2026-08-03)
+
+El Dashboard FULL consume datos reales del evento activo mediante dos consultas
+filtradas, muestra ocho KPI y tres visualizaciones nativas responsive. Master,
+Administrador, Operador y Consulta pueden verlo; la autorización se valida antes
+de consultar. CHECKIN, autenticación, sesiones, ASGI y cookies no fueron
+modificados. Detalle: `docs/DASHBOARD_MODULE.md`.
+
 ## Actualización: administración de eventos (2026-07-30)
 
 FULL expone Administración de eventos en el menú de usuario únicamente para

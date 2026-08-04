@@ -1,5 +1,16 @@
 # Plan de finalización funcional de EventPlus
 
+> Diseño 7A — importación Excel (2026-08-03): se auditó el esquema y se definió
+> la futura importación atómica de mesas, invitaciones e invitados. El módulo
+> sigue **no implementado**: no hay parser, UI, dependencia Excel ni RPC. La v1
+> propuesta será FULL, Master/Admin, evento Activo/Pre_evento y completamente
+> vacío. Véase `docs/EXCEL_IMPORT_DESIGN.md`.
+
+> Actualización 2026-08-03: Dashboard real rediseñado con ocho KPI, afluencia en
+> intervalos de 15 minutos, distribución de asistencia, progreso de mesas,
+> estados vacíos y diseño responsive. El servicio valida acceso y usa dos
+> lecturas sin N+1. Véase `docs/DASHBOARD_MODULE.md`. Realtime sigue pendiente.
+
 > Actualización 2026-07-30: Administración de eventos implementada en FULL para
 > Master/Administrador. Incluye CRUD lógico, ubicación validada, fases
 > `Pre_evento → En_proceso → Post_evento`, predeterminado por usuario y pruebas.
