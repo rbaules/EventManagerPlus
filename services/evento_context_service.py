@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from services.authorization_service import capacidades_contexto, resumen_capacidades
@@ -59,6 +60,21 @@ def establecer_evento_activo(
     contexto["puede_administrar_usuarios"] = capacidades.puede_administrar
     contexto["capacidades"] = resumen_capacidades(contexto)
     return evento_activo
+
+
+def construir_contexto_evento_activo(
+    contexto: dict[str, Any],
+    eventos_validados: list[dict[str, Any]],
+    key: tuple[int, int],
+) -> dict[str, Any]:
+    """Construye un contexto independiente; no muta el contexto vigente."""
+    evento = buscar_evento_por_key(eventos_validados, key)
+    if evento is None:
+        raise LookupError("El evento seleccionado no está disponible.")
+    nuevo = deepcopy(contexto)
+    establecer_evento_activo(nuevo, evento)
+    nuevo["evento_activo_seleccionado"] = True
+    return nuevo
 
 
 def limpiar_evento_activo(contexto: dict[str, Any]) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import flet as ft
@@ -16,6 +17,13 @@ def event_selection_view(
     on_back: Any,
     on_retry: Any,
 ) -> ft.Control:
+    def crear_handler_seleccion(item: dict[str, Any]) -> Any:
+        async def handler(_event: ft.ControlEvent) -> None:
+            result = on_select(item)
+            if inspect.isawaitable(result):
+                await result
+        return handler
+
     controls: list[ft.Control] = [
         ft.Row(
             [
@@ -60,7 +68,7 @@ def event_selection_view(
                             content="Seleccionar",
                             icon=ft.Icons.CHECK_CIRCLE,
                             disabled=is_active,
-                            on_click=lambda e, item=evento: on_select(item),
+                            on_click=crear_handler_seleccion(evento),
                         ),
                     ],
                     spacing=10,

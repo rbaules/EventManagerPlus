@@ -11,6 +11,7 @@ ROUTES = {
     "event_selection": "/app/eventos/seleccionar",
     "locations": "/app/lugares",
     "preferences": "/app/preferencias",
+    "excel_import": "/app/importar-invitados",
 }
 
 
