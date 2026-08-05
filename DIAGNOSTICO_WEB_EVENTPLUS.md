@@ -1563,3 +1563,9 @@ RLS continúa diseñada pero no aplicada. Ningún estado remoto de políticas,
 grants, constraints, publicaciones o funciones debe darse por implementado
 hasta capturar y validar los metadatos descritos en
 `docs/RLS_METADATA_VALIDATION.md`.
+# Diagnóstico web de importación Excel (Tarea 7B)
+
+Flet 0.85.3 ofrece `FilePicker.pick_files(with_data=True)` y
+`FilePicker.save_file(src_bytes=...)` en web. EventPlus usa esas APIs validadas,
+sin endpoint de descarga adicional, rutas locales expuestas ni pestañas nuevas.
+El montaje ASGI y el mecanismo de sesión permanecen sin cambios.

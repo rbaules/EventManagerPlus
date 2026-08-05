@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
+import traceback
+import threading
 from typing import Any
 
 import flet as ft
@@ -10,9 +14,14 @@ from config import is_checkin_mode
 from components.app_shell import app_shell
 from components.bottom_navigation import bottom_navigation
 from services.auth_service import sign_out_local_session
-from services.authorization_service import puede_administrar_lugares, puede_ver_administracion_eventos
+from services.authorization_service import puede_administrar_lugares, puede_ver_administracion_eventos, puede_ver_importacion_excel
+from services.excel_import_service import consultar_evento_tiene_datos, generar_archivo_errores, leer_archivo_excel, validar_contexto_importacion
+from services.excel_template_service import TEMPLATE_FILENAME, generar_plantilla_excel
 from services.dashboard_service import DashboardRefreshController, IndicadoresDashboard, obtener_indicadores_dashboard
 from services.evento_context_service import (
+    buscar_evento_por_key,
+    construir_contexto_evento_activo,
+    evento_key,
     guardar_contexto_sesion,
     guardar_eventos_disponibles,
     limpiar_contexto_sesion,
@@ -70,6 +79,7 @@ from views.invitados_view import invitado_detail_view, invitado_form_view, invit
 from views.lugares_view import lugar_form_view, lugares_view
 from views.eventos_admin_view import evento_detail_view, evento_form_view, eventos_admin_view
 from views.event_selection_view import event_selection_view
+from views.excel_import_view import excel_import_view
 
 
 def _placeholder(title: str, message: str) -> ft.Control:
@@ -106,6 +116,9 @@ def build_home_view(
     session_controller: PageSessionController | None = None,
 ) -> ft.Control:
     checkin_mode = is_checkin_mode()
+    excel_file_picker = ft.FilePicker()
+    if hasattr(page, "services"):
+        page.services.append(excel_file_picker)
     state: dict[str, Any] = {
         "selected": "arrivals" if checkin_mode else "dashboard",
         "eventos_estado": "loading",
@@ -168,14 +181,28 @@ def build_home_view(
         "route_identifier": None,
         "route_action": None,
         "previous_section": "dashboard",
+        "excel_import_estado": "idle",
+        "excel_import_mensaje": "",
+        "excel_import_filename": "",
+        "excel_import_size": 0,
+        "excel_import_preview": None,
+        "excel_import_has_existing_data": None,
     }
 
     def build_content() -> ft.Control:
+        if state["selected"] == "excel_import":
+            if checkin_mode or not puede_ver_importacion_excel(contexto_usuario):
+                return _placeholder("Acceso denegado", "Tu rol o modo de aplicación no permite importar invitados.")
+            return excel_import_view(
+                contexto_usuario, state["excel_import_estado"], state["excel_import_mensaje"],
+                state["excel_import_filename"], state["excel_import_size"], state["excel_import_preview"],
+                descargar_plantilla_excel, seleccionar_archivo_excel, descargar_errores_excel,
+            )
         if state["selected"] == "event_selection":
             return event_selection_view(
                 eventos=state["eventos"], evento_actual=contexto_usuario.get("evento_actual"),
                 estado=state["eventos_estado"], mensaje=state["eventos_mensaje"],
-                on_select=confirmar_seleccion_evento, on_back=lambda: navigate("dashboard"),
+                on_select=select_event, on_back=lambda: navigate("dashboard"),
                 on_retry=cargar_eventos,
             )
         if state["selected"] == "guest_detail":
@@ -374,6 +401,7 @@ def build_home_view(
             on_manage_locations=lambda: select_tab("locations"),
             on_manage_events=lambda: select_tab("events_admin"),
             on_select_event=lambda: select_tab("event_selection"),
+            on_excel_import=lambda: select_tab("excel_import"),
         )
 
     def configure_navigation_bar() -> None:
@@ -457,6 +485,8 @@ def build_home_view(
             "start_eventos": cargar_eventos,
             "pause_dashboard": _pausar_home,
             "resume_dashboard": _reanudar_home,
+            "select_event": select_event,
+            "state": state,
         }
 
     def _sincronizar_actualizacion_dashboard() -> None:
@@ -526,6 +556,62 @@ def build_home_view(
         else:
             render()
 
+    async def _guardar_descarga(nombre: str, contenido: bytes, extension: str) -> None:
+        selected_path = await excel_file_picker.save_file(
+            dialog_title="Guardar archivo de EventPlus", file_name=nombre,
+            file_type=ft.FilePickerFileType.CUSTOM, allowed_extensions=[extension], src_bytes=contenido,
+        )
+        if selected_path and not page.web:
+            Path(selected_path).write_bytes(contenido)
+
+    def descargar_plantilla_excel() -> None:
+        permitido, error = validar_contexto_importacion(contexto_usuario, full_mode=not checkin_mode)
+        if not permitido:
+            state["excel_import_estado"], state["excel_import_mensaje"] = "error", error
+            render(); return
+        async def worker() -> None:
+            await _guardar_descarga(TEMPLATE_FILENAME, generar_plantilla_excel(), "xlsx")
+        page.run_task(worker)
+
+    def seleccionar_archivo_excel() -> None:
+        permitido, error = validar_contexto_importacion(contexto_usuario, full_mode=not checkin_mode)
+        if not permitido:
+            state["excel_import_estado"], state["excel_import_mensaje"] = "error", error
+            render(); return
+        async def worker() -> None:
+            files = await excel_file_picker.pick_files(
+                dialog_title="Seleccionar archivo XLSX", file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["xlsx"], allow_multiple=False, with_data=True,
+            )
+            if not files: return
+            selected = files[0]
+            content = selected.bytes
+            if content is None and selected.path:
+                content = await asyncio.to_thread(Path(selected.path).read_bytes)
+            content = bytes(content or b"")
+            state["excel_import_estado"] = "loading"
+            state["excel_import_filename"], state["excel_import_size"] = selected.name, len(content)
+            state["excel_import_mensaje"] = "Validando el archivo completo..."
+            render()
+            preview = await asyncio.to_thread(leer_archivo_excel, selected.name, content)
+            state["excel_import_preview"] = preview
+            blocked = state.get("excel_import_has_existing_data") is True
+            state["excel_import_estado"] = "valid" if preview.is_valid and not blocked else "error"
+            state["excel_import_mensaje"] = (
+                "Este evento ya contiene información y no admite importación inicial."
+                if blocked else "Archivo válido y listo para importación."
+                if preview.is_valid else "El archivo contiene errores; no se habilitó la importación."
+            )
+            render()
+        page.run_task(worker)
+
+    def descargar_errores_excel() -> None:
+        preview = state.get("excel_import_preview")
+        if not preview: return
+        async def worker() -> None:
+            await _guardar_descarga("EventPlus_Errores_Importacion.csv", generar_archivo_errores(preview), "csv")
+        page.run_task(worker)
+
     def handle_route_change(e: ft.RouteChangeEvent) -> None:
         section, identifier, action = parse_app_route(getattr(e, "route", None) or page.route)
         state["route_identifier"] = identifier
@@ -587,8 +673,6 @@ def build_home_view(
         state["dashboard_ultima_actualizacion"] = ""
 
     def evento_activo_key() -> tuple[int, int] | None:
-        from services.evento_context_service import evento_key
-
         return evento_key(contexto_usuario.get("evento_actual"))
 
     def cargar_invitados(reset: bool = True) -> None:
@@ -1792,48 +1876,159 @@ def build_home_view(
 
         page.run_thread(worker)
 
-    def select_event(evento: dict[str, Any]) -> None:
-        if not es_evento_autorizado(state["eventos"], evento):
-            state["eventos_mensaje"] = "El evento solicitado no pertenece a tus eventos autorizados."
+    async def select_event(evento: dict[str, Any]) -> None:
+        try:
+            asyncio.get_running_loop()
+            loop_activo = True
+        except RuntimeError:
+            loop_activo = False
+        print(
+            "[EVENTOS][DEBUG] select_event",
+            f"thread={threading.current_thread().name}",
+            f"thread_id={threading.get_ident()}",
+            f"loop_activo={loop_activo}",
+        )
+        requested_key = evento_key(evento)
+        if requested_key is None or not es_evento_autorizado(state["eventos"], evento):
+            state["eventos_estado"] = "error"
+            state["eventos_mensaje"] = "No tiene acceso al evento seleccionado."
             render()
             return
-        evento_activo = establecer_evento_activo(contexto_usuario, evento)
-        contexto_usuario["evento_activo_seleccionado"] = True
-        guardar_contexto_sesion(page.session.store, contexto_usuario)
-        reset_invitados()
-        reset_llegadas()
-        state["dashboard_event_key"] = None
         if checkin_mode:
+            evento_activo = establecer_evento_activo(contexto_usuario, evento)
+            contexto_usuario["evento_activo_seleccionado"] = True
+            guardar_contexto_sesion(page.session.store, contexto_usuario)
+            reset_invitados()
+            reset_llegadas()
+            invalidar_dashboard()
             state["selected"] = "arrivals"
             preparar_llegadas()
-        print(
-            "[EVENTOS][INFO] Cambio de evento activo:",
-            evento_activo.get("cuenta_id"),
-            evento_activo.get("evento_id"),
-        )
-        if checkin_mode:
-            print(
-                "[CHECKIN][INFO] Evento activo seleccionado:",
-                f"cuenta={evento_activo.get('cuenta_id')}",
-                f"evento={evento_activo.get('evento_id')}",
-            )
-        if checkin_mode:
+            print("[CHECKIN][INFO] Evento activo seleccionado:", *requested_key)
             render()
-        else:
-            navigate("dashboard")
-            cargar_dashboard()
-
-    def confirmar_seleccion_evento(evento: dict[str, Any]) -> None:
-        if evento_key(evento) == evento_activo_key():
             return
-        mostrar_dialogo_confirmacion(
-            "Cambiar evento activo",
-            f"¿Deseas trabajar con {evento.get('nombre_evento') or 'el evento seleccionado'}?",
-            "Cambiar evento",
-            lambda: select_event(evento),
-        )
+        state["eventos_estado"] = "loading"
+        state["eventos_mensaje"] = "Validando el evento seleccionado..."
+        print("[EVENTOS][DEBUG] antes de page.update", f"loop_activo={loop_activo}")
+        render()
+        print("[EVENTOS][DEBUG] page.update completado")
+
+        contexto_anterior = deepcopy(contexto_usuario)
+        estado_anterior = {
+            key: deepcopy(state[key])
+            for key in (
+                "selected", "dashboard_estado", "dashboard_mensaje", "dashboard_indicadores",
+                "dashboard_event_key", "dashboard_ultima_actualizacion", "invitados_estado",
+                "invitados", "invitados_mensaje", "arrivals_estado", "arrivals_mensaje",
+                "excel_import_estado", "excel_import_mensaje", "excel_import_filename",
+                "excel_import_size", "excel_import_preview", "excel_import_has_existing_data",
+            )
+        }
+        applied = False
+        phase = "cargar_evento"
+        try:
+            def cargar_eventos_bloqueante() -> Any:
+                print(
+                    "[EVENTOS][DEBUG] consulta thread",
+                    f"thread={threading.current_thread().name}",
+                    f"thread_id={threading.get_ident()}",
+                    "loop_activo=False",
+                )
+                return obtener_eventos_disponibles(contexto_usuario, supabase=supabase)
+
+            print("[EVENTOS][DEBUG] consulta iniciada")
+            resultado = await asyncio.to_thread(
+                cargar_eventos_bloqueante,
+            )
+            print("[EVENTOS][DEBUG] consulta finalizada")
+            if not resultado.ok:
+                state["eventos_estado"] = "error"
+                state["eventos_mensaje"] = "No fue posible cargar el evento seleccionado."
+                print("[EVENTOS][ERROR] Seleccion no aplicada:", resultado.estado, resultado.mensaje)
+                return
+            evento_validado = buscar_evento_por_key(resultado.eventos, requested_key)
+            if evento_validado is None:
+                state["eventos_estado"] = "error"
+                state["eventos_mensaje"] = "El evento seleccionado ya no está disponible."
+                print("[EVENTOS][WARNING] Evento autorizado no disponible:", requested_key)
+                return
+
+            phase = "construir_contexto"
+            contexto_nuevo = construir_contexto_evento_activo(
+                contexto_anterior, resultado.eventos, requested_key,
+            )
+            phase = "cargar_dashboard"
+            resultado_dashboard = await asyncio.to_thread(
+                obtener_indicadores_dashboard, contexto_nuevo, supabase,
+            )
+            if not resultado_dashboard.ok:
+                raise RuntimeError("No fue posible preparar el Dashboard del evento seleccionado.")
+            phase = "aplicar_contexto"
+            guardar_contexto_sesion(page.session.store, contexto_nuevo)
+            contexto_usuario.clear()
+            contexto_usuario.update(contexto_nuevo)
+            applied = True
+            state["eventos"] = resultado.eventos
+            reset_invitados()
+            reset_llegadas()
+            invalidar_dashboard()
+            state["excel_import_estado"] = "idle"
+            state["excel_import_mensaje"] = ""
+            state["excel_import_filename"] = ""
+            state["excel_import_size"] = 0
+            state["excel_import_preview"] = None
+            state["excel_import_has_existing_data"] = None
+            state["eventos_estado"] = "ready"
+            state["eventos_mensaje"] = "Evento seleccionado correctamente."
+            state["selected"] = "dashboard"
+            state["dashboard_estado"] = resultado_dashboard.estado
+            state["dashboard_mensaje"] = resultado_dashboard.mensaje
+            state["dashboard_indicadores"] = resultado_dashboard.indicadores
+            state["dashboard_event_key"] = requested_key
+            state["dashboard_ultima_actualizacion"] = _marca_actualizacion()
+            print("[EVENTOS][INFO] Cambio de evento activo:", *requested_key)
+            print("[EVENTOS][DEBUG] contexto aplicado")
+            phase = "refrescar_controles"
+            print("[EVENTOS][DEBUG] antes de page.update", "loop_activo=True")
+            render()
+            print("[EVENTOS][DEBUG] controles refrescados")
+            print("[EVENTOS][DEBUG] page.update completado")
+            try:
+                page.show_dialog(ft.SnackBar(content=ft.Text("Evento seleccionado correctamente.")))
+            except Exception as notification_error:
+                print("[EVENTOS][WARNING] No se pudo mostrar confirmacion:", type(notification_error).__name__)
+        except Exception as ex:
+            if applied:
+                contexto_usuario.clear()
+                contexto_usuario.update(contexto_anterior)
+                for key, value in estado_anterior.items():
+                    state[key] = value
+                try:
+                    guardar_contexto_sesion(page.session.store, contexto_anterior)
+                except Exception:
+                    pass
+            state["eventos_estado"] = "error"
+            state["eventos_mensaje"] = "No fue posible cambiar de evento. Se mantuvo el evento anterior."
+            state["selected"] = "event_selection"
+            print(
+                "[EVENTOS][ERROR] Cambio de evento no aplicado:",
+                f"cuenta={requested_key[0]}", f"evento={requested_key[1]}",
+                f"fase={phase}", type(ex).__name__, str(ex),
+            )
+            print("[EVENTOS][ERROR] traceback=", traceback.format_exc())
+        finally:
+            render()
 
     def select_tab(tab: str) -> None:
+        if tab == "excel_import":
+            navigate("excel_import")
+            def verificar_vacio() -> None:
+                has_data, message = consultar_evento_tiene_datos(contexto_usuario, supabase)
+                state["excel_import_has_existing_data"] = has_data
+                state["excel_import_mensaje"] = message
+                state["excel_import_estado"] = "error" if has_data is not False else "idle"
+                render()
+            page.run_thread(verificar_vacio)
+            return
         if tab == "dashboard":
             navigate("dashboard")
             cargar_dashboard()

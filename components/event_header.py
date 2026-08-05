@@ -6,7 +6,7 @@ from typing import Any
 import flet as ft
 
 from config import is_checkin_mode
-from services.authorization_service import puede_administrar_lugares, puede_ver_administracion_eventos
+from services.authorization_service import puede_administrar_lugares, puede_ver_administracion_eventos, puede_ver_importacion_excel
 
 
 def _get(source: dict[str, Any] | None, key: str, default: str = "-") -> Any:
@@ -37,6 +37,7 @@ def _avatar_menu(
     on_manage_locations: Callable[[], None] | None = None,
     on_manage_events: Callable[[], None] | None = None,
     on_select_event: Callable[[], None] | None = None,
+    on_excel_import: Callable[[], None] | None = None,
 ) -> ft.Control:
     nombre = _get(contexto, "usr_nombre_usuario", "Usuario")
     iniciales = calcular_iniciales_usuario(nombre)
@@ -88,6 +89,11 @@ def _avatar_menu(
                     on_click=lambda e: on_manage_events(),
                 )
             )
+        if on_excel_import and puede_ver_importacion_excel(contexto):
+            items.append(ft.PopupMenuItem(
+                content="Importar invitados", icon=ft.Icons.UPLOAD_FILE,
+                on_click=lambda e: on_excel_import(),
+            ))
         items.extend([
             ft.PopupMenuItem(
                 content="Preferencias",
@@ -116,6 +122,7 @@ def event_header(
     on_manage_locations: Callable[[], None] | None = None,
     on_manage_events: Callable[[], None] | None = None,
     on_select_event: Callable[[], None] | None = None,
+    on_excel_import: Callable[[], None] | None = None,
 ) -> ft.Container:
     cuenta = contexto.get("cuenta_actual") or {}
     evento = contexto.get("evento_actual") or {}
@@ -195,6 +202,7 @@ def event_header(
                                 on_manage_locations,
                                 on_manage_events,
                                 on_select_event,
+                                on_excel_import,
                             ),
                         ],
                         alignment=ft.MainAxisAlignment.END,

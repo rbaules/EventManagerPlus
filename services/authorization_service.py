@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 
@@ -40,6 +40,10 @@ class Capacidades:
     puede_iniciar_evento: bool
     puede_cerrar_evento: bool
     puede_establecer_evento_predeterminado: bool
+    puede_ver_importacion_excel: bool = False
+    puede_descargar_plantilla_importacion: bool = False
+    puede_validar_archivo_importacion: bool = False
+    puede_ejecutar_importacion: bool = False
 
 
 _SIN_CAPACIDADES = Capacidades(
@@ -69,6 +73,14 @@ _CAPACIDADES_POR_ROL = {
         False, False, False, False, False, False, False, False, False,
     ),
 }
+for _rol_importacion in (ROL_MASTER, ROL_ADMINISTRADOR):
+    _CAPACIDADES_POR_ROL[_rol_importacion] = replace(
+        _CAPACIDADES_POR_ROL[_rol_importacion],
+        puede_ver_importacion_excel=True,
+        puede_descargar_plantilla_importacion=True,
+        puede_validar_archivo_importacion=True,
+        puede_ejecutar_importacion=False,
+    )
 
 
 def rol_cuenta_valido(rol: Any) -> bool:
@@ -218,6 +230,23 @@ def puede_cerrar_evento(contexto: dict[str, Any] | None) -> bool:
 
 def puede_establecer_evento_predeterminado(contexto: dict[str, Any] | None) -> bool:
     return capacidades_contexto(contexto).puede_establecer_evento_predeterminado
+
+
+def puede_ver_importacion_excel(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_ver_importacion_excel
+
+
+def puede_descargar_plantilla_importacion(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_descargar_plantilla_importacion
+
+
+def puede_validar_archivo_importacion(contexto: dict[str, Any] | None) -> bool:
+    return capacidades_contexto(contexto).puede_validar_archivo_importacion
+
+
+def puede_ejecutar_importacion(contexto: dict[str, Any] | None) -> bool:
+    # Se habilitará exclusivamente con la RPC transaccional de 7C.
+    return False
 
 
 def resumen_capacidades(contexto: dict[str, Any] | None) -> dict[str, bool]:

@@ -364,3 +364,8 @@ Archivos previstos para la próxima tarea:
 - contexto, esquema, diagnóstico y este roadmap.
 
 No se debe modificar autenticación, OAuth, cookies ni ASGI para ese bloque.
+# Actualización Tarea 7B (2026-08-03)
+
+La plantilla, lectura segura, validación completa, vista previa y archivo de
+errores Excel están implementados en FULL. Queda pendiente la validación manual
+del usuario y la importación RPC transaccional de 7C; no hubo escrituras en 7B.

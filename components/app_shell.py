@@ -18,6 +18,7 @@ def app_shell(
     on_manage_locations: Callable[[], None] | None = None,
     on_manage_events: Callable[[], None] | None = None,
     on_select_event: Callable[[], None] | None = None,
+    on_excel_import: Callable[[], None] | None = None,
 ) -> ft.Control:
     return ft.SafeArea(
         content=ft.Column(
@@ -30,6 +31,7 @@ def app_shell(
                     on_manage_locations=on_manage_locations,
                     on_manage_events=on_manage_events,
                     on_select_event=on_select_event,
+                    on_excel_import=on_excel_import,
                 ),
                 ft.Container(
                     content=content,

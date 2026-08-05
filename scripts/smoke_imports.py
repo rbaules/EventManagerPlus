@@ -12,6 +12,8 @@ MODULES = [
     "db",
     "services.auth_service",
     "services.authorization_service",
+    "services.excel_import_service",
+    "services.excel_template_service",
     "services.evento_context_service",
     "services.evento_service",
     "services.invitado_service",
@@ -30,6 +32,8 @@ MODULES = [
     "views.invitados_view",
     "views.login_view",
     "views.lugares_view",
+    "views.excel_import_view",
+    "models.excel_import_models",
 ]
 
 

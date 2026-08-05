@@ -561,3 +561,9 @@ Pantalla de invitados
 → confirmar llegada
 → actualización realtime
 ```
+# Estado Tarea 7B (2026-08-03)
+
+FULL incorpora la opción administrativa `Importar invitados` para Master y
+Administrador. Genera/descarga una plantilla XLSX y valida/previsualiza archivos
+localmente. CHECKIN no incorpora el módulo. La ejecución de importación sigue
+deshabilitada hasta 7C y no existe escritura a Supabase en este flujo.

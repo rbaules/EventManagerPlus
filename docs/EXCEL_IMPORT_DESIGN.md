@@ -1,6 +1,10 @@
 # Diseño técnico de importación Excel de EventPlus
 
-Estado: **diseñado, no implementado**. Fecha: 3 de agosto de 2026.
+Estado: **Tarea 7B implementada; escritura transaccional pendiente para 7C**. Fecha: 3 de agosto de 2026.
+
+La implementación 7B usa `openpyxl==3.1.5`, acepta las nueve columnas en
+cualquier orden (sin faltantes, extras ni duplicadas), valida localmente y no
+escribe datos. La importación definitiva y su RPC continúan fuera de alcance.
 
 Este documento define la futura importación de mesas, invitaciones e invitados
 para el evento activo en FULL. No autoriza escrituras directas, cambios de
@@ -181,10 +185,10 @@ esperada llamada `Importación`. Los límites deben ser constantes configurables
    con extensión doble engañosa.
 2. Abrir como ZIP/XLSX válido, en modo lectura y `data_only=True`; cerrar siempre
    mediante context manager/finally.
-3. Exigir hoja `Importación` y nueve encabezados exactos, en el orden aprobado,
-   sin vacíos, extras ni duplicados después de trim.
-4. Rechazar archivo sin filas de datos, filas completamente vacías intermedias y
-   cualquier contenido después de una fila final vacía.
+3. Exigir hoja `Importación` y los nueve encabezados exactos en cualquier orden,
+   sin vacíos, extras ni duplicados después de trim/BOM.
+4. Rechazar archivo sin filas de datos; ignorar filas completamente vacías y
+   advertir cuando una fila vacía sea intermedia.
 5. Rechazar celdas de error y fórmulas cuyo valor calculado sea NULL/no
    disponible. Nunca ejecutar macros, enlaces ni fórmulas.
 6. Tratar códigos, teléfono y Mesa ID como texto. Si Excel ya convirtió un valor
@@ -358,7 +362,7 @@ Se generará con `openpyxl` en memoria, sin ejemplos mezclados con datos reales:
 
 - Hoja `Importación`: nueve encabezados exactos, fila congelada, autofiltro,
   anchos legibles, estilos sobrios y formato texto para códigos, teléfono y Mesa
-  ID. Validación de lista `Sí,Si,No` para principal.
+  ID. Validación de lista `Sí,No` para principal (el lector también acepta `Si`).
 - Hoja `Instrucciones`: descripción, obligatoriedad, máximo, ejemplo, valores
   permitidos, reglas de principal/mesa, límites y aviso para conservar códigos y
   teléfonos como texto.

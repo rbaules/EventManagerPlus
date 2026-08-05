@@ -17,6 +17,7 @@ EXPECTED_PACKAGES = {
     "fastapi": "0.139.0",
     "starlette": "1.3.1",
     "uvicorn": "0.51.0",
+    "openpyxl": "3.1.5",
 }
 REQUIRED_IMPORTS = [
     "flet",
@@ -25,6 +26,7 @@ REQUIRED_IMPORTS = [
     "fastapi",
     "starlette",
     "uvicorn",
+    "openpyxl",
 ]
 
 
@@ -110,6 +112,13 @@ def main() -> int:
                 ).parameters
             ),
             "ft.UrlTarget.SELF": hasattr(ft.UrlTarget, "SELF"),
+            "ft.FilePicker": hasattr(ft, "FilePicker"),
+            "ft.FilePicker.pick_files.with_data": (
+                "with_data" in inspect.signature(ft.FilePicker.pick_files).parameters
+            ),
+            "ft.FilePicker.save_file.src_bytes": (
+                "src_bytes" in inspect.signature(ft.FilePicker.save_file).parameters
+            ),
             "ft.Page.login.authorization": (
                 "authorization" in inspect.signature(ft.Page.login).parameters
             ),
