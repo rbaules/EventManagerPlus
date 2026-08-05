@@ -21,3 +21,4 @@ supabase/**/.temp/
 # Runtime and test logs
 logs/
 .tmp_*.log
+.manual_*.log
