@@ -134,7 +134,7 @@ reemplazarlas. No usan `service_role`.
 | Invitaciones/invitados SELECT | Sí | Sí | asignados | asignados/leer | No |
 | Administrar evento/invitación/invitado | Sí | Sí | No | No | No |
 | Confirmar/revertir llegada en proceso | Sí | Sí | Sí | No | No |
-| Gestionar asignaciones | Sí | cuenta | No | No | No |
+| Gestionar asignaciones | Sí; solo Master asigna/retira Admin | cuenta propia; solo Operador/Consulta | No | No | No |
 
 ## Matriz de políticas y pruebas
 
@@ -146,8 +146,8 @@ helpers anteriores.
 | usuario | SELECT | propio; Master justificado para administración | Auth UUID / — | Master global expone PII; A ve A, operador no ve B |
 | usuario | I/U/D | ninguno directo | — | trigger Auth debe seguir funcionando; cliente no eleva master/estado |
 | usuario-cuenta | SELECT | propio, Master/Admin cuenta | pertenencia / — | A ve relaciones A, no B |
-| usuario-cuenta | I/U | Master/Admin cuenta | rol cuenta / rol válido y misma cuenta | Admin asigna operador; operador no se autoasigna ni eleva rol |
-| usuario-cuenta | DELETE | Master/Admin, no sí mismo | rol y usuario distinto / — | Admin revoca tercero; no elimina su propia autoridad |
+| usuario-cuenta | I/U | Master; Admin de cuenta solo para Operador/Consulta | rol cuenta / rol permitido y misma cuenta activa | solo Master asigna/retira Admin; Admin asigna operador/consulta; operador no se autoasigna ni eleva rol |
+| usuario-cuenta | DELETE/baja | Master; Admin solo relación Operador/Consulta de su cuenta, no sí mismo | rol y usuario distinto / — | Admin inactiva relación de tercero; no elimina su propia autoridad ni afecta perfil global |
 | usuario-evento | SELECT | propio, Master/Admin cuenta | pertenencia/rol / — | operador ve su asignación, no A2 |
 | usuario-evento | I/U/D | Master/Admin cuenta | rol / misma cuenta | Admin asigna A1; operador no se autoasigna |
 | cuenta | SELECT | relación activa o Master | tiene-cuenta / — | A lee A; no B |
@@ -235,8 +235,8 @@ desconocidos. Los grants se restauran desde el inventario previo.
 ## Decisiones pendientes antes de aplicar
 
 1. Comparar DDL remoto, FK, checks, owners, grants y políticas con el contrato.
-2. Confirmar si Master realmente debe ver todas las cuentas y PII de usuarios.
-3. Definir quién administra Administradores y si un Admin puede revocar a otro.
+2. Validar técnicamente la decisión aprobada: Master ve y administra cuentas/eventos inactivos; Admin los ve en sus cuentas sin uso operativo; Operador/Consulta no acceden.
+3. Implementar la decisión aprobada de que solo Master asigna o retira Administrador; Admin solo gestiona relaciones Operador/Consulta de sus cuentas activas.
 4. Definir fases permitidas para invitaciones, invitados y reversión.
 5. Decidir si eliminación es siempre baja lógica.
 6. Confirmar reglas de imprevistos en FULL frente a CHECKIN.
@@ -252,3 +252,11 @@ La única ruta de escritura del importador es EXECUTE sobre
 tenant/rol/evento y mantiene `anon`/`PUBLIC` revocados. No requiere ni justifica
 conceder INSERT directo. La sentencia es atómica y usa locks por evento. Esta
 preparación no activa RLS; debe coordinarse con la fase RLS futura.
+
+# Diseño del módulo de usuarios (8A)
+
+`docs/USER_ADMIN_MODULE_DESIGN.md` concreta el alcance por cuenta, las
+protecciones del último Master, las RPC específicas y la invalidación de
+capacidades. Es diseño: no añade políticas, grants ni funciones. La existencia
+del trigger Auth que invoca `evp_fn_vincular_usuario_auth` debe verificarse en
+metadatos remotos antes de implementar altas.

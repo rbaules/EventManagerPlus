@@ -220,7 +220,7 @@ evp_usr_usuario
 con:
 
 ```text
-usr_email = email real de Google del usuario
+usr_email = correo administrativo EventPlus (inicialmente debe coincidir con Auth para el vínculo por email)
 usr_estado = 'Preregistrado'
 usr_usuario_auth_uuid = NULL
 ```
@@ -232,6 +232,11 @@ Cuando el usuario inicia sesión con Google:
 3. El trigger busca en `evp_usr_usuario` por email.
 4. Actualiza `usr_usuario_auth_uuid` con `auth.users.id`.
 5. Cambia `usr_estado` a `Activo`.
+
+Después del vínculo, `evp_usr_usuario.usr_email` sigue siendo el correo
+administrativo EventPlus y Supabase Auth conserva la autoridad de
+autenticación. Si ambos correos divergen, la aplicación debe mostrar una
+advertencia y no sincronizarlos automáticamente.
 
 ---
 
@@ -572,3 +577,21 @@ deshabilitada hasta 7C y no existe escritura a Supabase en este flujo.
 La importación Excel FULL dispone de integración Python para una sola RPC,
 preview sellado por contexto/hash y confirmación UI. La migración está
 preparada pero no aplicada; no se ha ejecutado SQL remoto.
+
+# Estado Tarea 8A (2026-08-05)
+
+La administración productiva de usuarios todavía no existe. La auditoría y el
+diseño futuro están en `docs/USER_ADMIN_MODULE_DESIGN.md`. El diseño conserva
+`Preregistrado`, distingue Auth del UUID interno y mantiene el acceso heredado
+de Master/Administrador sin relaciones de evento redundantes.
+
+Las decisiones funcionales están aprobadas: solo Master asigna o retira
+Administrador y administra predeterminados de terceros; Admin preregistra
+únicamente Operador/Consulta en sus cuentas activas, sin editar nombre/correo
+global, inactivar el usuario global ni cambiar predeterminados ajenos. Cada
+usuario cambia sus predeterminados dentro de su acceso efectivo. Master no
+puede auto-retirarse ni auto-inactivarse. La autorización se recarga
+periódicamente y expulsa mediante logout al usuario inactivado. Master puede
+administrar entidades inactivas; Admin solo puede ver las de sus cuentas sin
+usarlas; Operador/Consulta no acceden a ellas. Auth se gestiona inicialmente de
+forma manual controlada.

@@ -117,7 +117,7 @@ RLS todavía no está aplicada.
 |---|---|---|---|---|---|---|---|---|
 | `evp_usr_usuario` | Usuario interno; vincula `auth.users`; defaults a cuenta/evento | Solo propio durante login/contexto; sin pantalla | No / no / no | `usuario_service`, `session_service` | Propio; Master para administración futura | Manual preregistro + trigger Auth | Sí para preregistro, estado y defaults | SELECT diseñada; pruebas de login/contexto/sesión. Faltan CRUD, rol y aislamiento administrativo. |
 | `evp_cta_cuenta` | Raíz tenant | Nombre en encabezado/Dashboard y contexto | No / no / no | `usuario_service` | Master todas; relacionados leen | Manual | Recomendable para alta; edición puede ser RPC o UPDATE muy restringido | SELECT/UPDATE Master diseñadas; faltan pruebas CRUD/tenant. |
-| `evp_ucu_usuario_cuenta` | Relación usuario-cuenta, rol y estado; depende de usuario/cuenta | Solo contexto del propio usuario | No / no / no | `usuario_service`, `authorization_service` | Master/Admin según reglas pendientes; propio lee | Manual | Sí, por elevación de privilegios y reglas de autoasignación | Políticas propuestas; pruebas actuales solo consumen relación. |
+| `evp_ucu_usuario_cuenta` | Relación usuario-cuenta, rol y estado; depende de usuario/cuenta | Solo contexto del propio usuario | No / no / no | `usuario_service`, `authorization_service` | Master; Admin solo Operador/Consulta en sus cuentas activas; propio lee | Manual | Sí, por elevación de privilegios y reglas de autoasignación | Políticas propuestas; pruebas actuales solo consumen relación. |
 | `evp_pai_pais` | Catálogo independiente | No | No / no / no | Ninguno | Autenticado lee; mantenimiento fuera del MVP | Manual/preexistente | No para lectura; mantenimiento controlado si se habilita | SELECT diseñada; sin pruebas. |
 | `evp_lug_lugar` | Lugar por cuenta; depende de cuenta y opcionalmente país | No | No / no / no | Ninguno | Master/Admin escriben; roles autorizados leen | Manual | Directo viable con RLS, RPC recomendable si combina salón | RLS propuesta; sin pruebas. |
 | `evp_sal_salon` | Salón por cuenta/lugar | No | No / no / no | Ninguno | Master/Admin escriben; roles autorizados leen | Manual | RPC recomendable al crear junto con lugar; directo viable aislado | RLS propuesta; sin pruebas. |
@@ -145,19 +145,25 @@ Vistas reales relacionadas:
 | Crear mesas | Master/Admin | Evento `Pre_evento`, nombres únicos, capacidad; `evp_mes_mesa` | RPC masiva transaccional | IDs relativos, duplicados, parcialidad | P1 |
 | Crear invitaciones | Master/Admin | Evento `Pre_evento`, destinatario, código único, puestos; `evp_inv_invitacion` | RPC recomendada | Cupos incoherentes o código duplicado | P1 |
 | Crear invitados | Master/Admin | Evento/invitación/mesa coherentes, duplicado normalizado, principal único | RPC; transacción con invitación cuando aplique | Escribir en otro tenant, exceder cupos | P0 existente / P1 endurecimiento |
-| Preregistrar usuario | Master y, si se aprueba, Admin limitado a su cuenta | Email normalizado único, estado `Preregistrado`, no aceptar Auth UUID/master del cliente | RPC obligatoria | Escalación a Master, apropiación de identidad | P1 |
-| Asignar usuario a cuenta | Master/Admin según regla pendiente | Usuario/cuenta activos, rol permitido, no autoelevarse; `evp_ucu_usuario_cuenta` | RPC obligatoria | Escalación de rol y acceso tenant | P1 |
+| Preregistrar usuario | Master; Admin solo no Master como Operador/Consulta en cuenta propia activa | Email normalizado único, estado `Preregistrado`, relación atómica, no aceptar Auth UUID/master del cliente | RPC obligatoria | Escalación a Master, apropiación de identidad | P1 |
+| Asignar usuario a cuenta | Master; Admin solo Operador/Consulta en cuenta propia activa | Usuario/cuenta activos, rol permitido, no autoelevarse; `evp_ucu_usuario_cuenta` | RPC obligatoria | Escalación de rol y acceso tenant | P1 |
 | Asignar usuario a evento | Master/Admin de cuenta | Relación cuenta previa, solo Operador/Consulta, evento de misma cuenta | RPC obligatoria | Autoasignación o acceso cruzado | P1 |
-| Asignar rol | Master/Admin según gobierno por definir | Solo Administrador/Operador/Consulta; proteger Master; historial | RPC obligatoria | Escalación de privilegios | P1 |
-| Activar/desactivar usuarios/relaciones | Master/Admin según alcance | No revocar último administrador sin regla; coherencia de defaults | RPC obligatoria, transacción si limpia relaciones/defaults | Bloqueo o persistencia de acceso | P1 |
-| Cambiar evento predeterminado | Usuario sobre evento autorizado; Admin opcional | Cuenta/evento autorizados y activos; `evp_usr_usuario` | RPC breve recomendada, o función existente auditada | Fijar default no autorizado | P2 |
+| Asignar rol | Solo Master para Administrador; Master/Admin de cuenta para Operador/Consulta | Proteger Master; Admin no asigna ni retira Administrador; historial | RPC obligatoria | Escalación de privilegios | P1 |
+| Activar/desactivar usuarios/relaciones | Master para perfil global; Admin solo relaciones de sus cuentas/eventos | No auto-inactivar Master ni dejar cero Master; coherencia de defaults | RPC obligatoria, transacción si limpia relaciones/defaults | Bloqueo o persistencia de acceso | P1 |
+| Cambiar evento predeterminado | Usuario propio; Master para terceros | Solo dentro del acceso efectivo; Admin no cambia defaults de terceros; `evp_usr_usuario` | RPC breve recomendada, o función existente auditada | Fijar default no autorizado | P2 |
 | Importar invitados | Master/Admin | Archivo, columnas, encoding, preview, duplicados, invitación/mesa/cupo | RPC o proceso server-side transaccional por lote; staging recomendado | Parcialidad, inyección de IDs, datos sensibles | P1 |
 | Corregir datos antes del evento | Master/Admin | Solo `Pre_evento`, auditoría, restricciones únicas | RPC para cambios sensibles; operaciones simples pueden reutilizar RPC CRUD | Corrupción poco antes del evento | P1 |
 | Cerrar evento | Master/Admin autorizado | Fase válida, pendientes advertidos, timestamp/regla de reapertura | RPC obligatoria | Pérdida de operación o reapertura indebida | P1 |
 
-Decisiones funcionales pendientes antes de implementar usuarios: si un
-Administrador puede crear otros Administradores, revocar a un par o al último
-Administrador, y quién puede reabrir un evento Cerrado.
+Decisiones aprobadas para implementar usuarios: solo Master asigna o retira
+Administrador; Admin preregistra únicamente Operador/Consulta en sus cuentas
+activas, no edita nombre/correo global, no inactiva perfiles globales ni cambia
+predeterminados de terceros. Cada usuario cambia sus propios predeterminados
+dentro de su acceso efectivo. Auth inicia con gestión manual controlada y estado
+`Preregistrado`; la divergencia de correo se advierte sin sincronización
+automática. El detalle completo y las reglas de entidades inactivas y sesiones
+están en `docs/USER_ADMIN_MODULE_DESIGN.md`. La reapertura de eventos Cerrados
+continúa siendo una decisión separada pendiente.
 
 ## 6. Operaciones que requieren RPC
 
@@ -374,3 +380,10 @@ del usuario y la importación RPC transaccional de 7C; no hubo escrituras en 7B.
 Migración RPC, rollback, contrato versionado, servicio Python y UI de
 confirmación preparados. Pendientes: aplicar la migración, pruebas SQL aisladas
 y prueba manual de importación/rollback/concurrencia.
+
+# Actualización Tarea 8A (2026-08-05)
+
+El módulo de usuarios continúa no implementado. Su auditoría, matriz propuesta,
+RPC futuras, seguridad, sesiones y secuencia 8B–8G están en
+`docs/USER_ADMIN_MODULE_DESIGN.md`. Ninguna UI de escritura debe preceder a su
+RPC; 8B será exclusivamente lectura y también requiere validar el RLS remoto.
