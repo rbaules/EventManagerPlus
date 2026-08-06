@@ -79,7 +79,7 @@ for _rol_importacion in (ROL_MASTER, ROL_ADMINISTRADOR):
         puede_ver_importacion_excel=True,
         puede_descargar_plantilla_importacion=True,
         puede_validar_archivo_importacion=True,
-        puede_ejecutar_importacion=False,
+        puede_ejecutar_importacion=True,
     )
 
 
@@ -245,8 +245,7 @@ def puede_validar_archivo_importacion(contexto: dict[str, Any] | None) -> bool:
 
 
 def puede_ejecutar_importacion(contexto: dict[str, Any] | None) -> bool:
-    # Se habilitará exclusivamente con la RPC transaccional de 7C.
-    return False
+    return capacidades_contexto(contexto).puede_ejecutar_importacion
 
 
 def resumen_capacidades(contexto: dict[str, Any] | None) -> dict[str, bool]:

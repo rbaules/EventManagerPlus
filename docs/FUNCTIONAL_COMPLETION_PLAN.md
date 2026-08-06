@@ -369,3 +369,8 @@ No se debe modificar autenticación, OAuth, cookies ni ASGI para ese bloque.
 La plantilla, lectura segura, validación completa, vista previa y archivo de
 errores Excel están implementados en FULL. Queda pendiente la validación manual
 del usuario y la importación RPC transaccional de 7C; no hubo escrituras en 7B.
+# Actualización Tarea 7C (2026-08-04)
+
+Migración RPC, rollback, contrato versionado, servicio Python y UI de
+confirmación preparados. Pendientes: aplicar la migración, pruebas SQL aisladas
+y prueba manual de importación/rollback/concurrencia.

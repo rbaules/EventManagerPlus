@@ -1569,3 +1569,8 @@ Flet 0.85.3 ofrece `FilePicker.pick_files(with_data=True)` y
 `FilePicker.save_file(src_bytes=...)` en web. EventPlus usa esas APIs validadas,
 sin endpoint de descarga adicional, rutas locales expuestas ni pestañas nuevas.
 El montaje ASGI y el mecanismo de sesión permanecen sin cambios.
+# Diagnóstico 7C
+
+La ejecución se realiza con el cliente Supabase propio de la Page y una sola
+llamada `rpc()`, sin service_role, endpoint ASGI adicional ni cambios de sesión.
+El payload validado queda ligado a cuenta/evento/fase/estado y SHA-256.

@@ -567,3 +567,8 @@ FULL incorpora la opción administrativa `Importar invitados` para Master y
 Administrador. Genera/descarga una plantilla XLSX y valida/previsualiza archivos
 localmente. CHECKIN no incorpora el módulo. La ejecución de importación sigue
 deshabilitada hasta 7C y no existe escritura a Supabase en este flujo.
+# Estado Tarea 7C (2026-08-04)
+
+La importación Excel FULL dispone de integración Python para una sola RPC,
+preview sellado por contexto/hash y confirmación UI. La migración está
+preparada pero no aplicada; no se ha ejecutado SQL remoto.

@@ -1,6 +1,6 @@
 # Diseño técnico de importación Excel de EventPlus
 
-Estado: **Tarea 7B implementada; escritura transaccional pendiente para 7C**. Fecha: 3 de agosto de 2026.
+Estado: **7C preparada; migración RPC todavía no aplicada**. Fecha: 4 de agosto de 2026.
 
 La implementación 7B usa `openpyxl==3.1.5`, acepta las nueve columnas en
 cualquier orden (sin faltantes, extras ni duplicadas), valida localmente y no

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import re
 import unicodedata
 from collections import defaultdict
 from io import BytesIO, StringIO
 from pathlib import Path
+from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any
 from zipfile import BadZipFile, is_zipfile
 
@@ -13,17 +17,18 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
 from models.excel_import_models import (
-    ImportPreview, ImportRowNormalized, ImportRowRaw, ImportSummary,
+    ImportExecutionResult, ImportPreview, ImportRowNormalized, ImportRowRaw, ImportSummary,
     ImportValidationError, ImportValidationWarning, InvitationImportGroup,
     TableImportGroup,
 )
-from services.authorization_service import evento_autorizado, puede_validar_archivo_importacion
+from services.authorization_service import evento_autorizado, puede_ejecutar_importacion, puede_validar_archivo_importacion
 from services.excel_template_service import CANONICAL_HEADERS, IMPORT_SHEET
 
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
 MAX_DATA_ROWS = 5000
 PREVIEW_ROW_LIMIT = 100
+RPC_IMPORT_NAME = "evp_importar_evento_desde_json"
 _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _LIMITS = {
     CANONICAL_HEADERS[0]: 50, CANONICAL_HEADERS[1]: 100,
@@ -84,6 +89,119 @@ def consultar_evento_tiene_datos(contexto: dict[str, Any], supabase: Any) -> tup
     except Exception as ex:
         return None, f"No fue posible comprobar si el evento está vacío ({type(ex).__name__})."
     return False, "El evento no contiene mesas, invitaciones ni invitados."
+
+
+def construir_payload_importacion(preview: ImportPreview) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "mesas": [
+            {"codigo_externo": table.code, "nombre": table.name}
+            for table in preview.tables
+        ],
+        "invitaciones": [
+            {
+                "codigo_externo": invitation.code,
+                "destinatario": invitation.recipient,
+                "puestos_reservados": invitation.reserved_seats,
+                "invitados": [
+                    {
+                        "orden": row.guest_order,
+                        "nombre": row.guest_name,
+                        "telefono": row.phone,
+                        "email": row.email,
+                        "es_principal": row.is_primary,
+                        "mesa_codigo": row.table_code,
+                    }
+                    for row in invitation.rows
+                ],
+            }
+            for invitation in preview.invitations
+        ],
+    }
+
+
+def serializar_payload_importacion(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def calcular_hash_payload(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(serializar_payload_importacion(payload)).hexdigest()
+
+
+def vincular_preview_contexto(preview: ImportPreview, contexto: dict[str, Any]) -> ImportPreview:
+    evento = contexto.get("evento_actual") or {}
+    payload = construir_payload_importacion(preview)
+    return replace(
+        preview,
+        account_id=int(evento["cuenta_id"]),
+        event_id=int(evento["evento_id"]),
+        event_phase=str(evento.get("fase_evento") or ""),
+        event_status=str(evento.get("estado") or ""),
+        payload_hash=calcular_hash_payload(payload),
+        validated_at=datetime.now(timezone.utc),
+    )
+
+
+def preview_coincide_contexto(preview: ImportPreview, contexto: dict[str, Any]) -> bool:
+    evento = contexto.get("evento_actual") or {}
+    try:
+        current = (int(evento["cuenta_id"]), int(evento["evento_id"]), str(evento["fase_evento"]), str(evento["estado"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    expected = (preview.account_id, preview.event_id, preview.event_phase, preview.event_status)
+    return preview.is_valid and preview.validated_at is not None and current == expected and preview.payload_hash == calcular_hash_payload(construir_payload_importacion(preview))
+
+
+_RPC_MESSAGES = {
+    "IMPORT_FORBIDDEN": "No tiene permisos para importar información en este evento.",
+    "EVENT_NOT_FOUND": "El evento seleccionado ya no está disponible.",
+    "EVENT_NOT_ACTIVE": "La importación solo está permitida en eventos activos en Pre_evento.",
+    "EVENT_NOT_PRE_EVENT": "La importación solo está permitida en eventos activos en Pre_evento.",
+    "EVENT_NOT_EMPTY": "Este evento ya contiene información y no admite importación inicial.",
+    "INVALID_PAYLOAD": "El archivo validado contiene información que no cumple las reglas del evento.",
+    "DUPLICATE_GUEST": "El archivo validado contiene invitados duplicados.",
+    "INVALID_TABLE_REFERENCE": "El archivo validado contiene una referencia de mesa inválida.",
+    "CONCURRENT_IMPORT": "Otra importación fue procesada antes que esta. Actualice la información.",
+    "IMPORT_INTERNAL_ERROR": "La importación no pudo completarse por un error interno. No se guardó información.",
+}
+
+
+def _rpc_error_code(ex: Exception) -> str:
+    text = " ".join(str(getattr(ex, field, "") or "") for field in ("code", "message", "details")) + " " + str(ex)
+    for code in _RPC_MESSAGES:
+        if code in text:
+            return code
+    lowered = text.lower()
+    if any(token in lowered for token in ("timeout", "network", "connection", "unreachable")):
+        return "NETWORK_ERROR"
+    return "RPC_ERROR"
+
+
+def ejecutar_importacion(supabase: Any, contexto: dict[str, Any], preview: ImportPreview) -> ImportExecutionResult:
+    context_ok, _ = validar_contexto_importacion(contexto)
+    if not context_ok or not puede_ejecutar_importacion(contexto):
+        return ImportExecutionResult(False, "IMPORT_FORBIDDEN", _RPC_MESSAGES["IMPORT_FORBIDDEN"])
+    if not preview_coincide_contexto(preview, contexto):
+        return ImportExecutionResult(False, "CONTEXT_CHANGED", "El evento cambió después de validar el archivo. Vuelva a seleccionar y validar el archivo.")
+    evento = contexto["evento_actual"]
+    payload = construir_payload_importacion(preview)
+    payload_hash = calcular_hash_payload(payload)
+    try:
+        response = supabase.rpc(RPC_IMPORT_NAME, {
+            "p_cuenta_id": int(evento["cuenta_id"]),
+            "p_evento_id": int(evento["evento_id"]),
+            "p_payload": payload,
+            "p_payload_hash": payload_hash,
+        }).execute()
+        data = getattr(response, "data", None)
+        if isinstance(data, list): data = data[0] if data else None
+        if not isinstance(data, dict) or data.get("ok") is not True:
+            return ImportExecutionResult(False, "RPC_ERROR", "No fue posible completar la importación.")
+        return ImportExecutionResult(True, "OK", "Importación completada correctamente.", int(data.get("mesas_creadas", 0)), int(data.get("invitaciones_creadas", 0)), int(data.get("invitados_creados", 0)))
+    except Exception as ex:
+        code = _rpc_error_code(ex)
+        print("[EXCEL_IMPORT][ERROR]", f"code={code}", f"cuenta={preview.account_id}", f"evento={preview.event_id}", f"hash={payload_hash}", f"mesas={len(preview.tables)}", f"invitaciones={len(preview.invitations)}", f"invitados={len(preview.rows)}", type(ex).__name__)
+        return ImportExecutionResult(False, code, _RPC_MESSAGES.get(code, "No fue posible completar la importación." if code != "NETWORK_ERROR" else "No fue posible conectar con el servicio de importación."))
 
 
 def validar_encabezados(values: tuple[Any, ...]) -> tuple[dict[str, int], list[ImportValidationError]]:

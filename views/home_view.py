@@ -15,7 +15,7 @@ from components.app_shell import app_shell
 from components.bottom_navigation import bottom_navigation
 from services.auth_service import sign_out_local_session
 from services.authorization_service import puede_administrar_lugares, puede_ver_administracion_eventos, puede_ver_importacion_excel
-from services.excel_import_service import consultar_evento_tiene_datos, generar_archivo_errores, leer_archivo_excel, validar_contexto_importacion
+from services.excel_import_service import consultar_evento_tiene_datos, ejecutar_importacion, generar_archivo_errores, leer_archivo_excel, preview_coincide_contexto, validar_contexto_importacion, vincular_preview_contexto
 from services.excel_template_service import TEMPLATE_FILENAME, generar_plantilla_excel
 from services.dashboard_service import DashboardRefreshController, IndicadoresDashboard, obtener_indicadores_dashboard
 from services.evento_context_service import (
@@ -187,6 +187,8 @@ def build_home_view(
         "excel_import_size": 0,
         "excel_import_preview": None,
         "excel_import_has_existing_data": None,
+        "excel_import_importing": False,
+        "excel_import_result": None,
     }
 
     def build_content() -> ft.Control:
@@ -197,6 +199,8 @@ def build_home_view(
                 contexto_usuario, state["excel_import_estado"], state["excel_import_mensaje"],
                 state["excel_import_filename"], state["excel_import_size"], state["excel_import_preview"],
                 descargar_plantilla_excel, seleccionar_archivo_excel, descargar_errores_excel,
+                confirmar_importacion_excel, state["excel_import_importing"], state["excel_import_result"],
+                bool(state["excel_import_preview"] and preview_coincide_contexto(state["excel_import_preview"], contexto_usuario) and state["excel_import_has_existing_data"] is False),
             )
         if state["selected"] == "event_selection":
             return event_selection_view(
@@ -594,7 +598,10 @@ def build_home_view(
             state["excel_import_mensaje"] = "Validando el archivo completo..."
             render()
             preview = await asyncio.to_thread(leer_archivo_excel, selected.name, content)
+            if preview.is_valid:
+                preview = vincular_preview_contexto(preview, contexto_usuario)
             state["excel_import_preview"] = preview
+            state["excel_import_result"] = None
             blocked = state.get("excel_import_has_existing_data") is True
             state["excel_import_estado"] = "valid" if preview.is_valid and not blocked else "error"
             state["excel_import_mensaje"] = (
@@ -611,6 +618,52 @@ def build_home_view(
         async def worker() -> None:
             await _guardar_descarga("EventPlus_Errores_Importacion.csv", generar_archivo_errores(preview), "csv")
         page.run_task(worker)
+
+    def confirmar_importacion_excel() -> None:
+        if state["excel_import_importing"]:
+            return
+        preview = state.get("excel_import_preview")
+        if not preview or not preview_coincide_contexto(preview, contexto_usuario) or state.get("excel_import_has_existing_data") is not False:
+            state["excel_import_estado"] = "error"
+            state["excel_import_mensaje"] = "El evento cambió después de validar el archivo. Vuelva a seleccionar y validar el archivo."
+            render()
+            return
+
+        async def ejecutar_confirmado() -> None:
+            state["excel_import_mensaje"] = "Importando en una sola transacción..."
+            render()
+            try:
+                result = await asyncio.to_thread(ejecutar_importacion, supabase, contexto_usuario, preview)
+                state["excel_import_result"] = result
+                state["excel_import_mensaje"] = result.message
+                if result.ok:
+                    state["excel_import_estado"] = "success"
+                    state["excel_import_filename"] = ""
+                    state["excel_import_size"] = 0
+                    state["excel_import_preview"] = None
+                    state["excel_import_has_existing_data"] = True
+                    reset_invitados()
+                    reset_llegadas()
+                    invalidar_dashboard()
+                else:
+                    state["excel_import_estado"] = "error"
+            finally:
+                state["excel_import_importing"] = False
+                render()
+
+        def iniciar_importacion() -> None:
+            if state["excel_import_importing"]:
+                return
+            state["excel_import_importing"] = True
+            render()
+            page.run_task(ejecutar_confirmado)
+
+        mostrar_dialogo_confirmacion(
+            "Confirmar importación",
+            "La importación se realizará en una sola transacción. Si ocurre un error no se conservará ningún registro parcial.",
+            "Importar",
+            iniciar_importacion,
+        )
 
     def handle_route_change(e: ft.RouteChangeEvent) -> None:
         section, identifier, action = parse_app_route(getattr(e, "route", None) or page.route)
@@ -1921,6 +1974,7 @@ def build_home_view(
                 "invitados", "invitados_mensaje", "arrivals_estado", "arrivals_mensaje",
                 "excel_import_estado", "excel_import_mensaje", "excel_import_filename",
                 "excel_import_size", "excel_import_preview", "excel_import_has_existing_data",
+                "excel_import_importing", "excel_import_result",
             )
         }
         applied = False
@@ -1977,6 +2031,8 @@ def build_home_view(
             state["excel_import_size"] = 0
             state["excel_import_preview"] = None
             state["excel_import_has_existing_data"] = None
+            state["excel_import_importing"] = False
+            state["excel_import_result"] = None
             state["eventos_estado"] = "ready"
             state["eventos_mensaje"] = "Evento seleccionado correctamente."
             state["selected"] = "dashboard"

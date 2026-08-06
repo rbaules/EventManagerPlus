@@ -3,9 +3,9 @@
 ## Alcance
 
 El módulo existe solo en FULL para Master y Administrador, con usuario, cuenta
-y evento activos, acceso al evento, estado `Activo` y fase `Pre_evento`. En 7B
-no se escriben datos. El botón de importación permanece deshabilitado hasta la
-RPC transaccional de 7C.
+y evento activos, acceso al evento, estado `Activo` y fase `Pre_evento`. 7C
+prepara una única RPC transaccional; el entorno no podrá importar hasta aplicar
+manualmente la migración documentada en `EXCEL_IMPORT_RPC.md`.
 
 ## Dependencia y plantilla
 

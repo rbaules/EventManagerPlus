@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 
@@ -81,7 +82,23 @@ class ImportPreview:
     errors: tuple[ImportValidationError, ...] = ()
     warnings: tuple[ImportValidationWarning, ...] = ()
     summary: ImportSummary = field(default_factory=ImportSummary)
+    account_id: int | None = None
+    event_id: int | None = None
+    event_phase: str | None = None
+    event_status: str | None = None
+    payload_hash: str | None = None
+    validated_at: datetime | None = None
 
     @property
     def is_valid(self) -> bool:
         return not self.errors and bool(self.rows)
+
+
+@dataclass(frozen=True)
+class ImportExecutionResult:
+    ok: bool
+    code: str
+    message: str
+    tables_created: int = 0
+    invitations_created: int = 0
+    guests_created: int = 0

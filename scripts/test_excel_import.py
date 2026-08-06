@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
 from openpyxl import Workbook, load_workbook
 
 from services.authorization_service import capacidades_rol
-from services.excel_import_service import generar_archivo_errores, leer_archivo_excel, validar_contexto_importacion
+from services.excel_import_service import calcular_hash_payload, construir_payload_importacion, ejecutar_importacion, generar_archivo_errores, leer_archivo_excel, preview_coincide_contexto, validar_contexto_importacion, vincular_preview_contexto
 from services.excel_template_service import CANONICAL_HEADERS, IMPORT_SHEET, generar_plantilla_excel
 from views.excel_import_view import excel_import_view
 
@@ -101,7 +101,7 @@ def test_context_security_and_ui() -> None:
     assert capacidades_rol("Administrador").puede_descargar_plantilla_importacion
     assert not capacidades_rol("Operador").puede_ver_importacion_excel
     assert not capacidades_rol("Consulta").puede_validar_archivo_importacion
-    assert not capacidades_rol("Master").puede_ejecutar_importacion
+    assert capacidades_rol("Master").puede_ejecutar_importacion
     assert validar_contexto_importacion(context("Master"))[0]
     assert validar_contexto_importacion(context("Administrador"))[0]
     for role in ("Operador", "Consulta"): assert not validar_contexto_importacion(context(role))[0]
@@ -116,8 +116,58 @@ def test_context_security_and_ui() -> None:
     assert leer_archivo_excel("../escape.xlsx", workbook_bytes([row()])).errors[0].code == "extension_invalida"
 
 
+class RpcResponse:
+    def __init__(self, data): self.data = data
+
+
+class RpcCall:
+    def __init__(self, owner): self.owner = owner
+    def execute(self):
+        if self.owner.error: raise self.owner.error
+        return RpcResponse({"ok": True, "mesas_creadas": 1, "invitaciones_creadas": 1, "invitados_creados": 1})
+
+
+class FakeRpc:
+    def __init__(self, error=None): self.calls = []; self.error = error
+    def rpc(self, name, params): self.calls.append((name, params)); return RpcCall(self)
+
+
+def test_transaction_contract() -> None:
+    ctx = context("Administrador")
+    preview = vincular_preview_contexto(leer_archivo_excel("valid.xlsx", workbook_bytes([row()])), ctx)
+    assert preview_coincide_contexto(preview, ctx)
+    payload = construir_payload_importacion(preview)
+    assert payload["version"] == 1 and payload["mesas"][0]["codigo_externo"] == "01"
+    guest = payload["invitaciones"][0]["invitados"][0]
+    assert guest["orden"] == 1 and "ivt_invitado_id" not in guest and "cuenta_id" not in payload
+    assert len(calcular_hash_payload(payload)) == 64
+    fake = FakeRpc()
+    result = ejecutar_importacion(fake, ctx, preview)
+    assert result.ok and result.guests_created == 1 and len(fake.calls) == 1
+    assert fake.calls[0][0] == "evp_importar_evento_desde_json"
+    changed = context("Administrador"); changed["evento_actual"]["evento_id"] = 99
+    assert ejecutar_importacion(FakeRpc(), changed, preview).code == "CONTEXT_CHANGED"
+    assert ejecutar_importacion(FakeRpc(), context("Operador"), preview).code == "IMPORT_FORBIDDEN"
+    class ApiError(Exception):
+        code = "P0001"; message = "EVENT_NOT_EMPTY"; details = ""
+    assert ejecutar_importacion(FakeRpc(ApiError()), ctx, preview).message == "Este evento ya contiene información y no admite importación inicial."
+    migration = (ROOT / "supabase" / "migrations" / "202608040001_excel_import_rpc.sql").read_text(encoding="utf-8")
+    assert "SECURITY DEFINER" in migration and "auth.uid()" in migration
+    assert "pg_try_advisory_xact_lock" in migration and "FOR UPDATE" in migration
+    assert "REVOKE ALL" in migration and "GRANT EXECUTE" in migration
+    assert "SET search_path = pg_catalog\n" in migration
+    assert "pg_catalog, public" not in migration
+    assert "NOT coalesce(v_usuario.usr_es_usuario_master, false)" in migration
+    assert "v_normalized IS NULL OR v_normalized = ''" in migration
+    assert "IMPORT_INTERNAL_ERROR" in migration
+    assert "v_constraint_name = 'ux_evp_ivt_nombre_evento_activo'" in migration
+    service_source = (ROOT / "services" / "excel_import_service.py").read_text(encoding="utf-8")
+    assert ".rpc(RPC_IMPORT_NAME" in service_source
+    assert ".insert(" not in service_source and ".update(" not in service_source and ".delete(" not in service_source
+
+
 def main() -> None:
-    test_template(); test_files_and_normalization(); test_rules(); test_context_security_and_ui()
+    test_template(); test_files_and_normalization(); test_rules(); test_context_security_and_ui(); test_transaction_contract()
     print("OK - Excel import: dependency, template, files, normalization, groups, roles, UI and security.")
 
 

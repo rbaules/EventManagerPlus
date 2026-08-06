@@ -5,7 +5,7 @@ from typing import Any
 
 import flet as ft
 
-from models.excel_import_models import ImportPreview
+from models.excel_import_models import ImportExecutionResult, ImportPreview
 from services.excel_import_service import PREVIEW_ROW_LIMIT
 
 
@@ -19,6 +19,10 @@ def excel_import_view(
     on_download_template: Callable[[], Any],
     on_select_file: Callable[[], Any],
     on_download_errors: Callable[[], Any],
+    on_import: Callable[[], Any] | None = None,
+    importing: bool = False,
+    import_result: ImportExecutionResult | None = None,
+    can_import: bool = False,
 ) -> ft.Control:
     cuenta, evento = contexto.get("cuenta_actual") or {}, contexto.get("evento_actual") or {}
     summary = preview.summary if preview else None
@@ -60,7 +64,7 @@ def excel_import_view(
             ft.Button("Seleccionar archivo", icon=ft.Icons.UPLOAD_FILE, on_click=lambda e: on_select_file()),
         ], wrap=True),
         ft.Text(f"Archivo: {filename} ({file_size:,} bytes)" if filename else "Ningún archivo seleccionado"),
-        ft.ProgressBar(visible=estado == "loading"),
+        ft.ProgressBar(visible=estado == "loading" or importing),
         ft.Text(mensaje, color=ft.Colors.ERROR if estado == "error" else ft.Colors.ON_SURFACE_VARIANT),
         ft.ResponsiveRow(cards, spacing=10, run_spacing=10) if cards else ft.Container(),
         table,
@@ -68,7 +72,13 @@ def excel_import_view(
         ft.Row([
             ft.Button("Descargar errores", icon=ft.Icons.DOWNLOAD, disabled=not bool(preview and (preview.errors or preview.warnings)), on_click=lambda e: on_download_errors()),
             ft.Button("Seleccionar otro archivo", disabled=not bool(filename), on_click=lambda e: on_select_file()),
-            ft.Button("Continuar a importación", disabled=True, tooltip="La importación transaccional se habilitará en la siguiente etapa."),
+            ft.Button("Importar", icon=ft.Icons.CLOUD_UPLOAD, disabled=not can_import or importing, on_click=lambda e: on_import() if on_import else None),
         ], wrap=True),
         ft.Text("Archivo válido y listo para importación." if ready else "", color=ft.Colors.GREEN),
+        ft.Text("La importación se realizará en una sola transacción." if can_import else "", weight=ft.FontWeight.BOLD),
+        ft.Text(
+            f"Mesas: {import_result.tables_created} · Invitaciones: {import_result.invitations_created} · Invitados: {import_result.guests_created}"
+            if import_result and import_result.ok else "",
+            color=ft.Colors.GREEN,
+        ),
     ], scroll=ft.ScrollMode.AUTO, expand=True, spacing=14)

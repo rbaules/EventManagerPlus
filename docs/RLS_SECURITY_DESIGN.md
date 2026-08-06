@@ -244,3 +244,11 @@ desconocidos. Los grants se restauran desde el inventario previo.
 8. Endurecer vistas como `security_invoker` o no exponerlas.
 9. Diseñar e implementar RPC antes de habilitar escrituras.
 10. Dividir la migración integral por etapas y probarla en staging.
+# Importación Excel transaccional (7C)
+
+La única ruta de escritura del importador es EXECUTE sobre
+`public.evp_importar_evento_desde_json(integer,integer,jsonb,text)`. Es
+`SECURITY DEFINER`, deriva identidad con `auth.uid()`, fija `search_path`, valida
+tenant/rol/evento y mantiene `anon`/`PUBLIC` revocados. No requiere ni justifica
+conceder INSERT directo. La sentencia es atómica y usa locks por evento. Esta
+preparación no activa RLS; debe coordinarse con la fase RLS futura.
