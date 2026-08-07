@@ -260,3 +260,10 @@ protecciones del último Master, las RPC específicas y la invalidación de
 capacidades. Es diseño: no añade políticas, grants ni funciones. La existencia
 del trigger Auth que invoca `evp_fn_vincular_usuario_auth` debe verificarse en
 metadatos remotos antes de implementar altas.
+
+La Tarea 8B añadió únicamente consultas SELECT desde
+`services/usuario_admin_service.py`. El servicio vuelve a derivar las cuentas
+administrativas activas del actor y recorta relaciones/detalle al alcance
+visible; no usa `service_role`. Esto no sustituye RLS: antes de declarar la
+integración cerrada deben probarse las políticas SELECT reales con Master,
+Administrador, Operador, Consulta y dos tenants. No se aplicó SQL remoto.

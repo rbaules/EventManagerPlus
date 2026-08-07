@@ -595,3 +595,14 @@ periódicamente y expulsa mediante logout al usuario inactivado. Master puede
 administrar entidades inactivas; Admin solo puede ver las de sus cuentas sin
 usarlas; Operador/Consulta no acceden a ellas. Auth se gestiona inicialmente de
 forma manual controlada.
+
+# Estado Tarea 8B (2026-08-05)
+
+El módulo `Administración > Usuarios` está implementado localmente en FULL y en
+modo estrictamente solo lectura. Incluye `/app/admin/usuarios`, detalle por UUID,
+búsqueda, filtros, paginación, tabla de escritorio, tarjetas móviles, acceso
+efectivo y advertencias. Master consulta globalmente; Administrador se limita a
+usuarios y relaciones de sus cuentas administrativas activas. Operador,
+Consulta y CHECKIN no acceden. La prueba automatizada cubre 49 comprobaciones.
+Quedan pendientes la prueba manual y el RLS SELECT remoto; no existen altas,
+ediciones ni otras escrituras de usuarios.

@@ -12,6 +12,7 @@ ROUTES = {
     "locations": "/app/lugares",
     "preferences": "/app/preferencias",
     "excel_import": "/app/importar-invitados",
+    "users_admin": "/app/admin/usuarios",
 }
 
 

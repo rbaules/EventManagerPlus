@@ -1,6 +1,6 @@
 # Administración de usuarios — auditoría y diseño (Tarea 8A)
 
-Estado: diseño aprobado técnicamente, no implementado. No existen vista productiva, servicios administrativos, RPC ni flujo seguro de alta Auth. Las altas y relaciones dependen hoy de operación manual. Este documento usa como autoridad `esquema.sql` y el código productivo actual; los documentos históricos solo aportan contexto.
+Estado: diseño aprobado. La Tarea 8B implementa localmente listado y detalle estrictamente de solo lectura; queda pendiente la prueba manual y validar el RLS SELECT real. No existen servicios administrativos de escritura, RPC ni flujo seguro de alta Auth. Las altas y relaciones dependen hoy de operación manual. Este documento usa como autoridad `esquema.sql` y el código productivo actual; los documentos históricos solo aportan contexto.
 
 ## 1. Esquema auditado
 
@@ -156,7 +156,7 @@ Master: alcance global, alta, roles, eventos, segundo Master y protección últi
 
 | Tarea | Objetivo/archivos | Permisos y pruebas | SQL |
 |---|---|---|---|
-| 8B | modelos, consultas paginadas y vista solo lectura; nuevos models/service/view + shell | Master global, Admin limitado; filtros, móvil, aislamiento | no; depende de SELECT/RLS vigente |
+| 8B | implementada localmente: modelos, consultas paginadas y vista solo lectura | Master global, Admin limitado; 49 comprobaciones; prueba manual/RLS real pendientes | no; usa únicamente SELECT vigente |
 | 8C | preregistro/edición básica | política aprobada; email/concurrencia/rollback | sí: RPC de perfil antes de UI de escritura |
 | 8D | relaciones usuario-cuenta | inicialmente Master; reactivar/rol/default | sí: RPC cuenta |
 | 8E | relaciones usuario-evento | Master/Admin limitado; solo Operador/Consulta | sí: RPC evento |

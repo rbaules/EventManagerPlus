@@ -1563,6 +1563,15 @@ RLS continúa diseñada pero no aplicada. Ningún estado remoto de políticas,
 grants, constraints, publicaciones o funciones debe darse por implementado
 hasta capturar y validar los metadatos descritos en
 `docs/RLS_METADATA_VALIDATION.md`.
+
+## Tarea 8B — administración de usuarios en solo lectura (2026-08-05)
+
+Se integró en FULL el listado y detalle de usuarios bajo
+`/app/admin/usuarios`. El servicio deriva nuevamente el alcance Master/Admin,
+pagina perfiles y oculta relaciones ajenas; Operador, Consulta y CHECKIN quedan
+fuera. La vista usa tabla en escritorio y tarjetas en móvil. No contiene
+mutaciones ni `service_role`. Las 49 comprobaciones locales pasan; la prueba
+manual y la validación con RLS SELECT remoto permanecen pendientes.
 # Diagnóstico web de importación Excel (Tarea 7B)
 
 Flet 0.85.3 ofrece `FilePicker.pick_files(with_data=True)` y
@@ -1574,3 +1583,11 @@ El montaje ASGI y el mecanismo de sesión permanecen sin cambios.
 La ejecución se realiza con el cliente Supabase propio de la Page y una sola
 llamada `rpc()`, sin service_role, endpoint ASGI adicional ni cambios de sesión.
 El payload validado queda ligado a cuenta/evento/fase/estado y SHA-256.
+
+# Diagnóstico 8A
+
+La sesión recarga contexto al autenticar, pero su monitor periódico y la
+reconexión usan el contexto cacheado (`load_context=False`). Por ello una
+reducción externa de rol/estado no garantiza efecto inmediato en la UI; las RPC
+futuras deben revalidar siempre y la fase de sesiones debe incorporar versión
+de autorización, recarga y revocación controlada.

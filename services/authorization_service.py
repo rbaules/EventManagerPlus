@@ -44,6 +44,10 @@ class Capacidades:
     puede_descargar_plantilla_importacion: bool = False
     puede_validar_archivo_importacion: bool = False
     puede_ejecutar_importacion: bool = False
+    usuarios_admin_ver: bool = False
+    usuarios_admin_ver_todos: bool = False
+    usuarios_admin_ver_cuenta: bool = False
+    usuarios_admin_ver_detalle: bool = False
 
 
 _SIN_CAPACIDADES = Capacidades(
@@ -80,6 +84,10 @@ for _rol_importacion in (ROL_MASTER, ROL_ADMINISTRADOR):
         puede_descargar_plantilla_importacion=True,
         puede_validar_archivo_importacion=True,
         puede_ejecutar_importacion=True,
+        usuarios_admin_ver=True,
+        usuarios_admin_ver_todos=_rol_importacion == ROL_MASTER,
+        usuarios_admin_ver_cuenta=_rol_importacion == ROL_ADMINISTRADOR,
+        usuarios_admin_ver_detalle=True,
     )
 
 
@@ -246,6 +254,32 @@ def puede_validar_archivo_importacion(contexto: dict[str, Any] | None) -> bool:
 
 def puede_ejecutar_importacion(contexto: dict[str, Any] | None) -> bool:
     return capacidades_contexto(contexto).puede_ejecutar_importacion
+
+
+def puede_ver_administracion_usuarios(contexto: dict[str, Any] | None) -> bool:
+    if not contexto or not contexto.get("usr_usuario_id"):
+        return False
+    if contexto.get("usr_es_usuario_master"):
+        return True
+    if contexto.get("rol_global_calculado") == ROL_ADMINISTRADOR:
+        return True
+    return any(
+        cuenta.get("rol") == ROL_ADMINISTRADOR and cuenta.get("estado", "Activo") == "Activo"
+        for cuenta in contexto.get("cuentas_permitidas", []) or []
+        if isinstance(cuenta, dict)
+    )
+
+
+def puede_ver_todos_usuarios(contexto: dict[str, Any] | None) -> bool:
+    return bool(contexto and contexto.get("usr_usuario_id") and contexto.get("usr_es_usuario_master"))
+
+
+def puede_ver_usuarios_cuenta(contexto: dict[str, Any] | None) -> bool:
+    return puede_ver_administracion_usuarios(contexto) and not puede_ver_todos_usuarios(contexto)
+
+
+def puede_ver_detalle_usuario(contexto: dict[str, Any] | None) -> bool:
+    return puede_ver_administracion_usuarios(contexto)
 
 
 def resumen_capacidades(contexto: dict[str, Any] | None) -> dict[str, bool]:

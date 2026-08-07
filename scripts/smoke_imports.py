@@ -22,6 +22,7 @@ MODULES = [
     "services.server_session_service",
     "services.session_service",
     "services.usuario_service",
+    "services.usuario_admin_service",
     "components.app_shell",
     "components.bottom_navigation",
     "components.event_header",
@@ -33,7 +34,9 @@ MODULES = [
     "views.login_view",
     "views.lugares_view",
     "views.excel_import_view",
+    "views.user_admin_view",
     "models.excel_import_models",
+    "models.usuario_admin_models",
 ]
 
 

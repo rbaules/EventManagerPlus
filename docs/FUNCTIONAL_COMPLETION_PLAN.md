@@ -79,7 +79,7 @@ sesiones al reiniciar y no sirve aún para escalado horizontal.
 | 15 | Países | Solo existe en base de datos | Catálogo `evp_pai_pais`; sin servicio/UI. RLS SELECT autenticado está diseñada. |
 | 16 | Cuentas | Solo lectura en contexto / carga manual | Se leen cuentas autorizadas. No hay alta, edición o desactivación. Crear cuenta debe ser decisión Master. |
 | 17 | Eventos | Solo lectura y selección / carga manual | `evento_service` consulta eventos; no crea, edita, cambia fase/estado ni cierra eventos. |
-| 18 | Usuarios | Solo lectura de identidad / carga manual | Se consulta al usuario autenticado por UUID/email. Preregistro, edición y estado se manejan fuera de la app. |
+| 18 | Usuarios | Administración solo lectura implementada localmente / carga manual | FULL lista, filtra, pagina y muestra detalle/acceso efectivo para Master y Admin aislado. Prueba manual y RLS SELECT real pendientes. Preregistro, edición y estado siguen fuera de la app. |
 | 19 | Usuario-cuenta | Solo lectura / carga manual | Construye cuentas y roles activos. No administra relaciones o roles. |
 | 20 | Usuario-evento | Solo lectura / carga manual | Determina eventos de Operador/Consulta. No administra asignaciones. |
 | 21 | Roles y capacidades | Implementado y probado | Modelo central para Master, Administrador, Operador y Consulta. Consulta es estrictamente de lectura. La administración de roles no existe. |
@@ -325,7 +325,7 @@ aceptación sin activar RLS globalmente.
 | 4 | Administrar mesas | Evento Pre-evento | CRUD y creación masiva atómica; nombres visibles en búsqueda; aislamiento. |
 | 5 | Administrar invitaciones | Evento Pre-evento | CRUD, códigos/cupos; lectura por roles; ninguna mutación de Consulta. |
 | 6 | Importar invitados | Invitaciones + mesas + RPC invitados | Preview, validación, idempotencia, lote transaccional y reporte descargable. |
-| 7 | Administrar usuarios y asignaciones | Cuentas/eventos + gobierno de roles | Preregistro y relaciones sin SQL; no autoelevación; Consulta solo lectura. |
+| 7 | Administrar usuarios y asignaciones | Lectura 8B implementada; escritura depende de RPC | Listado/detalle aislado listo para prueba manual; preregistro y relaciones siguen pendientes, sin autoelevación. |
 | 8 | Preferencias y Dashboard real | Lecturas estables | Defaults autorizados y métricas de vistas validadas con RLS SELECT. |
 | 9 | Realtime, exportación y auditoría | RLS SELECT + RPC | Dos sesiones reciben cambios sin fuga; exportaciones autorizadas; trazabilidad. |
 
@@ -387,3 +387,13 @@ El módulo de usuarios continúa no implementado. Su auditoría, matriz propuest
 RPC futuras, seguridad, sesiones y secuencia 8B–8G están en
 `docs/USER_ADMIN_MODULE_DESIGN.md`. Ninguna UI de escritura debe preceder a su
 RPC; 8B será exclusivamente lectura y también requiere validar el RLS remoto.
+
+# Actualización Tarea 8B (2026-08-05)
+
+Administración > Usuarios está implementada localmente en FULL de forma
+estrictamente solo lectura: listado paginado, búsqueda, filtros, tabla/tarjetas,
+detalle, acceso efectivo y accesos heredados. Master tiene alcance global y
+Administrador se limita en servicio a sus relaciones administrativas activas.
+Operador, Consulta y CHECKIN quedan excluidos. Pasan 49 comprobaciones locales;
+quedan pendientes la prueba manual y la validación del RLS SELECT remoto. No se
+implementó ninguna función de escritura.

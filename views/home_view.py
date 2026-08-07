@@ -14,7 +14,7 @@ from config import is_checkin_mode
 from components.app_shell import app_shell
 from components.bottom_navigation import bottom_navigation
 from services.auth_service import sign_out_local_session
-from services.authorization_service import puede_administrar_lugares, puede_ver_administracion_eventos, puede_ver_importacion_excel
+from services.authorization_service import puede_administrar_lugares, puede_ver_administracion_eventos, puede_ver_administracion_usuarios, puede_ver_importacion_excel
 from services.excel_import_service import consultar_evento_tiene_datos, ejecutar_importacion, generar_archivo_errores, leer_archivo_excel, preview_coincide_contexto, validar_contexto_importacion, vincular_preview_contexto
 from services.excel_template_service import TEMPLATE_FILENAME, generar_plantilla_excel
 from services.dashboard_service import DashboardRefreshController, IndicadoresDashboard, obtener_indicadores_dashboard
@@ -73,6 +73,7 @@ from services.lugar_service import (
     listar_salones,
     refrescar_catalogo_lugares,
 )
+from services.usuario_admin_service import listar_usuarios, obtener_detalle_usuario
 from views.arrivals_view import arrivals_view
 from views.dashboard_view import dashboard_view
 from views.invitados_view import invitado_detail_view, invitado_form_view, invitados_view
@@ -80,6 +81,7 @@ from views.lugares_view import lugar_form_view, lugares_view
 from views.eventos_admin_view import evento_detail_view, evento_form_view, eventos_admin_view
 from views.event_selection_view import event_selection_view
 from views.excel_import_view import excel_import_view
+from views.user_admin_view import user_admin_detail_view, user_admin_view
 
 
 def _placeholder(title: str, message: str) -> ft.Control:
@@ -189,9 +191,38 @@ def build_home_view(
         "excel_import_has_existing_data": None,
         "excel_import_importing": False,
         "excel_import_result": None,
+        "usuarios_admin_estado": "idle",
+        "usuarios_admin_loading": False,
+        "usuarios_admin_resultado": None,
+        "usuarios_admin_filtros": {"busqueda": "", "estado": "Todos", "tipo": "Todos", "rol": "Todos", "cuenta_id": None},
+        "usuarios_admin_pagina": 1,
+        "usuarios_admin_detalle": None,
+        "usuarios_admin_detalle_estado": "idle",
+        "usuarios_admin_detalle_mensaje": "",
+        "usuarios_admin_detalle_loading": False,
     }
 
     def build_content() -> ft.Control:
+        if state["selected"] == "users_admin_detail":
+            if checkin_mode or not puede_ver_administracion_usuarios(contexto_usuario):
+                return user_admin_detail_view(None, estado="denied", mensaje="No tiene permisos para consultar la administración de usuarios.", loading=False, on_back=lambda: navigate("dashboard"), on_retry=lambda: None)
+            return user_admin_detail_view(
+                state["usuarios_admin_detalle"], estado=state["usuarios_admin_detalle_estado"],
+                mensaje=state["usuarios_admin_detalle_mensaje"], loading=state["usuarios_admin_detalle_loading"],
+                on_back=lambda: navigate("users_admin"), on_retry=lambda: cargar_detalle_usuario(state.get("route_identifier")),
+            )
+        if state["selected"] == "users_admin":
+            if checkin_mode or not puede_ver_administracion_usuarios(contexto_usuario):
+                return _placeholder("Acceso denegado", "No tiene permisos para consultar la administración de usuarios.")
+            resultado = state.get("usuarios_admin_resultado")
+            if resultado is None:
+                from models.usuario_admin_models import ResultadoPaginadoUsuarios
+                resultado = ResultadoPaginadoUsuarios(estado="loading", mensaje="Cargando usuarios...")
+            return user_admin_view(
+                resultado, state["usuarios_admin_filtros"], is_mobile=float(page.width or 1200) < 760,
+                loading=state["usuarios_admin_loading"], on_apply_filters=aplicar_filtros_usuarios,
+                on_refresh=cargar_usuarios_admin, on_page=cambiar_pagina_usuarios, on_detail=abrir_detalle_usuario,
+            )
         if state["selected"] == "excel_import":
             if checkin_mode or not puede_ver_importacion_excel(contexto_usuario):
                 return _placeholder("Acceso denegado", "Tu rol o modo de aplicación no permite importar invitados.")
@@ -406,6 +437,7 @@ def build_home_view(
             on_manage_events=lambda: select_tab("events_admin"),
             on_select_event=lambda: select_tab("event_selection"),
             on_excel_import=lambda: select_tab("excel_import"),
+            on_manage_users=lambda: select_tab("users_admin"),
         )
 
     def configure_navigation_bar() -> None:
@@ -538,7 +570,7 @@ def build_home_view(
 
     def navigate(section: str, identifier: Any = None, action: str | None = None) -> None:
         current = state.get("selected")
-        if current not in {"guest_detail", "guest_form", "event_detail", "event_form"}:
+        if current not in {"guest_detail", "guest_form", "event_detail", "event_form", "users_admin_detail"}:
             state["previous_section"] = current or "dashboard"
         state["route_identifier"] = None if identifier is None else str(identifier)
         state["route_action"] = action
@@ -553,6 +585,8 @@ def build_home_view(
             route = route_for("events_admin", identifier or "nuevo", action)
         elif section == "location_form":
             route = route_for("locations", "form", action or str(identifier or ""))
+        elif section == "users_admin_detail":
+            route = route_for("users_admin", identifier)
         else:
             route = ROUTES.get(section, ROUTES["dashboard"])
         if str(getattr(page, "route", "") or "") != route:
@@ -681,14 +715,85 @@ def build_home_view(
             state["selected"] = "event_form" if identifier == "nuevo" or action == "editar" else "event_detail"
         elif section == "locations" and identifier == "form":
             state["selected"] = "location_form"
+        elif section == "users_admin" and identifier:
+            if checkin_mode or not puede_ver_administracion_usuarios(contexto_usuario):
+                state["selected"] = "users_admin_detail"
+                state["usuarios_admin_detalle"] = None
+                state["usuarios_admin_detalle_estado"] = "denied"
+                state["usuarios_admin_detalle_mensaje"] = "No tiene acceso al usuario solicitado."
+            else:
+                state["selected"] = "users_admin_detail"
+                cargar_detalle_usuario(identifier)
+                return
         else:
             state["selected"] = section
+        if section == "users_admin" and not identifier and state["usuarios_admin_estado"] == "idle":
+            if not checkin_mode and puede_ver_administracion_usuarios(contexto_usuario):
+                cargar_usuarios_admin()
+                return
         if section == "dashboard" and contexto_usuario.get("evento_actual") and state["dashboard_event_key"] != evento_activo_key():
             cargar_dashboard()
             return
         render()
 
     page.on_route_change = handle_route_change
+
+    def cargar_usuarios_admin() -> None:
+        if checkin_mode or not puede_ver_administracion_usuarios(contexto_usuario) or state["usuarios_admin_loading"]:
+            state["usuarios_admin_estado"] = "denied"
+            render()
+            return
+        state["usuarios_admin_loading"] = True
+        state["usuarios_admin_estado"] = "loading"
+        render()
+
+        def worker() -> None:
+            filtros = dict(state["usuarios_admin_filtros"])
+            print("[USUARIOS_ADMIN][INFO] listado", f"actor={contexto_usuario.get('usr_usuario_id')}", f"pagina={state['usuarios_admin_pagina']}", f"filtros={filtros}")
+            result = listar_usuarios(
+                supabase, contexto_usuario, pagina=state["usuarios_admin_pagina"],
+                tamano_pagina=20, **filtros,
+            )
+            state["usuarios_admin_resultado"] = result
+            state["usuarios_admin_estado"] = result.estado
+            state["usuarios_admin_loading"] = False
+            render()
+
+        page.run_thread(worker)
+
+    def aplicar_filtros_usuarios(filtros: dict[str, Any]) -> None:
+        state["usuarios_admin_filtros"] = dict(filtros)
+        state["usuarios_admin_pagina"] = 1
+        cargar_usuarios_admin()
+
+    def cambiar_pagina_usuarios(pagina: int) -> None:
+        state["usuarios_admin_pagina"] = max(1, int(pagina))
+        cargar_usuarios_admin()
+
+    def abrir_detalle_usuario(usuario_id: str) -> None:
+        navigate("users_admin_detail", usuario_id)
+        cargar_detalle_usuario(usuario_id)
+
+    def cargar_detalle_usuario(usuario_id: Any) -> None:
+        if checkin_mode or not puede_ver_administracion_usuarios(contexto_usuario) or state["usuarios_admin_detalle_loading"]:
+            state["usuarios_admin_detalle"] = None
+            state["usuarios_admin_detalle_estado"] = "denied"
+            state["usuarios_admin_detalle_mensaje"] = "No tiene acceso al usuario solicitado."
+            render()
+            return
+        state["usuarios_admin_detalle_loading"] = True
+        state["usuarios_admin_detalle_estado"] = "loading"
+        render()
+
+        def worker() -> None:
+            result = obtener_detalle_usuario(supabase, contexto_usuario, usuario_id)
+            state["usuarios_admin_detalle"] = result.detalle
+            state["usuarios_admin_detalle_estado"] = result.estado
+            state["usuarios_admin_detalle_mensaje"] = result.mensaje
+            state["usuarios_admin_detalle_loading"] = False
+            render()
+
+        page.run_thread(worker)
 
     def reset_invitados() -> None:
         state["invitados_estado"] = "idle"
@@ -2075,6 +2180,13 @@ def build_home_view(
             render()
 
     def select_tab(tab: str) -> None:
+        if tab == "users_admin":
+            navigate("users_admin")
+            if checkin_mode or not puede_ver_administracion_usuarios(contexto_usuario):
+                render()
+                return
+            cargar_usuarios_admin()
+            return
         if tab == "excel_import":
             navigate("excel_import")
             def verificar_vacio() -> None:
