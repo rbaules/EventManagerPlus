@@ -1,6 +1,10 @@
 # Administración de usuarios — auditoría y diseño (Tarea 8A)
 
-Estado: diseño aprobado. La Tarea 8B implementa localmente listado y detalle estrictamente de solo lectura; queda pendiente la prueba manual y validar el RLS SELECT real. No existen servicios administrativos de escritura, RPC ni flujo seguro de alta Auth. Las altas y relaciones dependen hoy de operación manual. Este documento usa como autoridad `esquema.sql` y el código productivo actual; los documentos históricos solo aportan contexto.
+> La matriz vigente de transiciones está en `USER_ROLE_TRANSITIONS.md`. La UI exige destino al retirar Master y evento al degradar Administrador a Operador/Consulta.
+
+> Estado 8C (2026-08-06): escrituras del perfil implementadas mediante cuatro RPC; la creación por Administrador incluye la relación inicial atómica aprobada. La administración general de relaciones, eventos, defaults e invitación Auth sigue pendiente. Véase `USER_ADMIN_PROFILE.md`.
+
+Estado: diseño aprobado. 8B implementó listado/detalle y 8C implementó localmente las escrituras seguras del perfil mediante RPC, incluida la relación inicial al preregistrar como Administrador. Quedan pendientes aplicar/probar SQL, validar RLS SELECT, el alta Auth y la administración general de relaciones de cuenta/evento. Este documento usa como autoridad `esquema.sql` y el código productivo actual.
 
 ## 1. Esquema auditado
 
@@ -14,6 +18,7 @@ Perfil interno. Columnas: `usr_usuario_id uuid NOT NULL DEFAULT extensions.gen_r
 - CHECK: un evento predeterminado exige cuenta; estados `Preregistrado`, `Activo`, `Inactivo`, `Suspendido`.
 - Trigger: `trg_evp_usr_touch` actualiza `usr_modificado` antes de UPDATE mediante `evp_fn_touch_usuario`.
 - No hay columnas `creado_por`/`modificado_por`; solo timestamps. El UUID interno no es el UUID Auth.
+- Auditoría 8C-FIX: `usr_creado` es `timestamptz NOT NULL DEFAULT now()`, sin FK ni trigger de identidad. Su semántica es instante de creación. No sustituye al `usr_creado_por uuid` propuesto para autoría verificable.
 
 ### `public.evp_ucu_usuario_cuenta`
 
@@ -101,7 +106,9 @@ Estados visuales compatibles: `Preregistrado` como pendiente de Auth, `Activo`, 
 | Modificar datos propios | básicos sí; no autoestado/auto-Master | sin nombre/correo global desde este módulo | no módulo | no módulo |
 | Modificar otro Master | sí salvo último, con advertencia | no | no | no |
 
-Protecciones aprobadas: sin DELETE físico; no cero Master activos; lock al contar Master; un Master no puede auto-inactivarse ni auto-retirar su flag; otro Master debe hacerlo; solo Master asigna o retira Administrador. Admin no crea/modifica Admin ni Master, no edita nombre ni correo global, no inactiva el perfil global y no cruza cuentas; solo puede inactivar relaciones de sus cuentas y eventos. El preregistro de Admin crea un usuario no Master en `Preregistrado` y lo vincula atómicamente, únicamente como Operador o Consulta, a una de sus cuentas activas.
+Protecciones aprobadas: sin DELETE físico; no cero Master activos; lock al contar Master; un Master no puede auto-inactivarse ni auto-retirar su flag; otro Master debe hacerlo; solo Master asigna o retira Administrador. Admin no crea/modifica Admin ni Master, no edita nombre ni correo global, no inactiva el perfil global y no cruza cuentas; solo puede inactivar relaciones de sus cuentas y eventos.
+
+Decisión aprobada e implementada en 8C: la opción B crea atómicamente el perfil `Preregistrado` y una relación activa, solo con rol `Operador` o `Consulta`, dentro de una cuenta Activa que `auth.uid()` administra activamente. Nunca permite al Administrador asignar rol `Administrador` ni condición Master, y el vínculo inicial mantiene al usuario visible en su listado 8B.
 
 ## 6. Integridad y casos de borde
 
@@ -168,12 +175,16 @@ Dependencia ajustada: ninguna UI de escritura debe preceder a su RPC segura. 8B 
 ## 12. Decisiones funcionales aprobadas
 
 1. Solo Master puede asignar o retirar el rol Administrador.
-2. Administrador puede preregistrar usuarios no Master únicamente como Operador o Consulta y dentro de sus cuentas activas; el preregistro y la relación deben ser atómicos.
+2. Decisión aprobada e implementada (opción B): Administrador preregistra usuarios no Master únicamente como Operador o Consulta dentro de sus cuentas activas; perfil y relación inicial son atómicos. La administración posterior de relaciones permanece en 8D.
 3. Administrador no puede editar el nombre ni el correo global del usuario.
 4. Administrador solo puede inactivar relaciones de sus cuentas y eventos, nunca el usuario global.
 5. Master no puede auto-retirarse como Master ni auto-inactivarse; la acción corresponde a otro Master y nunca puede dejar cero Master activos.
 6. Auth se gestionará inicialmente de forma manual controlada.
 7. El estado previo a la vinculación Auth es `Preregistrado`; no se crea un estado alternativo `Pendiente`.
+8. **DECISIÓN APROBADA 8C-B:** el Administrador no puede crear un perfil aislado. Debe seleccionar una cuenta Activa que administre con relación Activa y asignar exclusivamente `Operador` o `Consulta`; perfil y relación se insertan en la misma RPC/transacción. Master puede crear sin cuenta inicial; la RPC también soporta cuenta/rol opcionales válidos.
+9. `usr_creado_por` se conserva exclusivamente para auditoría. Admin puede corregir nombre/correo de Operador/Consulta con UCU Activa compartida en una cuenta Activa que administra, sin importar quién creó el perfil; Master edita globalmente.
+10. Master dispone como mínimo de las capacidades de alta del Admin: cuenta/rol inicial, cuenta default y evento default. Para Master objetivo no se crea relación redundante. Para Operador/Consulta, un evento default implica asignación activa atómica.
+11. Después de crear se permanece en el listado; no existe navegación automática al detalle.
 8. Los accesos heredados se muestran calculados como `Heredado global` o `Heredado por cuenta`, sin crear relaciones `uev` redundantes.
 9. Master administra predeterminados de terceros. Cada usuario puede cambiar los propios únicamente dentro de su acceso efectivo. Administrador no cambia predeterminados de terceros.
 10. Un usuario inactivado debe ser expulsado mediante recarga periódica de autorización y logout.
@@ -181,3 +192,6 @@ Dependencia ajustada: ninguna UI de escritura debe preceder a su RPC segura. 8B 
 12. Administrador puede ver entidades inactivas de sus cuentas, pero no utilizarlas operativamente.
 13. Operador y Consulta no acceden a cuentas ni eventos inactivos.
 14. `evp_usr_usuario.usr_email` es el correo administrativo EventPlus y Supabase Auth es la autoridad de autenticación. Si divergen, se muestran ambos con una advertencia y no se sincronizan automáticamente.
+# Consolidación vigente
+
+Para creación, edición, roles por cuenta, inactivación y defaults prevalece `USER_ACCESS_AND_PREFERENCES.md`. La autorización de edición de Administrador ya no depende de `usr_creado_por`.

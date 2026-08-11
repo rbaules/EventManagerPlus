@@ -316,7 +316,8 @@ def _seleccionar_cuenta_actual(
         for cuenta in cuentas:
             if cuenta["cuenta_id"] == default_id:
                 return cuenta
-    return cuentas[0] if cuentas else None
+    # Los defaults son preferencias explícitas: no inventar una cuenta arbitraria.
+    return None
 
 
 def _seleccionar_evento_actual(
@@ -335,7 +336,8 @@ def _seleccionar_evento_actual(
         for evento in eventos_de_cuenta:
             if evento["evento_id"] == default_id:
                 return evento
-    return eventos_de_cuenta[0] if eventos_de_cuenta else None
+    # Un default ausente/inválido debe llevar al selector, no al primer evento.
+    return None
 
 
 def cargar_contexto_usuario(supabase: Any, auth_user_id: str) -> dict[str, Any]:

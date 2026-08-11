@@ -1,5 +1,13 @@
 # EVENTPLUS_CONTEXT.md
 
+Tras aplicar 202608100002 y realizar pruebas manuales, se preparó `202608110001_user_admin_task8_final_fixes.sql`: grid de alcance configurado para Preregistrado, promoción Preregistrado→Master sin activación, edición Admin por alcance compartido sin `usr_creado_por`, e inactivación global de Activo/Preregistrado conservando defaults. Esta migración no se ejecutó en esta tarea.
+
+La finalización local de la Tarea 8 reemplaza la transición booleana de Master por promoción/retiro atómicos y amplía el cambio de rol con evento obligatorio al degradar Administrador. La migración `202608100002_user_role_transition_finalization.sql` y su rollback están preparados pero no aplicados; la tarea permanece abierta hasta migración y prueba manual.
+
+## Estado Tarea 8C (2026-08-06)
+
+Implementado en código y con migración aplicada: crear perfil EventPlus y editar nombre/correo, estado y condición Master por un Master. La opción B está aprobada e implementada: el preregistro por Administrador crea atómicamente la relación inicial Activa con rol Operador/Consulta en una cuenta Activa que administra. Siguen pendientes la administración general de relaciones, eventos, defaults e invitación/creación Auth automática.
+
 ## Diseño de importación Excel (2026-08-03)
 
 Se diseñó, sin implementar, una carga XLSX de mesas, invitaciones e invitados
@@ -606,3 +614,17 @@ usuarios y relaciones de sus cuentas administrativas activas. Operador,
 Consulta y CHECKIN no acceden. La prueba automatizada cubre 49 comprobaciones.
 Quedan pendientes la prueba manual y el RLS SELECT remoto; no existen altas,
 ediciones ni otras escrituras de usuarios.
+## Decisión aprobada Tarea 8C-B
+
+La creación por Administrador es una operación atómica: perfil no Master `Preregistrado` más relación de cuenta `Activa`, en una cuenta Activa administrada por el actor y con rol `Operador` o `Consulta`. La RPC determina al actor mediante `auth.uid()` y el usuario queda visible inmediatamente por esa relación. Master puede crear perfiles Master o no Master sin cuenta inicial; la RPC admite cuenta/rol opcionales válidos.
+
+## Corrección funcional UI 8C (2026-08-08)
+
+La causa del detalle incorrecto/denegado fue una doble carga iniciada por `page.go()` y `abrir_detalle_usuario()`, combinada con respuestas asíncronas sin invalidación por ID. La carga manual descarta respuestas obsoletas. Master puede abrir perfiles nuevos sin cuenta y dispone en el detalle de edición, estado y condición Master según las protecciones aprobadas. Los estados `not_found`, `denied` y `error` tienen mensajes distintos. La prueba manual dirigida en FULL permanece pendiente.
+
+Decisión posterior: se eliminó por completo la apertura automática del detalle después de crear; la UI permanece y refresca el listado. Como el esquema aplicado no tiene creador auditable, `202608080001_user_admin_profile_8c_fix.sql` queda pendiente de revisión/aplicación para agregar `usr_creado_por`, permitir edición segura por el Admin creador y ampliar el alta Master con cuenta/rol/defaults atómicos. No modifica RLS ni se ejecutó remotamente en esta tarea.
+
+Auditoría previa a aplicar: `usr_creado` fue confirmado como `timestamp with time zone NOT NULL DEFAULT now()`, sin FK y sin uso como identidad. Representa la fecha/hora de alta; no identifica al actor. Por eso no reemplaza ni vuelve redundante a `usr_creado_por uuid`, cuyo valor será derivado server-side mediante `auth.uid()`.
+# Regla vigente de usuarios (2026-08-10)
+
+La matriz autoritativa de creación, acceso, defaults y preferencias está en `docs/USER_ACCESS_AND_PREFERENCES.md`. Sus reglas sustituyen cualquier descripción anterior contradictoria de este archivo, en particular defaults opcionales, selección libre en el modal, autorización por `usr_creado_por`, UCU/UEV para Master o UEV para Administrador.

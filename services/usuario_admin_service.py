@@ -11,6 +11,16 @@ from models.usuario_admin_models import (
     UsuarioDetalle,
     UsuarioEventoResumen,
     UsuarioResumen,
+    ActualizarUsuarioRequest,
+    ActualizarPreferenciasRequest,
+    CambiarEstadoUsuarioRequest,
+    CambiarMasterRequest,
+    CambiarRolCuentaRequest,
+    CambiarEstadoCuentaRequest,
+    CrearUsuarioRequest,
+    PromoverMasterRequest,
+    RetirarMasterRequest,
+    ResultadoUsuarioOperacion,
 )
 from services.authorization_service import ROL_ADMINISTRADOR, puede_ver_administracion_usuarios
 from services.response_utils import extract_data, safe_get, to_dict
@@ -25,12 +35,139 @@ MENSAJE_SIN_PERMISO = "No tiene permisos para consultar la administración de us
 MENSAJE_SIN_RESULTADOS = "No se encontraron usuarios con los filtros seleccionados."
 MENSAJE_ERROR = "No fue posible cargar la información de usuarios."
 MENSAJE_DETALLE_DENEGADO = "No tiene acceso al usuario solicitado."
+MENSAJE_DETALLE_NO_ENCONTRADO = "Usuario no encontrado."
+MENSAJE_DETALLE_ERROR = "No fue posible cargar el usuario solicitado."
 
 _SELECT_USUARIO = (
     "usr_usuario_id,usr_nombre_usuario,usr_nombre_usuario_abrev,usr_email,"
     "usr_usuario_auth_uuid,usr_es_usuario_master,usr_cuenta_id_default,"
     "usr_evento_id_default,usr_telefono,usr_creado,usr_modificado,usr_estado"
+    ",usr_creado_por"
 )
+
+MENSAJES_OPERACION = {
+    "OK": "Operación completada.",
+    "USER_ADMIN_FORBIDDEN": "No tiene permisos para realizar esta acción.",
+    "USER_NOT_FOUND": "El usuario solicitado no existe o no está disponible.",
+    "USER_EMAIL_EXISTS": "Ya existe un usuario con ese correo.",
+    "INVALID_USER_NAME": "Ingrese un nombre válido de hasta 50 caracteres.",
+    "INVALID_EMAIL": "Ingrese un correo válido de hasta 254 caracteres.",
+    "ACCOUNT_REQUIRED": "Seleccione una cuenta.",
+    "ACTIVE_CONTEXT_REQUIRED": "Para crear un usuario, seleccione primero una cuenta y un evento activos.",
+    "ROLE_REQUIRED": "Seleccione el rol inicial.",
+    "INVALID_ACCOUNT": "La cuenta seleccionada no está disponible.",
+    "INVALID_ACCOUNT_ROLE": "El Administrador solo puede asignar los roles Operador o Consulta.",
+    "INVALID_EVENT": "El evento seleccionado no estÃ¡ disponible.",
+    "EVENT_REQUIRED": "Seleccione un evento inicial.",
+    "ACCOUNT_FORBIDDEN": "No tiene permisos para crear usuarios en la cuenta seleccionada.",
+    "USER_EDIT_FORBIDDEN": "No tiene permisos para editar este usuario en las cuentas que administra.",
+    "USER_EDIT_INVALID_STATUS": "Solo puede editar usuarios Activos o Preregistrados.",
+    "INVALID_PREFERENCES": "Seleccione una cuenta y un evento permitidos.",
+    "ROLE_CHANGE_FORBIDDEN": "No tiene permisos para cambiar este rol de cuenta.",
+    "ACCOUNT_RELATION_FORBIDDEN": "No tiene permisos para cambiar esta relación de cuenta.",
+    "DEFAULTS_FORBIDDEN": "No tiene permisos para asignar predeterminados.",
+    "DEFAULT_ACCOUNT_REQUIRED": "Seleccione una cuenta predeterminada.",
+    "INVALID_DEFAULT_ACCOUNT": "La cuenta predeterminada no es válida.",
+    "DEFAULT_ACCOUNT_FORBIDDEN": "El usuario no tiene acceso a la cuenta predeterminada.",
+    "INVALID_DEFAULT_EVENT": "El evento predeterminado no es válido para la cuenta seleccionada.",
+    "INVALID_STATUS": "El cambio de estado solicitado no es válido.",
+    "INVALID_MASTER_TARGET_STATUS": "Solo puede convertir en Master usuarios Activos o Preregistrados.",
+    "AUTH_REQUIRED": "Este usuario aún no tiene una identidad de autenticación vinculada.",
+    "LAST_MASTER": "La acción dejaría el sistema sin ningún Master activo.",
+    "SELF_MASTER_CHANGE_FORBIDDEN": "No puede retirar su propia condición Master.",
+    "SELF_DEACTIVATION_FORBIDDEN": "No puede inactivar su propio usuario.",
+    "USER_ADMIN_INTERNAL_ERROR": "No fue posible completar la operación.",
+}
+
+
+def _codigo_error(ex: Exception) -> str:
+    text = str(ex).upper()
+    for code in MENSAJES_OPERACION:
+        if code != "OK" and code in text:
+            return code
+    return "USER_ADMIN_INTERNAL_ERROR"
+
+
+def _operar(supabase: Any, contexto: dict[str, Any] | None, rpc: str, params: dict[str, Any], *, solo_master: bool | None) -> ResultadoUsuarioOperacion:
+    actor = str((contexto or {}).get("usr_usuario_id") or "")
+    permitido = bool(actor and (True if solo_master is None else (_es_master(contexto) if solo_master else _actor_valido(contexto))))
+    if not permitido:
+        return ResultadoUsuarioOperacion(False, "USER_ADMIN_FORBIDDEN", MENSAJES_OPERACION["USER_ADMIN_FORBIDDEN"])
+    try:
+        response = supabase.rpc(rpc, params).execute()
+        data = extract_data(response)
+        payload = to_dict(data[0] if isinstance(data, list) and data else data)
+        code = str(payload.get("codigo") or "OK")
+        uid = payload.get("usuario_id")
+        print("[USUARIOS_ADMIN][INFO] operacion", f"actor={actor}", f"rpc={rpc}", f"resultado={code}")
+        return ResultadoUsuarioOperacion(bool(payload.get("ok", True)), code, MENSAJES_OPERACION.get(code, MENSAJES_OPERACION["USER_ADMIN_INTERNAL_ERROR"]), str(uid) if uid else None, payload)
+    except Exception as ex:
+        code = _codigo_error(ex)
+        print("[USUARIOS_ADMIN][WARNING] operacion", f"actor={actor}", f"rpc={rpc}", f"resultado={code}", f"tipo={type(ex).__name__}")
+        return ResultadoUsuarioOperacion(False, code, MENSAJES_OPERACION[code])
+
+
+def crear_usuario(supabase: Any, contexto: dict[str, Any] | None, request: CrearUsuarioRequest) -> ResultadoUsuarioOperacion:
+    if request.rol in {"Master", "Administrador"} and not _es_master(contexto):
+        return ResultadoUsuarioOperacion(False, "USER_ADMIN_FORBIDDEN", MENSAJES_OPERACION["USER_ADMIN_FORBIDDEN"])
+    if not _es_master(contexto):
+        if request.rol not in {"Operador", "Consulta"}:
+            return ResultadoUsuarioOperacion(False, "INVALID_ACCOUNT_ROLE", MENSAJES_OPERACION["INVALID_ACCOUNT_ROLE"])
+    params = {
+        "p_nombre": request.nombre, "p_email": request.email,
+        "p_rol": request.rol, "p_cuenta_id": request.cuenta_id,
+        "p_evento_id": request.evento_id,
+    }
+    return _operar(supabase, contexto, "evp_admin_crear_usuario", params, solo_master=False)
+
+
+def actualizar_preferencias(supabase: Any, contexto: dict[str, Any] | None, request: ActualizarPreferenciasRequest) -> ResultadoUsuarioOperacion:
+    return _operar(
+        supabase, contexto, "evp_usuario_actualizar_preferencias",
+        {"p_cuenta_id": request.cuenta_id, "p_evento_id": request.evento_id},
+        solo_master=None,
+    )
+
+
+def cambiar_rol_cuenta(supabase: Any, contexto: dict[str, Any] | None, request: CambiarRolCuentaRequest) -> ResultadoUsuarioOperacion:
+    return _operar(supabase, contexto, "evp_admin_cambiar_rol_cuenta", {"p_usuario_id": request.usuario_id, "p_cuenta_id": request.cuenta_id, "p_nuevo_rol": request.rol, "p_evento_id": request.evento_id}, solo_master=False)
+
+
+def cambiar_estado_cuenta(supabase: Any, contexto: dict[str, Any] | None, request: CambiarEstadoCuentaRequest) -> ResultadoUsuarioOperacion:
+    return _operar(supabase, contexto, "evp_admin_cambiar_estado_cuenta", {"p_usuario_id": request.usuario_id, "p_cuenta_id": request.cuenta_id, "p_estado": request.estado}, solo_master=False)
+
+
+def actualizar_usuario(supabase: Any, contexto: dict[str, Any] | None, request: ActualizarUsuarioRequest) -> ResultadoUsuarioOperacion:
+    return _operar(supabase, contexto, "evp_admin_actualizar_usuario", {"p_usuario_id": request.usuario_id, "p_nombre": request.nombre, "p_email": request.email}, solo_master=False)
+
+
+def cambiar_estado_usuario(supabase: Any, contexto: dict[str, Any] | None, request: CambiarEstadoUsuarioRequest) -> ResultadoUsuarioOperacion:
+    actor = str((contexto or {}).get("usr_usuario_id") or "")
+    if request.usuario_id == actor and request.estado == "Inactivo":
+        return ResultadoUsuarioOperacion(False, "SELF_DEACTIVATION_FORBIDDEN", MENSAJES_OPERACION["SELF_DEACTIVATION_FORBIDDEN"])
+    return _operar(supabase, contexto, "evp_admin_cambiar_estado_usuario", {"p_usuario_id": request.usuario_id, "p_estado": request.estado}, solo_master=True)
+
+
+def cambiar_master(supabase: Any, contexto: dict[str, Any] | None, request: CambiarMasterRequest) -> ResultadoUsuarioOperacion:
+    actor = str((contexto or {}).get("usr_usuario_id") or "")
+    if request.usuario_id == actor and not request.es_master:
+        return ResultadoUsuarioOperacion(False, "SELF_MASTER_CHANGE_FORBIDDEN", MENSAJES_OPERACION["SELF_MASTER_CHANGE_FORBIDDEN"])
+    return _operar(supabase, contexto, "evp_admin_cambiar_master", {"p_usuario_id": request.usuario_id, "p_es_master": request.es_master}, solo_master=True)
+
+
+def promover_master(supabase: Any, contexto: dict[str, Any] | None, request: PromoverMasterRequest) -> ResultadoUsuarioOperacion:
+    return _operar(supabase, contexto, "evp_admin_convertir_master", {"p_usuario_id": request.usuario_id}, solo_master=True)
+
+
+def retirar_master(supabase: Any, contexto: dict[str, Any] | None, request: RetirarMasterRequest) -> ResultadoUsuarioOperacion:
+    actor = str((contexto or {}).get("usr_usuario_id") or "")
+    if request.usuario_id == actor:
+        return ResultadoUsuarioOperacion(False, "SELF_MASTER_CHANGE_FORBIDDEN", MENSAJES_OPERACION["SELF_MASTER_CHANGE_FORBIDDEN"])
+    return _operar(
+        supabase, contexto, "evp_admin_retirar_master",
+        {"p_usuario_id": request.usuario_id, "p_cuenta_id": request.cuenta_id, "p_rol": request.rol, "p_evento_id": request.evento_id},
+        solo_master=True,
+    )
 
 
 def _filas(response: Any) -> list[dict[str, Any]]:
@@ -102,6 +239,31 @@ def obtener_cuentas_visibles(supabase: Any, contexto: dict[str, Any] | None) -> 
     return _cuentas_master(supabase) if _es_master(contexto) else _cuentas_admin_activas(supabase, contexto or {})
 
 
+def obtener_cuentas_creacion(supabase: Any, contexto: dict[str, Any] | None) -> dict[int, str]:
+    cuentas = obtener_cuentas_visibles(supabase, contexto)
+    if not _es_master(contexto):
+        return cuentas
+    rows = _filas(
+        supabase.table("evp_cta_cuenta")
+        .select("cta_cuenta_id,cta_nombre_cuenta,cta_estado")
+        .eq("cta_estado", "Activo").order("cta_nombre_cuenta").execute()
+    )
+    return {int(row["cta_cuenta_id"]): str(row.get("cta_nombre_cuenta") or f"Cuenta {row['cta_cuenta_id']}") for row in rows}
+
+
+def obtener_eventos_creacion(supabase: Any, contexto: dict[str, Any] | None, cuenta_id: Any) -> dict[int, str]:
+    account_id = _int(cuenta_id)
+    if account_id is None or account_id not in obtener_cuentas_creacion(supabase, contexto):
+        return {}
+    rows = _filas(
+        supabase.table("evp_eve_evento")
+        .select("eve_cuenta_id,eve_evento_id,eve_nombre_evento,eve_estado")
+        .eq("eve_cuenta_id", account_id).eq("eve_estado", "Activo")
+        .order("eve_nombre_evento").execute()
+    )
+    return {int(row["eve_evento_id"]): str(row.get("eve_nombre_evento") or f"Evento {row['eve_evento_id']}") for row in rows}
+
+
 def _relaciones_visibles(supabase: Any, cuenta_ids: list[int], usuario_ids: list[str] | None = None) -> list[dict[str, Any]]:
     if not cuenta_ids:
         return []
@@ -123,7 +285,7 @@ def _aplicar_candidatos(
     return _ids(
         str(row.get("ucu_usuario_id") or "")
         for row in relations
-        if (rol == "Todos" or row.get("ucu_rol") == rol)
+        if (rol == "Todos" or (row.get("ucu_rol") == rol and row.get("ucu_estado") == "Activo"))
         and (cuenta_id is None or _int(row.get("ucu_cuenta_id")) == cuenta_id)
     )
 
@@ -192,7 +354,34 @@ def listar_usuarios(
         by_user: dict[str, list[dict[str, Any]]] = {}
         for relation in page_relations:
             by_user.setdefault(str(relation.get("ucu_usuario_id")), []).append(relation)
-        event_counts: dict[str, int] = {}
+        active_account_ids = set(cuentas)
+        if _es_master(contexto) and cuentas:
+            active_account_ids = {
+                int(item["cta_cuenta_id"])
+                for item in _filas(
+                    supabase.table("evp_cta_cuenta")
+                    .select("cta_cuenta_id,cta_estado")
+                    .in_("cta_cuenta_id", list(cuentas))
+                    .eq("cta_estado", "Activo")
+                    .execute()
+                )
+            }
+        active_event_keys: set[tuple[int, int]] = set()
+        if active_account_ids:
+            event_rows = _filas(
+                supabase.table("evp_eve_evento")
+                .select("eve_cuenta_id,eve_evento_id,eve_estado")
+                .in_("eve_cuenta_id", list(active_account_ids))
+                .eq("eve_estado", "Activo")
+                .execute()
+            )
+            active_event_keys = {
+                (account_id, event_id)
+                for item in event_rows
+                if (account_id := _int(item.get("eve_cuenta_id"))) is not None
+                and (event_id := _int(item.get("eve_evento_id"))) is not None
+            }
+        active_assignments: dict[str, set[tuple[int, int]]] = {}
         if visible_user_ids:
             assignments = _filas(
                 supabase.table("evp_uev_usuario_evento")
@@ -203,13 +392,43 @@ def listar_usuarios(
             ) if cuentas else []
             for assignment in assignments:
                 uid = str(assignment.get("uev_usuario_id"))
-                event_counts[uid] = event_counts.get(uid, 0) + 1
+                key = (_int(assignment.get("uev_cuenta_id")), _int(assignment.get("uev_evento_id")))
+                if assignment.get("uev_estado") == "Activo" and key in active_event_keys:
+                    active_assignments.setdefault(uid, set()).add(key)  # type: ignore[arg-type]
         items: list[UsuarioResumen] = []
         for row in user_rows:
             uid = str(row.get("usr_usuario_id") or "")
             rels = by_user.get(uid, [])
-            account_names = tuple(sorted({cuentas[cid] for item in rels if (cid := _int(item.get("ucu_cuenta_id"))) in cuentas}))
-            roles = tuple(sorted({str(item.get("ucu_rol")) for item in rels if item.get("ucu_rol")}))
+            has_configured_access = str(row.get("usr_estado") or "") in {"Activo", "Preregistrado"}
+            is_master = bool(row.get("usr_es_usuario_master"))
+            effective_relations = {
+                cid: str(item.get("ucu_rol") or "")
+                for item in rels
+                if item.get("ucu_estado") == "Activo"
+                and (cid := _int(item.get("ucu_cuenta_id"))) in active_account_ids
+                and item.get("ucu_rol") in {"Administrador", "Operador", "Consulta"}
+            } if has_configured_access else {}
+            effective_account_ids = active_account_ids if has_configured_access and is_master else set(effective_relations)
+            if has_configured_access and is_master:
+                effective_event_keys = active_event_keys
+            else:
+                inherited_accounts = {cid for cid, role_name in effective_relations.items() if role_name == ROL_ADMINISTRADOR}
+                assigned_accounts = {cid for cid, role_name in effective_relations.items() if role_name in {"Operador", "Consulta"}}
+                effective_event_keys = {
+                    key for key in active_event_keys if key[0] in inherited_accounts
+                } | {
+                    key for key in active_assignments.get(uid, set()) if key[0] in assigned_accounts
+                }
+            account_names = tuple(sorted(cuentas[cid] for cid in effective_account_ids))
+            roles = (
+                ("Master",)
+                if is_master
+                else tuple(sorted({
+                    str(item.get("ucu_rol"))
+                    for item in rels
+                    if item.get("ucu_estado") == "Activo" and item.get("ucu_rol")
+                }))
+            )
             items.append(UsuarioResumen(
                 usuario_id=uid,
                 nombre=str(row.get("usr_nombre_usuario") or ""),
@@ -219,9 +438,11 @@ def listar_usuarios(
                 auth_uuid_presente=bool(row.get("usr_usuario_auth_uuid")),
                 cuentas_visibles=account_names,
                 roles_visibles=roles,
-                cantidad_eventos_asignados=event_counts.get(uid, 0),
+                cantidad_eventos_asignados=len(active_assignments.get(uid, set())),
+                cantidad_cuentas_accesibles=len(effective_account_ids),
+                cantidad_eventos_accesibles=len(effective_event_keys),
                 tiene_advertencia_auth=_advertencia_auth(row),
-                acceso_global=bool(row.get("usr_es_usuario_master")),
+                acceso_global=is_master,
             ))
         total_pages = math.ceil(total / tamano_pagina) if total else 0
         return ResultadoPaginadoUsuarios(
@@ -259,7 +480,7 @@ def obtener_detalle_usuario(supabase: Any, contexto: dict[str, Any] | None, usua
         return ResultadoDetalleUsuario(False, "denied", MENSAJE_SIN_PERMISO)
     target_id = str(usuario_id or "").strip()
     if not target_id:
-        return ResultadoDetalleUsuario(False, "not_found", MENSAJE_DETALLE_DENEGADO)
+        return ResultadoDetalleUsuario(False, "not_found", MENSAJE_DETALLE_NO_ENCONTRADO)
     try:
         visible_accounts = obtener_cuentas_visibles(supabase, contexto)
         visible_relations = _relaciones_visibles(supabase, list(visible_accounts), [target_id])
@@ -268,7 +489,7 @@ def obtener_detalle_usuario(supabase: Any, contexto: dict[str, Any] | None, usua
             return ResultadoDetalleUsuario(False, "denied", MENSAJE_DETALLE_DENEGADO)
         rows = _filas(supabase.table("evp_usr_usuario").select(_SELECT_USUARIO).eq("usr_usuario_id", target_id).limit(1).execute())
         if not rows:
-            return ResultadoDetalleUsuario(False, "not_found", MENSAJE_DETALLE_DENEGADO)
+            return ResultadoDetalleUsuario(False, "not_found", MENSAJE_DETALLE_NO_ENCONTRADO)
         user = rows[0]
         if _es_master(contexto):
             all_relations = _filas(
@@ -355,6 +576,14 @@ def obtener_detalle_usuario(supabase: Any, contexto: dict[str, Any] | None, usua
         if not _es_master(contexto) and default_account not in account_ids:
             default_account = None
             default_event = None
+        default_account_row = account_rows.get(default_account or -1, {})
+        if default_account is not None and not default_account_row:
+            default_account_row = _cuentas_por_ids(supabase, [default_account]).get(default_account, {})
+        default_event_row = events.get((default_account, default_event), {})
+        if default_account is not None and default_event is not None and not default_event_row:
+            default_event_row = _eventos_cuentas(supabase, [default_account]).get((default_account, default_event), {})
+        default_account_name = str(default_account_row.get("cta_nombre_cuenta") or "") or None
+        default_event_name = str(default_event_row.get("eve_nombre_evento") or "") or None
         if default_account is not None and not any(item.cuenta_id == default_account and item.acceso_efectivo for item in account_models):
             warnings.append("La cuenta predeterminada no pertenece al acceso efectivo visible.")
         if default_event is not None and not any(item.cuenta_id == default_account and item.evento_id == default_event and item.acceso_efectivo for item in event_models):
@@ -370,11 +599,13 @@ def obtener_detalle_usuario(supabase: Any, contexto: dict[str, Any] | None, usua
             nombre_abreviado=str(user.get("usr_nombre_usuario_abrev") or ""), email=str(user.get("usr_email") or ""),
             estado=str(user.get("usr_estado") or ""), es_master=target_is_master,
             auth_uuid_presente=bool(user.get("usr_usuario_auth_uuid")), cuenta_id_default=default_account,
-            evento_id_default=default_event, telefono=user.get("usr_telefono"), cuentas=tuple(account_models),
+            evento_id_default=default_event, cuenta_default_nombre=default_account_name,
+            evento_default_nombre=default_event_name, telefono=user.get("usr_telefono"), cuentas=tuple(account_models),
             eventos=tuple(event_models), acceso_efectivo=access, advertencias=tuple(warnings),
             creado=user.get("usr_creado"), modificado=user.get("usr_modificado"),
+            creado_por_actor=str(user.get("usr_creado_por") or "") == str((contexto or {}).get("usr_usuario_id") or ""),
         )
         return ResultadoDetalleUsuario(True, "ready", "Usuario cargado.", detail)
     except Exception as ex:
         print("[USUARIOS_ADMIN][ERROR] detalle", f"actor={safe_get(contexto or {}, 'usr_usuario_id')}", f"objetivo={target_id}", f"tipo={type(ex).__name__}")
-        return ResultadoDetalleUsuario(False, "error", MENSAJE_ERROR)
+        return ResultadoDetalleUsuario(False, "error", MENSAJE_DETALLE_ERROR)

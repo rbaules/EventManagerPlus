@@ -1,5 +1,11 @@
 # Plan de finalización funcional de EventPlus
 
+El cambio de rol sobre UCU existente está implementado. Siguiente bloque pendiente: administración general UCU/UEV —agregar, inactivar y reactivar cuentas y eventos según alcance Master/Administrador—.
+
+> Tarea 8: implementación local final preparada en la migración 202608100002; continúa abierta hasta aplicarla y completar la prueba manual.
+
+> Avance 8C: creación de perfil, edición, estado y condición Master implementados como migración pendiente; el preregistro por Administrador incluye cuenta/rol iniciales de forma atómica. La administración general de relaciones (8D), eventos, defaults e invitación Auth sigue pendiente.
+
 > Diseño 7A — importación Excel (2026-08-03): se auditó el esquema y se definió
 > la futura importación atómica de mesas, invitaciones e invitados. El módulo
 > sigue **no implementado**: no hay parser, UI, dependencia Excel ni RPC. La v1
@@ -79,7 +85,7 @@ sesiones al reiniciar y no sirve aún para escalado horizontal.
 | 15 | Países | Solo existe en base de datos | Catálogo `evp_pai_pais`; sin servicio/UI. RLS SELECT autenticado está diseñada. |
 | 16 | Cuentas | Solo lectura en contexto / carga manual | Se leen cuentas autorizadas. No hay alta, edición o desactivación. Crear cuenta debe ser decisión Master. |
 | 17 | Eventos | Solo lectura y selección / carga manual | `evento_service` consulta eventos; no crea, edita, cambia fase/estado ni cierra eventos. |
-| 18 | Usuarios | Administración solo lectura implementada localmente / carga manual | FULL lista, filtra, pagina y muestra detalle/acceso efectivo para Master y Admin aislado. Prueba manual y RLS SELECT real pendientes. Preregistro, edición y estado siguen fuera de la app. |
+| 18 | Usuarios | Lectura y escrituras 8C implementadas localmente / carga manual | FULL lista, filtra, pagina y muestra detalle/acceso efectivo para Master y Admin aislado. Preregistro, edición y estado están implementados; prueba manual y RLS SELECT real siguen pendientes. |
 | 19 | Usuario-cuenta | Solo lectura / carga manual | Construye cuentas y roles activos. No administra relaciones o roles. |
 | 20 | Usuario-evento | Solo lectura / carga manual | Determina eventos de Operador/Consulta. No administra asignaciones. |
 | 21 | Roles y capacidades | Implementado y probado | Modelo central para Master, Administrador, Operador y Consulta. Consulta es estrictamente de lectura. La administración de roles no existe. |
@@ -115,9 +121,9 @@ RLS todavía no está aplicada.
 
 | Tabla real | Propósito y dependencias | Consulta UI | Alta / edición / baja UI | Servicio Python | Roles funcionales | Carga actual | RPC | RLS / pruebas |
 |---|---|---|---|---|---|---|---|---|
-| `evp_usr_usuario` | Usuario interno; vincula `auth.users`; defaults a cuenta/evento | Solo propio durante login/contexto; sin pantalla | No / no / no | `usuario_service`, `session_service` | Propio; Master para administración futura | Manual preregistro + trigger Auth | Sí para preregistro, estado y defaults | SELECT diseñada; pruebas de login/contexto/sesión. Faltan CRUD, rol y aislamiento administrativo. |
+| `evp_usr_usuario` | Usuario interno; vincula `auth.users`; defaults a cuenta/evento | Administración de perfiles 8B/8C | Crear/editar/estado/Master mediante RPC; relación inicial atómica para Admin | `usuario_service`, `session_service`, `usuario_admin_service` | Master; Admin solo preregistra no Master como Operador/Consulta en cuenta propia Activa | Preregistro + trigger Auth | Sí | Migración 8C pendiente de aplicación; administración general de relaciones, eventos y defaults pendiente. |
 | `evp_cta_cuenta` | Raíz tenant | Nombre en encabezado/Dashboard y contexto | No / no / no | `usuario_service` | Master todas; relacionados leen | Manual | Recomendable para alta; edición puede ser RPC o UPDATE muy restringido | SELECT/UPDATE Master diseñadas; faltan pruebas CRUD/tenant. |
-| `evp_ucu_usuario_cuenta` | Relación usuario-cuenta, rol y estado; depende de usuario/cuenta | Solo contexto del propio usuario | No / no / no | `usuario_service`, `authorization_service` | Master; Admin solo Operador/Consulta en sus cuentas activas; propio lee | Manual | Sí, por elevación de privilegios y reglas de autoasignación | Políticas propuestas; pruebas actuales solo consumen relación. |
+| `evp_ucu_usuario_cuenta` | Relación usuario-cuenta, rol y estado; depende de usuario/cuenta | Contexto y administración de usuarios | Creación inicial atómica en 8C / administración general pendiente 8D | `usuario_service`, `authorization_service`, `usuario_admin_service` | Master; Admin solo Operador/Consulta en sus cuentas activas; propio lee | RPC para relación inicial; resto manual | Sí, por elevación de privilegios y reglas de autoasignación | Opción B aprobada; políticas y gestión posterior pendientes. |
 | `evp_pai_pais` | Catálogo independiente | No | No / no / no | Ninguno | Autenticado lee; mantenimiento fuera del MVP | Manual/preexistente | No para lectura; mantenimiento controlado si se habilita | SELECT diseñada; sin pruebas. |
 | `evp_lug_lugar` | Lugar por cuenta; depende de cuenta y opcionalmente país | No | No / no / no | Ninguno | Master/Admin escriben; roles autorizados leen | Manual | Directo viable con RLS, RPC recomendable si combina salón | RLS propuesta; sin pruebas. |
 | `evp_sal_salon` | Salón por cuenta/lugar | No | No / no / no | Ninguno | Master/Admin escriben; roles autorizados leen | Manual | RPC recomendable al crear junto con lugar; directo viable aislado | RLS propuesta; sin pruebas. |
@@ -146,6 +152,10 @@ Vistas reales relacionadas:
 | Crear invitaciones | Master/Admin | Evento `Pre_evento`, destinatario, código único, puestos; `evp_inv_invitacion` | RPC recomendada | Cupos incoherentes o código duplicado | P1 |
 | Crear invitados | Master/Admin | Evento/invitación/mesa coherentes, duplicado normalizado, principal único | RPC; transacción con invitación cuando aplique | Escribir en otro tenant, exceder cupos | P0 existente / P1 endurecimiento |
 | Preregistrar usuario | Master; Admin solo no Master como Operador/Consulta en cuenta propia activa | Email normalizado único, estado `Preregistrado`, relación atómica, no aceptar Auth UUID/master del cliente | RPC obligatoria | Escalación a Master, apropiación de identidad | P1 |
+
+Decisión aprobada 8C-B: el alta por Administrador incluye obligatoriamente y de forma atómica la relación Activa con una cuenta Activa administrada por el actor; el rol inicial es `Operador` o `Consulta`. Master mantiene el alta sin cuenta y la RPC permite vínculo inicial opcional.
+
+Corrección incremental 8C pendiente de aplicación: se agrega autor de creación verificable, edición limitada del usuario creado por el propio Admin, alta Master con cuenta/rol/defaults y asignación de evento atómica cuando corresponde. La UI permanece en el listado después del alta y Master mantiene acciones globales de estado.
 | Asignar usuario a cuenta | Master; Admin solo Operador/Consulta en cuenta propia activa | Usuario/cuenta activos, rol permitido, no autoelevarse; `evp_ucu_usuario_cuenta` | RPC obligatoria | Escalación de rol y acceso tenant | P1 |
 | Asignar usuario a evento | Master/Admin de cuenta | Relación cuenta previa, solo Operador/Consulta, evento de misma cuenta | RPC obligatoria | Autoasignación o acceso cruzado | P1 |
 | Asignar rol | Solo Master para Administrador; Master/Admin de cuenta para Operador/Consulta | Proteger Master; Admin no asigna ni retira Administrador; historial | RPC obligatoria | Escalación de privilegios | P1 |
@@ -325,7 +335,7 @@ aceptación sin activar RLS globalmente.
 | 4 | Administrar mesas | Evento Pre-evento | CRUD y creación masiva atómica; nombres visibles en búsqueda; aislamiento. |
 | 5 | Administrar invitaciones | Evento Pre-evento | CRUD, códigos/cupos; lectura por roles; ninguna mutación de Consulta. |
 | 6 | Importar invitados | Invitaciones + mesas + RPC invitados | Preview, validación, idempotencia, lote transaccional y reporte descargable. |
-| 7 | Administrar usuarios y asignaciones | Lectura 8B implementada; escritura depende de RPC | Listado/detalle aislado listo para prueba manual; preregistro y relaciones siguen pendientes, sin autoelevación. |
+| 7 | Administrar usuarios y asignaciones | Lectura 8B y escritura de perfil 8C implementadas; 8D pendiente | Listado/detalle aislado y preregistro listos para prueba manual; la relación inicial del Admin es atómica, mientras la administración general de relaciones sigue pendiente, sin autoelevación. |
 | 8 | Preferencias y Dashboard real | Lecturas estables | Defaults autorizados y métricas de vistas validadas con RLS SELECT. |
 | 9 | Realtime, exportación y auditoría | RLS SELECT + RPC | Dos sesiones reciben cambios sin fuga; exportaciones autorizadas; trazabilidad. |
 
@@ -397,3 +407,6 @@ Administrador se limita en servicio a sus relaciones administrativas activas.
 Operador, Consulta y CHECKIN quedan excluidos. Pasan 49 comprobaciones locales;
 quedan pendientes la prueba manual y la validación del RLS SELECT remoto. No se
 implementó ninguna función de escritura.
+# Incremento de acceso y preferencias
+
+Implementación local preparada en `202608100001_user_access_defaults_preferences.sql`. Permanecen pendientes la aplicación remota autorizada y el guion manual de `USER_ACCESS_AND_PREFERENCES.md`; por ello este incremento no debe marcarse cerrado todavía.

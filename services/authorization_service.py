@@ -48,6 +48,19 @@ class Capacidades:
     usuarios_admin_ver_todos: bool = False
     usuarios_admin_ver_cuenta: bool = False
     usuarios_admin_ver_detalle: bool = False
+    usuarios_admin_crear: bool = False
+    usuarios_admin_editar_global: bool = False
+    usuarios_admin_editar_datos: bool = False
+    usuarios_admin_cambiar_estado: bool = False
+    usuarios_admin_cambiar_master: bool = False
+    usuarios_admin_asignar_cuenta_inicial: bool = False
+    usuarios_admin_asignar_defaults: bool = False
+    usuarios_admin_inactivar_global: bool = False
+    usuarios_admin_activar_global: bool = False
+    usuarios_admin_inactivar_en_cuenta: bool = False
+    usuarios_admin_convertir_master: bool = False
+    usuarios_admin_retirar_master: bool = False
+    usuarios_admin_cambiar_rol: bool = False
 
 
 _SIN_CAPACIDADES = Capacidades(
@@ -88,6 +101,19 @@ for _rol_importacion in (ROL_MASTER, ROL_ADMINISTRADOR):
         usuarios_admin_ver_todos=_rol_importacion == ROL_MASTER,
         usuarios_admin_ver_cuenta=_rol_importacion == ROL_ADMINISTRADOR,
         usuarios_admin_ver_detalle=True,
+        usuarios_admin_crear=True,
+        usuarios_admin_editar_global=_rol_importacion == ROL_MASTER,
+        usuarios_admin_editar_datos=_rol_importacion == ROL_ADMINISTRADOR,
+        usuarios_admin_cambiar_estado=_rol_importacion == ROL_MASTER,
+        usuarios_admin_cambiar_master=_rol_importacion == ROL_MASTER,
+        usuarios_admin_asignar_cuenta_inicial=True,
+        usuarios_admin_asignar_defaults=_rol_importacion == ROL_MASTER,
+        usuarios_admin_inactivar_global=_rol_importacion == ROL_MASTER,
+        usuarios_admin_activar_global=_rol_importacion == ROL_MASTER,
+        usuarios_admin_inactivar_en_cuenta=_rol_importacion in {ROL_MASTER, ROL_ADMINISTRADOR},
+        usuarios_admin_convertir_master=_rol_importacion == ROL_MASTER,
+        usuarios_admin_retirar_master=_rol_importacion == ROL_MASTER,
+        usuarios_admin_cambiar_rol=True,
     )
 
 
@@ -98,6 +124,8 @@ def rol_cuenta_valido(rol: Any) -> bool:
 def rol_contexto(contexto: dict[str, Any] | None) -> str:
     if not contexto:
         return ""
+    if contexto.get("usr_es_usuario_master"):
+        return ROL_MASTER
     evento = contexto.get("evento_actual") or {}
     rol = str(evento.get("rol") or contexto.get("rol_global_calculado") or "")
     return rol if rol in ROLES_VALIDOS else ""

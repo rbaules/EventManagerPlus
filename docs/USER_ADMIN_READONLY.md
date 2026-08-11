@@ -53,12 +53,21 @@ Solo se exponen presencia del UUID Auth, estado interno y correo administrativo.
 
 ## Pruebas
 
-`scripts/test_user_admin_readonly.py` cubre 49 comprobaciones: roles, aislamiento
+`scripts/test_user_admin_readonly.py` cubre 56 comprobaciones: roles, aislamiento
 Master/Admin, usuario compartido, manipulación de IDs, acceso efectivo,
 advertencias, filtros, paginación, rutas, tabla, tarjetas, detalle y ausencia de
 INSERT/UPDATE/DELETE o `service_role`.
 
 La prueba manual del usuario continúa pendiente. También debe validarse con el
-RLS SELECT real antes de declarar 8B cerrada. Preregistro, edición, estados,
-Master, relaciones, roles, eventos, predeterminados y Auth continúan pendientes
-y requieren sus futuras RPC seguras antes de cualquier UI de escritura.
+RLS SELECT real antes de declarar 8B cerrada. Las escrituras seguras de perfil
+de 8C ya existen; la administración general de relaciones, roles, eventos,
+predeterminados y Auth continúa en sus fases posteriores.
+
+## Integración con escrituras 8C
+
+El detalle recibe explícitamente el `usuario_id` seleccionado o devuelto por la RPC de creación; no lo infiere de la posición del listado ni reutiliza una selección anterior. Master consulta perfiles globalmente, incluidos Master nuevos y no Master sin cuenta. La navegación descarta respuestas de detalle obsoletas y diferencia `Usuario no encontrado`, `No tiene acceso` y error de carga.
+
+Las acciones globales de estado y condición Master aparecen solamente cuando el actor es Master. Con la migración incremental pendiente, Administrador podrá ver `Editar datos` exclusivamente cuando `usr_creado_por` demuestre su autoría y conserve alcance activo; SQL sigue siendo la autoridad. La validación automatizada está implementada; la prueba manual dirigida en FULL sigue pendiente.
+# Alcance vigente
+
+La consulta de usuarios conserva este diseño. Las acciones y su autorización se rigen por `USER_ACCESS_AND_PREFERENCES.md`; Administrador puede editar Operador/Consulta de su cuenta aunque no los haya creado.

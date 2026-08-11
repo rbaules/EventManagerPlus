@@ -133,8 +133,12 @@ class PageSessionController:
 
         cuentas = safe_get(context, "cuentas_permitidas", []) or []
         cuenta_actual = safe_get(context, "cuenta_actual")
-        if not cuentas or not cuenta_actual:
+        if not cuentas:
             return False
+        # Una sesión autenticada sigue siendo válida sin contexto; la UI conduce
+        # al selector/Preferencias hasta que el usuario guarde defaults válidos.
+        if not cuenta_actual:
+            return True
         cuenta_ids = {safe_get(cuenta, "cuenta_id") for cuenta in cuentas}
         if safe_get(cuenta_actual, "cuenta_id") not in cuenta_ids:
             return False

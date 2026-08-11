@@ -23,7 +23,7 @@ def _status(title: str, message: str, icon: Any, on_retry: Any = None) -> ft.Con
 
 
 def _summary_card(item: UsuarioResumen, on_detail: Any) -> ft.Control:
-    scope = "Global" if item.acceso_global else f"{len(item.cuentas_visibles)} cuenta(s)"
+    scope = "Global" if item.acceso_global else f"{item.cantidad_cuentas_accesibles} cuenta(s)"
     return ft.Container(
         content=ft.Column([
             ft.Row([
@@ -36,7 +36,7 @@ def _summary_card(item: UsuarioResumen, on_detail: Any) -> ft.Control:
             ft.Text(f"Estado: {item.estado} · {'Master' if item.es_master else 'No Master'}"),
             ft.Text(f"Alcance: {scope}"),
             ft.Text(f"Roles visibles: {', '.join(item.roles_visibles) or 'Sin rol visible'}"),
-            ft.Text(f"Eventos asignados: {item.cantidad_eventos_asignados} · Auth: {'Sí' if item.auth_uuid_presente else 'No'}"),
+            ft.Text(f"Eventos accesibles: {item.cantidad_eventos_accesibles} · Auth: {'Sí' if item.auth_uuid_presente else 'No'}"),
             ft.OutlinedButton(content="Ver detalle", icon=ft.Icons.VISIBILITY, on_click=lambda e, uid=item.usuario_id: on_detail(uid)),
         ], spacing=8),
         padding=14,
@@ -55,14 +55,14 @@ def _table(items: tuple[UsuarioResumen, ...], on_detail: Any) -> ft.Control:
             ft.DataCell(ft.Text(item.email, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)),
             ft.DataCell(ft.Text(item.estado)),
             ft.DataCell(ft.Text("Global" if item.acceso_global else "Por cuenta")),
-            ft.DataCell(ft.Text(str(len(item.cuentas_visibles)), tooltip=", ".join(item.cuentas_visibles))),
+            ft.DataCell(ft.Text(str(item.cantidad_cuentas_accesibles), tooltip=", ".join(item.cuentas_visibles))),
             ft.DataCell(ft.Text(", ".join(item.roles_visibles) or "—", tooltip=", ".join(item.roles_visibles))),
-            ft.DataCell(ft.Text(str(item.cantidad_eventos_asignados))),
+            ft.DataCell(ft.Text(str(item.cantidad_eventos_accesibles))),
             ft.DataCell(ft.Text("Sí" if item.auth_uuid_presente else "No")),
             ft.DataCell(ft.IconButton(icon=ft.Icons.VISIBILITY, tooltip="Ver detalle", on_click=lambda e, uid=item.usuario_id: on_detail(uid))),
         ]))
     return ft.Row([ft.DataTable(
-        columns=[ft.DataColumn(label) for label in ("Nombre", "Correo", "Estado", "Alcance", "Cuentas", "Roles", "Eventos", "Auth", "")],
+        columns=[ft.DataColumn(label) for label in ("Nombre", "Correo", "Estado", "Alcance", "Cuentas permitidas", "Roles", "Eventos permitidos", "Auth", "")],
         rows=rows, column_spacing=18, heading_row_color=ft.Colors.SURFACE_CONTAINER_HIGHEST,
         border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT), border_radius=10,
     )], scroll=ft.ScrollMode.AUTO)
@@ -78,6 +78,7 @@ def user_admin_view(
     on_refresh: Any,
     on_page: Any,
     on_detail: Any,
+    on_new: Any = None,
 ) -> ft.Control:
     search = ft.TextField(label="Buscar por nombre o correo", value=str(filtros.get("busqueda") or ""), prefix_icon=ft.Icons.SEARCH, on_submit=lambda e: apply())
     state = ft.Dropdown(label="Estado", value=str(filtros.get("estado") or "Todos"), options=[_option(v) for v in ("Todos", "Activo", "Inactivo", "Preregistrado")])
@@ -100,6 +101,7 @@ def user_admin_view(
             ft.Container(account, col={"xs": 6, "md": 2}),
         ]),
         ft.Row([
+            ft.FilledButton(content="Nuevo usuario", icon=ft.Icons.PERSON_ADD, on_click=lambda e: on_new() if on_new else None, disabled=loading),
             ft.FilledButton(content="Aplicar filtros", icon=ft.Icons.FILTER_ALT, on_click=lambda e: apply(), disabled=loading),
             ft.OutlinedButton(content="Actualizar", icon=ft.Icons.REFRESH, on_click=lambda e: on_refresh(), disabled=loading),
         ], wrap=True),
@@ -126,6 +128,12 @@ def _info_row(label: str, value: Any) -> ft.Control:
     return ft.Row([ft.Text(label, weight=ft.FontWeight.BOLD, width=180), ft.Text("—" if value in (None, "") else str(value), selectable=True, expand=True)], vertical_alignment=ft.CrossAxisAlignment.START)
 
 
+def _default_text(name: str | None, identifier: int | None, empty: str) -> str:
+    if identifier is None:
+        return empty
+    return f"{name} (ID {identifier})" if name else f"ID {identifier}"
+
+
 def user_admin_detail_view(
     detalle: UsuarioDetalle | None,
     *,
@@ -134,6 +142,14 @@ def user_admin_detail_view(
     loading: bool,
     on_back: Any,
     on_retry: Any,
+    es_master_actor: bool = False,
+    actor_id: str = "",
+    on_edit: Any = None,
+    on_state: Any = None,
+    on_master: Any = None,
+    on_role: Any = None,
+    puede_editar_datos: bool = False,
+    puede_cambiar_rol: bool = False,
 ) -> ft.Control:
     if loading:
         body = _status("Cargando detalle", "Validando el alcance del usuario solicitado.", ft.Icons.HOURGLASS_TOP)
@@ -144,13 +160,24 @@ def user_admin_detail_view(
             _info_row("Nombre", detalle.nombre), _info_row("Correo administrativo", detalle.email),
             _info_row("Estado", detalle.estado), _info_row("Master", "Sí" if detalle.es_master else "No"),
             _info_row("UUID Auth presente", "Sí" if detalle.auth_uuid_presente else "No"),
-            _info_row("Cuenta predeterminada", detalle.cuenta_id_default), _info_row("Evento predeterminado", detalle.evento_id_default),
+            _info_row("Cuenta predeterminada", _default_text(detalle.cuenta_default_nombre, detalle.cuenta_id_default, "Sin cuenta predeterminada")),
+            _info_row("Evento predeterminado", _default_text(detalle.evento_default_nombre, detalle.evento_id_default, "Sin evento predeterminado")),
         ], spacing=8), padding=14)
-        accounts = [ft.Container(ft.Column([
-            ft.Text(item.cuenta_nombre, weight=ft.FontWeight.BOLD),
-            ft.Text(f"Rol: {item.rol} · Relación: {item.estado_relacion} · Cuenta: {item.estado_cuenta}"),
-            ft.Text(f"Predeterminada: {'Sí' if item.es_predeterminada else 'No'} · Acceso efectivo: {'Sí' if item.acceso_efectivo else 'No'}"),
-        ], spacing=5), padding=12, border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT), border_radius=8) for item in detalle.cuentas]
+        accounts = []
+        for item in detalle.cuentas:
+            account_controls: list[ft.Control] = [
+                ft.Text(item.cuenta_nombre, weight=ft.FontWeight.BOLD),
+                ft.Text(f"Rol: {item.rol} · Relación: {item.estado_relacion} · Cuenta: {item.estado_cuenta}"),
+                ft.Text(f"Predeterminada: {'Sí' if item.es_predeterminada else 'No'} · Acceso efectivo: {'Sí' if item.acceso_efectivo else 'No'}"),
+            ]
+            relacion_vigente = item.estado_relacion == "Activo" and item.estado_cuenta == "Activo"
+            rol_autorizado = es_master_actor or item.rol in {"Operador", "Consulta"}
+            if puede_cambiar_rol and not detalle.es_master and relacion_vigente and rol_autorizado:
+                account_controls.append(ft.OutlinedButton(
+                    content="Cambiar rol", icon=ft.Icons.SWAP_HORIZ,
+                    on_click=lambda e, account=item: on_role(detalle, account) if on_role else None,
+                ))
+            accounts.append(ft.Container(ft.Column(account_controls, spacing=5), padding=12, border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT), border_radius=8))
         events = [ft.Container(ft.Column([
             ft.Text(f"{item.cuenta_nombre} · {item.evento_nombre}", weight=ft.FontWeight.BOLD),
             ft.Text(f"Fase: {item.fase_evento} · Estado: {item.estado_evento} · Acceso: {item.tipo_acceso}"),
@@ -158,7 +185,24 @@ def user_admin_detail_view(
         ], spacing=5), padding=12, border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT), border_radius=8) for item in detalle.eventos]
         warnings = [ft.Row([ft.Icon(ft.Icons.WARNING_AMBER, color=ft.Colors.ERROR), ft.Text(text, expand=True)]) for text in detalle.advertencias]
         audit = ft.Container(ft.Column([_info_row("Creado", detalle.creado), _info_row("Modificado", detalle.modificado)], spacing=8), padding=14)
+        actions: list[ft.Control] = []
+        if puede_editar_datos:
+            actions.append(ft.FilledButton(content="Editar datos", icon=ft.Icons.EDIT, on_click=lambda e: on_edit(detalle) if on_edit else None))
+        if es_master_actor:
+            if detalle.estado in {"Activo", "Preregistrado"} and detalle.usuario_id != actor_id:
+                actions.append(ft.OutlinedButton(content="Inactivar usuario", icon=ft.Icons.BLOCK, on_click=lambda e: on_state(detalle, "Inactivo") if on_state else None))
+            elif detalle.estado == "Inactivo" and detalle.auth_uuid_presente:
+                actions.append(ft.OutlinedButton(content="Activar usuario", icon=ft.Icons.CHECK_CIRCLE, on_click=lambda e: on_state(detalle, "Activo") if on_state else None))
+            if detalle.es_master and detalle.usuario_id != actor_id:
+                actions.append(ft.OutlinedButton(content="Retirar condición Master", icon=ft.Icons.REMOVE_MODERATOR, on_click=lambda e: on_master(detalle, False) if on_master else None))
+            elif not detalle.es_master and detalle.estado in {"Activo", "Preregistrado"}:
+                actions.append(ft.OutlinedButton(content="Convertir en Master", icon=ft.Icons.ADMIN_PANEL_SETTINGS, on_click=lambda e: on_master(detalle, True) if on_master else None))
+        if detalle.estado == "Inactivo" and not detalle.auth_uuid_presente:
+            auth_notice = [ft.Text("Inactivo — sin identidad de autenticación vinculada", color=ft.Colors.ERROR)]
+        else:
+            auth_notice = [] if detalle.auth_uuid_presente else [ft.Text("Pendiente de autenticación", color=ft.Colors.ERROR)]
         body = ft.Column([
+            ft.Row(actions, wrap=True), *auth_notice,
             ft.ExpansionTile(title="Datos generales", leading=ft.Icons.PERSON, controls=[general], expanded=True),
             ft.ExpansionTile(title=f"Cuentas ({len(accounts)})", leading=ft.Icons.BUSINESS, controls=accounts or [ft.Text("Sin cuentas visibles.")]),
             ft.ExpansionTile(title=f"Eventos ({len(events)})", leading=ft.Icons.EVENT, controls=events or [ft.Text("Sin eventos visibles.")]),
@@ -167,6 +211,6 @@ def user_admin_detail_view(
         ], scroll=ft.ScrollMode.AUTO, expand=True)
     return ft.Column([
         ft.Row([ft.IconButton(icon=ft.Icons.ARROW_BACK, tooltip="Volver", on_click=lambda e: on_back()), ft.Text("Detalle de usuario", size=26, weight=ft.FontWeight.BOLD)]),
-        ft.Text("Información autorizada en modo solo lectura.", color=ft.Colors.ON_SURFACE_VARIANT),
+        ft.Text("Información y acciones disponibles según sus permisos.", color=ft.Colors.ON_SURFACE_VARIANT),
         ft.Divider(), body,
     ], expand=True)

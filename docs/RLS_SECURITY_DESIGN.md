@@ -1,5 +1,7 @@
 # Diseño de seguridad RLS de EventPlus
 
+> Extensión 8C: RPC `SECURITY DEFINER` con actor derivado de `auth.uid()`, sin `service_role` ni escritura directa; migración pendiente de aplicación y prueba.
+
 ## Importación Excel — diseño futuro, no aplicado
 
 La importación no usará INSERT directos desde Python. Una única RPC futura
@@ -267,3 +269,13 @@ administrativas activas del actor y recorta relaciones/detalle al alcance
 visible; no usa `service_role`. Esto no sustituye RLS: antes de declarar la
 integración cerrada deben probarse las políticas SELECT reales con Master,
 Administrador, Operador, Consulta y dos tenants. No se aplicó SQL remoto.
+### Decisión aprobada 8C-B: creación por Administrador
+
+`evp_admin_crear_usuario` obtiene el actor exclusivamente con `auth.uid()`. Un Administrador solo puede crear un no Master `Preregistrado` dentro de una cuenta Activa donde tenga relación `Administrador/Activo`, con rol inicial `Operador` o `Consulta`. Perfil y relación se crean en una sola transacción `SECURITY DEFINER`, sin INSERT directo, `service_role` ni segunda RPC. Master puede omitir cuenta/rol o proporcionar una cuenta Activa y un rol válido.
+
+La corrección incremental 8C propuesta agrega `usr_creado_por` porque el esquema aplicado no permite demostrar autoría. La edición por Admin exige simultáneamente creador exacto, objetivo no Master y alcance administrativo activo compartido. La creación con defaults valida cuenta/evento y acceso en la RPC; no acepta creador desde el cliente. Operador/Consulta recibe una asignación activa si se establece evento default. Master usa acceso global y no requiere relación redundante. No se modifica RLS.
+
+`usr_creado` no es una identidad: es `timestamptz NOT NULL DEFAULT now()`, no tiene FK y solo registra el instante del alta. La identidad del creador requiere una columna UUID independiente. La RPC obtiene ese UUID interno exclusivamente desde `auth.uid()`; no existe parámetro de creador manipulable por el cliente.
+# Consolidación de RPC de usuarios
+
+Las RPC incrementales y el orden de locks se documentan en `USER_ACCESS_AND_PREFERENCES.md`. Los defaults son preferencias y nunca sustituyen la verificación de acceso efectivo.

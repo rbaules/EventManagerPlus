@@ -100,7 +100,7 @@ def test_usuario_con_cuenta_sin_eventos_no_falla() -> None:
     contexto = run_with([CUENTA_1], {1: []})
     assert len(contexto["cuentas_permitidas"]) == 1
     assert contexto["eventos_permitidos"] == []
-    assert contexto["cuenta_actual"]["cuenta_id"] == 1
+    assert contexto["cuenta_actual"] is None
     assert contexto["evento_actual"] is None
     assert contexto["puede_registrar_llegadas"] is False
 
@@ -108,15 +108,15 @@ def test_usuario_con_cuenta_sin_eventos_no_falla() -> None:
 def test_usuario_con_una_cuenta_y_varios_eventos() -> None:
     contexto = run_with([CUENTA_1], {1: [EVENTO_1, EVENTO_2]})
     assert len(contexto["eventos_permitidos"]) == 2
-    assert contexto["cuenta_actual"]["cuenta_id"] == 1
-    assert contexto["evento_actual"]["evento_id"] == 10
+    assert contexto["cuenta_actual"] is None
+    assert contexto["evento_actual"] is None
 
 
 def test_usuario_con_varias_cuentas_y_eventos_parciales() -> None:
     contexto = run_with([CUENTA_1, CUENTA_2], {1: [EVENTO_1, EVENTO_2], 2: []})
     assert len(contexto["cuentas_permitidas"]) == 2
     assert len(contexto["eventos_permitidos"]) == 2
-    assert contexto["cuenta_actual"]["cuenta_id"] == 1
+    assert contexto["cuenta_actual"] is None
 
 
 def test_error_al_cargar_cuentas_es_controlado() -> None:
