@@ -6,7 +6,7 @@ El grid administrativo muestra alcance configurado para `Activo` y `Preregistrad
 
 > Las transiciones finales de Master y roles de cuenta se documentan en `USER_ROLE_TRANSITIONS.md`; la migración incremental `202608100002_user_role_transition_finalization.sql` está pendiente de aplicación.
 
-Este documento sustituye cualquier regla anterior que contradiga la matriz siguiente. La migración incremental correspondiente es `202608100001_user_access_defaults_preferences.sql`; 8C y 8C-Fix permanecen como historial aplicado.
+Este documento sustituye cualquier regla anterior que contradiga la matriz siguiente. La migración incremental correspondiente es `202608100001_user_access_defaults_preferences.sql`; 8C y 8C-Fix permanecen como historial aplicado. La administración posterior UCU/UEV está en `USER_ACCESS_MANAGEMENT.md`; agregar o reactivar accesos nunca asigna defaults.
 
 | Rol nuevo | Creador permitido | Default cuenta/evento | UCU inicial | UEV inicial |
 |---|---|---|---|---|

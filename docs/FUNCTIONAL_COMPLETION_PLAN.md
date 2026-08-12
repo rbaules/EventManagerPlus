@@ -22,6 +22,8 @@ El cambio de rol sobre UCU existente está implementado. Siguiente bloque pendie
 > `Pre_evento → En_proceso → Post_evento`, predeterminado por usuario y pruebas.
 > RPC/RLS siguen pendientes. Véase `docs/EVENTOS_ADMIN_MODULE.md`.
 
+Incremento 8D preparado localmente en `202608110003_user_access_management.sql`; migración remota y prueba manual pendientes, por lo que el bloque sigue abierto.
+
 Estado de la auditoría: 29 de julio de 2026. Este documento describe el
 repositorio local; no afirma el estado remoto de Supabase cuando no existe
 evidencia exportada. No se ejecutó SQL ni se aplicó RLS durante esta auditoría.

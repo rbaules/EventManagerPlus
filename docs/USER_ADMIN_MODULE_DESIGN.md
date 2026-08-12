@@ -1,6 +1,6 @@
 # Administración de usuarios — auditoría y diseño (Tarea 8A)
 
-> La matriz vigente de transiciones está en `USER_ROLE_TRANSITIONS.md`. La UI exige destino al retirar Master y evento al degradar Administrador a Operador/Consulta.
+> La matriz vigente de transiciones está en `USER_ROLE_TRANSITIONS.md`. La administración general UCU/UEV, sin escrituras directas desde Python, está en `USER_ACCESS_MANAGEMENT.md`.
 
 > Estado 8C (2026-08-06): escrituras del perfil implementadas mediante cuatro RPC; la creación por Administrador incluye la relación inicial atómica aprobada. La administración general de relaciones, eventos, defaults e invitación Auth sigue pendiente. Véase `USER_ADMIN_PROFILE.md`.
 

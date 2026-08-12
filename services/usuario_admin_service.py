@@ -17,6 +17,9 @@ from models.usuario_admin_models import (
     CambiarMasterRequest,
     CambiarRolCuentaRequest,
     CambiarEstadoCuentaRequest,
+    AgregarCuentaUsuarioRequest,
+    CambiarEstadoEventoUsuarioRequest,
+    UsuarioElegibleCuenta,
     CrearUsuarioRequest,
     PromoverMasterRequest,
     RetirarMasterRequest,
@@ -77,6 +80,12 @@ MENSAJES_OPERACION = {
     "SELF_MASTER_CHANGE_FORBIDDEN": "No puede retirar su propia condición Master.",
     "SELF_DEACTIVATION_FORBIDDEN": "No puede inactivar su propio usuario.",
     "USER_ADMIN_INTERNAL_ERROR": "No fue posible completar la operación.",
+    "ACCOUNT_RELATION_EXISTS": "El usuario ya tiene una relación activa con esta cuenta.",
+    "EVENT_RELATION_EXISTS": "El usuario ya tiene una asignación activa a este evento.",
+    "EVENT_RELATION_FORBIDDEN": "No tiene permisos para cambiar esta asignación de evento.",
+    "TARGET_STATUS_FORBIDDEN": "Reactive globalmente al usuario antes de modificar sus accesos.",
+    "TARGET_ACCOUNT_ADMIN_FORBIDDEN": "La relación Administrador de esta cuenta solo puede ser administrada por un usuario Master.",
+    "SEARCH_TOO_SHORT": "Ingrese al menos 3 caracteres para buscar.",
 }
 
 
@@ -135,6 +144,46 @@ def cambiar_rol_cuenta(supabase: Any, contexto: dict[str, Any] | None, request: 
 
 def cambiar_estado_cuenta(supabase: Any, contexto: dict[str, Any] | None, request: CambiarEstadoCuentaRequest) -> ResultadoUsuarioOperacion:
     return _operar(supabase, contexto, "evp_admin_cambiar_estado_cuenta", {"p_usuario_id": request.usuario_id, "p_cuenta_id": request.cuenta_id, "p_estado": request.estado}, solo_master=False)
+
+
+def agregar_cuenta_usuario(supabase: Any, contexto: dict[str, Any] | None, request: AgregarCuentaUsuarioRequest) -> ResultadoUsuarioOperacion:
+    return _operar(supabase, contexto, "evp_admin_agregar_cuenta_usuario", {
+        "p_usuario_id": request.usuario_id, "p_cuenta_id": request.cuenta_id,
+        "p_rol": request.rol, "p_evento_inicial_id": request.evento_inicial_id,
+    }, solo_master=False)
+
+
+def agregar_evento_usuario(supabase: Any, contexto: dict[str, Any] | None, request: CambiarEstadoEventoUsuarioRequest) -> ResultadoUsuarioOperacion:
+    return _operar(supabase, contexto, "evp_admin_agregar_evento_usuario", {
+        "p_usuario_id": request.usuario_id, "p_cuenta_id": request.cuenta_id, "p_evento_id": request.evento_id,
+    }, solo_master=False)
+
+
+def cambiar_estado_evento_usuario(supabase: Any, contexto: dict[str, Any] | None, request: CambiarEstadoEventoUsuarioRequest) -> ResultadoUsuarioOperacion:
+    return _operar(supabase, contexto, "evp_admin_cambiar_estado_evento_usuario", {
+        "p_usuario_id": request.usuario_id, "p_cuenta_id": request.cuenta_id,
+        "p_evento_id": request.evento_id, "p_estado": request.estado,
+    }, solo_master=False)
+
+
+def buscar_usuario_para_cuenta(supabase: Any, contexto: dict[str, Any] | None, cuenta_id: int, busqueda: str) -> tuple[UsuarioElegibleCuenta, ...]:
+    if not _actor_valido(contexto) or int(cuenta_id) <= 0 or len(str(busqueda or "").strip()) < 3:
+        return ()
+    try:
+        data = extract_data(supabase.rpc("evp_admin_buscar_usuario_para_cuenta", {
+            "p_cuenta_id": int(cuenta_id), "p_busqueda": str(busqueda).strip(),
+        }).execute())
+        if isinstance(data, dict):
+            data = data.get("data") or []
+        return tuple(UsuarioElegibleCuenta(
+            usuario_id=str(row.get("usuario_id") or ""), nombre=str(row.get("nombre") or ""),
+            email=str(row.get("email") or ""), estado=str(row.get("estado") or ""),
+            rol_cuenta=str(row.get("rol_cuenta")) if row.get("rol_cuenta") else None,
+            estado_relacion=str(row.get("estado_relacion")) if row.get("estado_relacion") else None,
+        ) for item in (data or []) if (row := to_dict(item)) and row.get("usuario_id"))
+    except Exception as ex:
+        print("[USUARIOS_ADMIN][WARNING] busqueda_controlada", f"actor={(contexto or {}).get('usr_usuario_id')}", f"tipo={type(ex).__name__}")
+        return ()
 
 
 def actualizar_usuario(supabase: Any, contexto: dict[str, Any] | None, request: ActualizarUsuarioRequest) -> ResultadoUsuarioOperacion:

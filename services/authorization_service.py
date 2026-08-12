@@ -61,6 +61,11 @@ class Capacidades:
     usuarios_admin_convertir_master: bool = False
     usuarios_admin_retirar_master: bool = False
     usuarios_admin_cambiar_rol: bool = False
+    usuarios_admin_agregar_cuenta: bool = False
+    usuarios_admin_reactivar_en_cuenta: bool = False
+    usuarios_admin_agregar_evento: bool = False
+    usuarios_admin_inactivar_evento: bool = False
+    usuarios_admin_reactivar_evento: bool = False
 
 
 _SIN_CAPACIDADES = Capacidades(
@@ -114,6 +119,11 @@ for _rol_importacion in (ROL_MASTER, ROL_ADMINISTRADOR):
         usuarios_admin_convertir_master=_rol_importacion == ROL_MASTER,
         usuarios_admin_retirar_master=_rol_importacion == ROL_MASTER,
         usuarios_admin_cambiar_rol=True,
+        usuarios_admin_agregar_cuenta=True,
+        usuarios_admin_reactivar_en_cuenta=True,
+        usuarios_admin_agregar_evento=True,
+        usuarios_admin_inactivar_evento=True,
+        usuarios_admin_reactivar_evento=True,
     )
 
 

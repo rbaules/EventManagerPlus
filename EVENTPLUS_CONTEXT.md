@@ -1,5 +1,7 @@
 # EVENTPLUS_CONTEXT.md
 
+El incremento 8D de administración general UCU/UEV está preparado localmente; véase `docs/USER_ACCESS_MANAGEMENT.md`. No se ejecutó SQL remoto y permanece abierto hasta migración y prueba manual.
+
 Tras aplicar 202608100002 y realizar pruebas manuales, se preparó `202608110001_user_admin_task8_final_fixes.sql`: grid de alcance configurado para Preregistrado, promoción Preregistrado→Master sin activación, edición Admin por alcance compartido sin `usr_creado_por`, e inactivación global de Activo/Preregistrado conservando defaults. Esta migración no se ejecutó en esta tarea.
 
 La finalización local de la Tarea 8 reemplaza la transición booleana de Master por promoción/retiro atómicos y amplía el cambio de rol con evento obligatorio al degradar Administrador. La migración `202608100002_user_role_transition_finalization.sql` y su rollback están preparados pero no aplicados; la tarea permanece abierta hasta migración y prueba manual.

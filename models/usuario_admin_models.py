@@ -137,6 +137,54 @@ class CambiarEstadoCuentaRequest:
 
 
 @dataclass(frozen=True)
+class AgregarCuentaUsuarioRequest:
+    usuario_id: str
+    cuenta_id: int
+    rol: str
+    evento_inicial_id: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "usuario_id", _uuid(self.usuario_id))
+        if self.rol not in {"Administrador", "Operador", "Consulta"}:
+            raise ValueError("INVALID_ACCOUNT_ROLE")
+        if int(self.cuenta_id) <= 0:
+            raise ValueError("INVALID_ACCOUNT")
+        object.__setattr__(self, "cuenta_id", int(self.cuenta_id))
+        if self.rol in {"Operador", "Consulta"} and self.evento_inicial_id in (None, ""):
+            raise ValueError("EVENT_REQUIRED")
+        if self.evento_inicial_id not in (None, ""):
+            object.__setattr__(self, "evento_inicial_id", int(self.evento_inicial_id))
+
+
+@dataclass(frozen=True)
+class CambiarEstadoEventoUsuarioRequest:
+    usuario_id: str
+    cuenta_id: int
+    evento_id: int
+    estado: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "usuario_id", _uuid(self.usuario_id))
+        for field_name in ("cuenta_id", "evento_id"):
+            value = int(getattr(self, field_name))
+            if value <= 0:
+                raise ValueError("INVALID_EVENT")
+            object.__setattr__(self, field_name, value)
+        if self.estado not in {"Activo", "Inactivo"}:
+            raise ValueError("INVALID_STATUS")
+
+
+@dataclass(frozen=True)
+class UsuarioElegibleCuenta:
+    usuario_id: str
+    nombre: str
+    email: str
+    estado: str
+    rol_cuenta: str | None = None
+    estado_relacion: str | None = None
+
+
+@dataclass(frozen=True)
 class ActualizarUsuarioRequest:
     usuario_id: str
     nombre: str

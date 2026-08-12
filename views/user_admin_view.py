@@ -79,6 +79,7 @@ def user_admin_view(
     on_page: Any,
     on_detail: Any,
     on_new: Any = None,
+    on_add_existing: Any = None,
 ) -> ft.Control:
     search = ft.TextField(label="Buscar por nombre o correo", value=str(filtros.get("busqueda") or ""), prefix_icon=ft.Icons.SEARCH, on_submit=lambda e: apply())
     state = ft.Dropdown(label="Estado", value=str(filtros.get("estado") or "Todos"), options=[_option(v) for v in ("Todos", "Activo", "Inactivo", "Preregistrado")])
@@ -102,6 +103,7 @@ def user_admin_view(
         ]),
         ft.Row([
             ft.FilledButton(content="Nuevo usuario", icon=ft.Icons.PERSON_ADD, on_click=lambda e: on_new() if on_new else None, disabled=loading),
+            ft.OutlinedButton(content="Agregar usuario existente", icon=ft.Icons.PERSON_SEARCH, on_click=lambda e: on_add_existing() if on_add_existing else None, disabled=loading),
             ft.FilledButton(content="Aplicar filtros", icon=ft.Icons.FILTER_ALT, on_click=lambda e: apply(), disabled=loading),
             ft.OutlinedButton(content="Actualizar", icon=ft.Icons.REFRESH, on_click=lambda e: on_refresh(), disabled=loading),
         ], wrap=True),
@@ -148,8 +150,13 @@ def user_admin_detail_view(
     on_state: Any = None,
     on_master: Any = None,
     on_role: Any = None,
+    on_add_account: Any = None,
+    on_account_state: Any = None,
+    on_add_event: Any = None,
+    on_event_state: Any = None,
     puede_editar_datos: bool = False,
     puede_cambiar_rol: bool = False,
+    puede_administrar_accesos: bool = False,
 ) -> ft.Control:
     if loading:
         body = _status("Cargando detalle", "Validando el alcance del usuario solicitado.", ft.Icons.HOURGLASS_TOP)
@@ -163,6 +170,7 @@ def user_admin_detail_view(
             _info_row("Cuenta predeterminada", _default_text(detalle.cuenta_default_nombre, detalle.cuenta_id_default, "Sin cuenta predeterminada")),
             _info_row("Evento predeterminado", _default_text(detalle.evento_default_nombre, detalle.evento_id_default, "Sin evento predeterminado")),
         ], spacing=8), padding=14)
+        accesos_editables = puede_administrar_accesos and detalle.estado in {"Activo", "Preregistrado"} and not detalle.es_master
         accounts = []
         for item in detalle.cuentas:
             account_controls: list[ft.Control] = [
@@ -177,17 +185,39 @@ def user_admin_detail_view(
                     content="Cambiar rol", icon=ft.Icons.SWAP_HORIZ,
                     on_click=lambda e, account=item: on_role(detalle, account) if on_role else None,
                 ))
+            if accesos_editables and rol_autorizado:
+                account_controls.append(ft.OutlinedButton(
+                    content="Inactivar" if item.estado_relacion == "Activo" else "Reactivar",
+                    icon=ft.Icons.BLOCK if item.estado_relacion == "Activo" else ft.Icons.REPLAY,
+                    on_click=lambda e, account=item: on_account_state(detalle, account, "Inactivo" if account.estado_relacion == "Activo" else "Activo") if on_account_state else None,
+                ))
+            if accesos_editables and relacion_vigente and item.rol in {"Operador", "Consulta"}:
+                account_controls.append(ft.OutlinedButton(content="Agregar evento", icon=ft.Icons.EVENT_AVAILABLE, on_click=lambda e, account=item: on_add_event(detalle, account) if on_add_event else None))
             accounts.append(ft.Container(ft.Column(account_controls, spacing=5), padding=12, border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT), border_radius=8))
+        def event_actions(item: Any) -> list[ft.Control]:
+            account = next((row for row in detalle.cuentas if row.cuenta_id == item.cuenta_id), None)
+            if not (accesos_editables and account and account.estado_relacion == "Activo" and account.rol in {"Operador", "Consulta"} and item.estado_relacion in {"Activo", "Inactivo"}):
+                return []
+            return [ft.OutlinedButton(
+                content="Inactivar" if item.estado_relacion == "Activo" else "Reactivar",
+                on_click=lambda e, event=item: on_event_state(detalle, event, "Inactivo" if event.estado_relacion == "Activo" else "Activo") if on_event_state else None,
+            )]
+
         events = [ft.Container(ft.Column([
             ft.Text(f"{item.cuenta_nombre} · {item.evento_nombre}", weight=ft.FontWeight.BOLD),
             ft.Text(f"Fase: {item.fase_evento} · Estado: {item.estado_evento} · Acceso: {item.tipo_acceso}"),
             ft.Text(f"Asignación: {item.estado_relacion or 'No requerida'} · Predeterminado: {'Sí' if item.es_predeterminado else 'No'} · Efectivo: {'Sí' if item.acceso_efectivo else 'No'}"),
+            *event_actions(item),
         ], spacing=5), padding=12, border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT), border_radius=8) for item in detalle.eventos]
         warnings = [ft.Row([ft.Icon(ft.Icons.WARNING_AMBER, color=ft.Colors.ERROR), ft.Text(text, expand=True)]) for text in detalle.advertencias]
         audit = ft.Container(ft.Column([_info_row("Creado", detalle.creado), _info_row("Modificado", detalle.modificado)], spacing=8), padding=14)
         actions: list[ft.Control] = []
         if puede_editar_datos:
             actions.append(ft.FilledButton(content="Editar datos", icon=ft.Icons.EDIT, on_click=lambda e: on_edit(detalle) if on_edit else None))
+        if accesos_editables:
+            actions.append(ft.FilledButton(content="Agregar cuenta", icon=ft.Icons.ADD_BUSINESS, on_click=lambda e: on_add_account(detalle) if on_add_account else None))
+        if detalle.es_master:
+            actions.append(ft.Text("Usuario Master — acceso global a todas las cuentas activas."))
         if es_master_actor:
             if detalle.estado in {"Activo", "Preregistrado"} and detalle.usuario_id != actor_id:
                 actions.append(ft.OutlinedButton(content="Inactivar usuario", icon=ft.Icons.BLOCK, on_click=lambda e: on_state(detalle, "Inactivo") if on_state else None))

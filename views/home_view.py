@@ -75,11 +75,14 @@ from services.lugar_service import (
 )
 from services.usuario_admin_service import (
     MENSAJES_OPERACION, actualizar_preferencias, actualizar_usuario, cambiar_estado_usuario, cambiar_rol_cuenta, crear_usuario,
+    agregar_cuenta_usuario, cambiar_estado_cuenta, agregar_evento_usuario, cambiar_estado_evento_usuario,
+    buscar_usuario_para_cuenta,
     listar_usuarios, obtener_cuentas_creacion, obtener_cuentas_visibles,
     obtener_detalle_usuario, obtener_eventos_creacion, promover_master, retirar_master,
 )
 from models.usuario_admin_models import (
     ActualizarPreferenciasRequest, ActualizarUsuarioRequest, CambiarEstadoUsuarioRequest, CambiarRolCuentaRequest,
+    AgregarCuentaUsuarioRequest, CambiarEstadoCuentaRequest, CambiarEstadoEventoUsuarioRequest,
     CrearUsuarioRequest, PromoverMasterRequest, RetirarMasterRequest,
 )
 from views.arrivals_view import arrivals_view
@@ -243,8 +246,11 @@ def build_home_view(
                 actor_id=str(contexto_usuario.get("usr_usuario_id") or ""),
                 on_edit=mostrar_editar_usuario, on_state=confirmar_estado_usuario,
                 on_master=confirmar_master_usuario, on_role=mostrar_cambiar_rol,
+                on_add_account=mostrar_agregar_cuenta, on_account_state=confirmar_estado_cuenta,
+                on_add_event=mostrar_agregar_evento, on_event_state=confirmar_estado_evento,
                 puede_editar_datos=_puede_editar_datos_usuario(state["usuarios_admin_detalle"]),
                 puede_cambiar_rol=capacidades_contexto(contexto_usuario).usuarios_admin_cambiar_rol,
+                puede_administrar_accesos=capacidades_contexto(contexto_usuario).usuarios_admin_agregar_cuenta,
             )
         if state["selected"] == "users_admin":
             if checkin_mode or not puede_ver_administracion_usuarios(contexto_usuario):
@@ -258,6 +264,7 @@ def build_home_view(
                 loading=state["usuarios_admin_loading"], on_apply_filters=aplicar_filtros_usuarios,
                 on_refresh=cargar_usuarios_admin, on_page=cambiar_pagina_usuarios, on_detail=abrir_detalle_usuario,
                 on_new=mostrar_nuevo_usuario,
+                on_add_existing=mostrar_agregar_usuario_existente,
             )
         if state["selected"] == "excel_import":
             if checkin_mode or not puede_ver_importacion_excel(contexto_usuario):
@@ -1140,6 +1147,115 @@ def build_home_view(
         save.on_click = guardar
         dialog.actions = [ft.TextButton(content="Cancelar", on_click=lambda e: _cerrar_dialogo(dialog)), save]
         page.show_dialog(dialog)
+
+    def mostrar_agregar_cuenta(detalle: Any) -> None:
+        cuentas = obtener_cuentas_creacion(supabase, contexto_usuario)
+        cuenta = ft.Dropdown(label="Cuenta", options=[ft.DropdownOption(key=str(cid), text=name) for cid, name in cuentas.items()])
+        roles = ("Administrador", "Operador", "Consulta") if contexto_usuario.get("usr_es_usuario_master") else ("Operador", "Consulta")
+        rol = ft.Dropdown(label="Rol", options=[ft.DropdownOption(key=value, text=value) for value in roles])
+        evento = ft.Dropdown(label="Evento inicial", disabled=True)
+        error = ft.Text(color=ft.Colors.ERROR); save = ft.FilledButton(content="Agregar cuenta")
+        dialog = ft.AlertDialog(modal=True, title="Agregar cuenta", content=ft.Column([cuenta, rol, evento, error], tight=True), actions=[])
+        def actualizar(e: Any = None) -> None:
+            requiere = rol.value in {"Operador", "Consulta"}; evento.disabled = not requiere; evento.value = ""
+            evento.options = [ft.DropdownOption(key=str(eid), text=name) for eid, name in obtener_eventos_creacion(supabase, contexto_usuario, cuenta.value).items()] if requiere and cuenta.value else []
+            page.update()
+        cuenta.on_select = actualizar; rol.on_select = actualizar
+        def guardar(e: Any = None) -> None:
+            try: request = AgregarCuentaUsuarioRequest(detalle.usuario_id, int(cuenta.value or 0), str(rol.value or ""), int(evento.value) if evento.value else None)
+            except (ValueError, TypeError) as ex: error.value = MENSAJES_OPERACION.get(str(ex), str(ex)); page.update(); return
+            save.disabled = True; page.update()
+            def worker() -> None:
+                result = agregar_cuenta_usuario(supabase, contexto_usuario, request); save.disabled = False
+                if result.ok: _cerrar_dialogo(dialog); _notificar_operacion(result); refrescar_usuario_y_listado(detalle.usuario_id)
+                else: error.value = result.mensaje; page.update()
+            page.run_thread(worker)
+        save.on_click = guardar; dialog.actions = [ft.TextButton(content="Cancelar", on_click=lambda e: _cerrar_dialogo(dialog)), save]; page.show_dialog(dialog)
+
+    def mostrar_agregar_usuario_existente() -> None:
+        cuentas = obtener_cuentas_creacion(supabase, contexto_usuario)
+        cuenta = ft.Dropdown(label="Cuenta", options=[ft.DropdownOption(key=str(cid), text=name) for cid, name in cuentas.items()])
+        query = ft.TextField(label="Nombre o correo", hint_text="Mínimo 3 caracteres")
+        results = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO)
+        status = ft.Text(color=ft.Colors.ON_SURFACE_VARIANT)
+        selected: dict[str, Any] = {"user": None}
+        roles = ("Administrador", "Operador", "Consulta") if contexto_usuario.get("usr_es_usuario_master") else ("Operador", "Consulta")
+        rol = ft.Dropdown(label="Rol", options=[ft.DropdownOption(key=value, text=value) for value in roles], visible=False)
+        evento = ft.Dropdown(label="Evento inicial", visible=False)
+        save = ft.FilledButton(content="Agregar acceso", visible=False)
+        error = ft.Text(color=ft.Colors.ERROR)
+
+        def seleccionar(candidate: Any) -> None:
+            selected["user"] = candidate; rol.visible = True; rol.value = ""; evento.visible = False; save.visible = True
+            status.value = f"Seleccionado: {candidate.nombre} · {candidate.email}"; page.update()
+
+        def cargar_eventos(e: Any = None) -> None:
+            requiere = rol.value in {"Operador", "Consulta"}; evento.visible = requiere; evento.value = ""
+            evento.options = [ft.DropdownOption(key=str(eid), text=name) for eid, name in obtener_eventos_creacion(supabase, contexto_usuario, cuenta.value).items()] if requiere and cuenta.value else []
+            page.update()
+
+        rol.on_select = cargar_eventos
+
+        def buscar(e: Any = None) -> None:
+            text = str(query.value or "").strip()
+            if not cuenta.value: error.value = "Seleccione una cuenta."; page.update(); return
+            if len(text) < 3: error.value = "Ingrese al menos 3 caracteres para buscar."; page.update(); return
+            error.value = ""; status.value = "Buscando…"; results.controls = []; page.update()
+            def worker() -> None:
+                candidates = buscar_usuario_para_cuenta(supabase, contexto_usuario, int(cuenta.value), text)
+                cards: list[ft.Control] = []
+                for candidate in candidates:
+                    local = f"{candidate.rol_cuenta} / {candidate.estado_relacion}" if candidate.rol_cuenta else "Sin relación en esta cuenta"
+                    controls: list[ft.Control] = [ft.Text(candidate.nombre, weight=ft.FontWeight.BOLD), ft.Text(candidate.email), ft.Text(f"{candidate.estado} · {local}")]
+                    if candidate.rol_cuenta == "Administrador":
+                        controls.append(ft.Text("Usuario Administrador de esta cuenta. Esta relación solo puede ser administrada por un usuario Master.", color=ft.Colors.ERROR))
+                    elif candidate.estado_relacion == "Activo":
+                        controls.append(ft.Text("El usuario ya tiene acceso activo en esta cuenta."))
+                    else:
+                        controls.append(ft.OutlinedButton(content="Seleccionar", on_click=lambda e, row=candidate: seleccionar(row)))
+                    cards.append(ft.Container(ft.Column(controls, spacing=4), padding=10, border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT), border_radius=8))
+                results.controls = cards; status.value = f"{len(candidates)} resultado(s) elegible(s)." if candidates else "No se encontró un usuario elegible."; page.update()
+            page.run_thread(worker)
+
+        def guardar(e: Any = None) -> None:
+            candidate = selected.get("user")
+            try: request = AgregarCuentaUsuarioRequest(candidate.usuario_id if candidate else "", int(cuenta.value or 0), str(rol.value or ""), int(evento.value) if evento.value else None)
+            except (ValueError, TypeError) as ex: error.value = MENSAJES_OPERACION.get(str(ex), str(ex)); page.update(); return
+            save.disabled = True; page.update()
+            def worker() -> None:
+                result = agregar_cuenta_usuario(supabase, contexto_usuario, request); save.disabled = False
+                if result.ok: _cerrar_dialogo(dialog); _notificar_operacion(result); cargar_usuarios_admin()
+                else: error.value = result.mensaje; page.update()
+            page.run_thread(worker)
+
+        search = ft.FilledButton(content="Buscar", icon=ft.Icons.SEARCH, on_click=buscar)
+        query.on_submit = buscar; save.on_click = guardar
+        dialog = ft.AlertDialog(modal=True, title="Agregar usuario existente a una cuenta", content=ft.Container(ft.Column([cuenta, query, search, status, results, rol, evento, error], tight=True, scroll=ft.ScrollMode.AUTO), width=560, height=560), actions=[ft.TextButton(content="Cancelar", on_click=lambda e: _cerrar_dialogo(dialog)), save])
+        page.show_dialog(dialog)
+
+    def confirmar_estado_cuenta(detalle: Any, relacion: Any, estado: str) -> None:
+        request = CambiarEstadoCuentaRequest(detalle.usuario_id, relacion.cuenta_id, estado)
+        _confirmar_operacion("Cambiar acceso a cuenta", f"La relación pasará a {estado}.", lambda: cambiar_estado_cuenta(supabase, contexto_usuario, request))
+
+    def mostrar_agregar_evento(detalle: Any, relacion: Any) -> None:
+        opciones = obtener_eventos_creacion(supabase, contexto_usuario, relacion.cuenta_id)
+        evento = ft.Dropdown(label="Evento", options=[ft.DropdownOption(key=str(eid), text=name) for eid, name in opciones.items()])
+        error = ft.Text(color=ft.Colors.ERROR); save = ft.FilledButton(content="Agregar evento")
+        dialog = ft.AlertDialog(modal=True, title=f"Agregar evento — {relacion.cuenta_nombre}", content=ft.Column([evento, error], tight=True), actions=[])
+        def guardar(e: Any = None) -> None:
+            try: request = CambiarEstadoEventoUsuarioRequest(detalle.usuario_id, relacion.cuenta_id, int(evento.value or 0), "Activo")
+            except (ValueError, TypeError) as ex: error.value = MENSAJES_OPERACION.get(str(ex), str(ex)); page.update(); return
+            save.disabled = True; page.update()
+            def worker() -> None:
+                result = agregar_evento_usuario(supabase, contexto_usuario, request); save.disabled = False
+                if result.ok: _cerrar_dialogo(dialog); _notificar_operacion(result); refrescar_usuario_y_listado(detalle.usuario_id)
+                else: error.value = result.mensaje; page.update()
+            page.run_thread(worker)
+        save.on_click = guardar; dialog.actions = [ft.TextButton(content="Cancelar", on_click=lambda e: _cerrar_dialogo(dialog)), save]; page.show_dialog(dialog)
+
+    def confirmar_estado_evento(detalle: Any, evento: Any, estado: str) -> None:
+        request = CambiarEstadoEventoUsuarioRequest(detalle.usuario_id, evento.cuenta_id, evento.evento_id, estado)
+        _confirmar_operacion("Cambiar acceso al evento", f"La asignación pasará a {estado}.", lambda: cambiar_estado_evento_usuario(supabase, contexto_usuario, request))
 
     def reset_invitados() -> None:
         state["invitados_estado"] = "idle"
