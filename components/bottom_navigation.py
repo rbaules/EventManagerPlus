@@ -79,4 +79,5 @@ def bottom_navigation(
             top=ft.BorderSide(width=1, color=ft.Colors.OUTLINE_VARIANT),
         ),
         on_change=handle_change,
+        data={"responsive_component": "bottom_navigation"},
     )

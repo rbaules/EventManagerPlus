@@ -13,6 +13,7 @@ import flet as ft
 from config import is_checkin_mode
 from components.app_shell import app_shell
 from components.bottom_navigation import bottom_navigation
+from components.responsive import layout_mode
 from services.auth_service import sign_out_local_session
 from services.authorization_service import capacidades_contexto, puede_administrar_lugares, puede_ver_administracion_eventos, puede_ver_administracion_usuarios, puede_ver_importacion_excel
 from services.excel_import_service import consultar_evento_tiene_datos, ejecutar_importacion, generar_archivo_errores, leer_archivo_excel, preview_coincide_contexto, validar_contexto_importacion, vincular_preview_contexto
@@ -132,10 +133,13 @@ def build_home_view(
     session_controller: PageSessionController | None = None,
 ) -> ft.Control:
     checkin_mode = is_checkin_mode()
+    if hasattr(page, "scroll"):
+        page.scroll = None
     excel_file_picker = ft.FilePicker()
     if hasattr(page, "services"):
         page.services.append(excel_file_picker)
     state: dict[str, Any] = {
+        "layout_mode": layout_mode(getattr(page, "width", None)),
         "selected": "arrivals" if checkin_mode else "dashboard",
         "eventos_estado": "loading",
         "eventos": [],
@@ -455,7 +459,7 @@ def build_home_view(
                     on_retry=reintentar_llegadas,
                     on_novelty=mostrar_novedad_invitado,
                     can_edit_novelty=puede_editar_novedad(contexto_usuario),
-                    is_mobile=float(page.width or 1200) < 760,
+                    layout=state["layout_mode"],
                 )
             return _placeholder(
                 "Acceso no permitido",
@@ -477,6 +481,16 @@ def build_home_view(
         if content is None:
             raise RuntimeError("La vista solicitada devolvio None; se esperaba un control Flet.")
 
+        can_use_app = bool(
+            contexto_usuario.get("cuenta_actual")
+            and (contexto_usuario.get("evento_actual") or contexto_usuario.get("eventos_permitidos"))
+        )
+        navigation = bottom_navigation(
+            selected=state["selected"],
+            can_use_app=can_use_app,
+            can_register_arrivals=bool(contexto_usuario.get("puede_registrar_llegadas")),
+            on_select=select_tab,
+        )
         return app_shell(
             contexto=contexto_usuario,
             selected=state["selected"],
@@ -489,19 +503,8 @@ def build_home_view(
             on_select_event=lambda: select_tab("event_selection"),
             on_excel_import=lambda: select_tab("excel_import"),
             on_manage_users=lambda: select_tab("users_admin"),
-        )
-
-    def configure_navigation_bar() -> None:
-        can_use_app = bool(
-            contexto_usuario.get("cuenta_actual")
-            and (contexto_usuario.get("evento_actual") or contexto_usuario.get("eventos_permitidos"))
-        )
-        can_register_arrivals = bool(contexto_usuario.get("puede_registrar_llegadas"))
-        page.navigation_bar = bottom_navigation(
-            selected=state["selected"],
-            can_use_app=can_use_app,
-            can_register_arrivals=can_register_arrivals,
-            on_select=select_tab,
+            layout=state["layout_mode"],
+            navigation=navigation,
         )
 
     def render() -> None:
@@ -510,11 +513,17 @@ def build_home_view(
         if home_control is None:
             raise RuntimeError("build_home_view devolvio None; se esperaba un control Flet.")
 
-        home_control.data = _home_callbacks()
-        configure_navigation_bar()
+        home_control.data = {**_home_callbacks(), "responsive_component": "app_shell"}
         page.clean()
         page.add(home_control)
         page.update()
+
+    def handle_page_resize(_event: ft.ControlEvent | None = None) -> None:
+        new_mode = layout_mode(getattr(page, "width", None))
+        if new_mode == state["layout_mode"] or not state["session_active"]:
+            return
+        state["layout_mode"] = new_mode
+        render()
 
     def _marca_actualizacion() -> str:
         now = datetime.now().astimezone()
@@ -574,6 +583,7 @@ def build_home_view(
             "resume_dashboard": _reanudar_home,
             "select_event": select_event,
             "state": state,
+            "handle_resize": handle_page_resize,
         }
 
     def _sincronizar_actualizacion_dashboard() -> None:
@@ -1680,7 +1690,7 @@ def build_home_view(
             max_lines=6,
             max_length=200,
             read_only=not editable,
-            autofocus=editable,
+            autofocus=False,
         )
         progreso = ft.ProgressRing(width=22, height=22, visible=False)
         guardar = ft.Button(content="Guardar", icon=ft.Icons.SAVE)
@@ -2155,14 +2165,12 @@ def build_home_view(
     def alternar_invitado_llegadas(invitado: dict[str, Any], seleccionado: bool) -> None:
         if invitado.get("llegada_confirmada"):
             return
-        selected = set(state["arrivals_seleccionados"])
+        selected = state["arrivals_seleccionados"]
         invitado_uuid = str(invitado.get("invitado_uuid", ""))
         if seleccionado:
             selected.add(invitado_uuid)
         else:
             selected.discard(invitado_uuid)
-        state["arrivals_seleccionados"] = selected
-        render()
 
     def seleccionar_pendientes_llegadas() -> None:
         pendientes = {
@@ -2892,7 +2900,9 @@ def build_home_view(
             print("[EVENTOS][INFO] Contexto de evento eliminado durante logout.")
         except Exception:
             pass
-        page.navigation_bar = None
+        page.on_resize = None
+        if hasattr(page, "scroll"):
+            page.scroll = ft.ScrollMode.AUTO
         page.clean()
         from views.login_view import build_login_view
 
@@ -2911,7 +2921,8 @@ def build_home_view(
 
             page.run_task(navigate_to_server_logout)
 
-    configure_navigation_bar()
+    page.on_resize = handle_page_resize
+    page.navigation_bar = None
     home_control = build_shell()
-    home_control.data = _home_callbacks()
+    home_control.data = {**_home_callbacks(), "responsive_component": "app_shell"}
     return home_control

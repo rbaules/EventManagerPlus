@@ -15,6 +15,7 @@ from services.invitado_service import (
     listar_invitados,
     normalizar_invitado,
 )
+from components.responsive import LayoutMode
 from views.arrivals_view import arrivals_view
 
 
@@ -297,7 +298,7 @@ def test_ui_arrivals_builds() -> None:
         [item], {str(item["invitado_uuid"])}, True, False, False,
         lambda value=None: None, lambda: None, lambda value=None: None,
         lambda item=None, selected=False: None, lambda: None, lambda: None,
-        lambda value=None: None, lambda: None, is_mobile=True,
+        lambda value=None: None, lambda: None, layout=LayoutMode.PHONE,
     )
     mobile_grids = [node.data.get("arrivals_grid") for node in walk(mobile) if isinstance(getattr(node, "data", None), dict) and node.data.get("arrivals_grid")]
     assert "search_cards" in mobile_grids and "confirmation_cards" in mobile_grids

@@ -6,6 +6,7 @@ from typing import Any
 import flet as ft
 
 from components.event_header import event_header
+from components.responsive import LayoutMode
 
 
 def app_shell(
@@ -20,6 +21,8 @@ def app_shell(
     on_select_event: Callable[[], None] | None = None,
     on_excel_import: Callable[[], None] | None = None,
     on_manage_users: Callable[[], None] | None = None,
+    layout: LayoutMode = LayoutMode.DESKTOP_WIDE,
+    navigation: ft.Control | None = None,
 ) -> ft.Control:
     return ft.SafeArea(
         content=ft.Column(
@@ -34,16 +37,20 @@ def app_shell(
                     on_select_event=on_select_event,
                     on_excel_import=on_excel_import,
                     on_manage_users=on_manage_users,
+                    layout=layout,
                 ),
                 ft.Container(
                     content=content,
                     expand=True,
                     padding=16,
                     clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                    data={"responsive_component": "content"},
                 ),
+                *([navigation] if navigation is not None else []),
             ],
             expand=True,
             spacing=0,
         ),
         expand=True,
+        data={"responsive_component": "app_shell"},
     )

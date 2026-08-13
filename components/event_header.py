@@ -6,6 +6,7 @@ from typing import Any
 import flet as ft
 
 from config import is_checkin_mode
+from components.responsive import LayoutMode
 from services.evento_context_service import rol_visible_contextual
 from services.authorization_service import puede_administrar_lugares, puede_ver_administracion_eventos, puede_ver_administracion_usuarios, puede_ver_importacion_excel
 
@@ -45,9 +46,9 @@ def _avatar_menu(
     iniciales = calcular_iniciales_usuario(nombre)
     avatar = ft.Container(
         content=ft.Text(iniciales, size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_PRIMARY),
-        width=44,
-        height=44,
-        border_radius=22,
+        width=48,
+        height=48,
+        border_radius=24,
         bgcolor=ft.Colors.PRIMARY,
         alignment=ft.Alignment.CENTER,
         tooltip="Menu de usuario",
@@ -131,6 +132,7 @@ def event_header(
     on_select_event: Callable[[], None] | None = None,
     on_excel_import: Callable[[], None] | None = None,
     on_manage_users: Callable[[], None] | None = None,
+    layout: LayoutMode = LayoutMode.DESKTOP_WIDE,
 ) -> ft.Container:
     cuenta = contexto.get("cuenta_actual") or {}
     evento = contexto.get("evento_actual") or {}
@@ -164,70 +166,60 @@ def event_header(
             )
         )
 
-    return ft.Container(
-        content=ft.ResponsiveRow(
+    logo = ft.Image(
+        src="brand/EventPlus_logo_v2.0_horizontal.png",
+        width=125 if layout == LayoutMode.PHONE else 150 if layout in {LayoutMode.PHONE_LARGE, LayoutMode.TABLET_PORTRAIT} else 180,
+        fit=ft.BoxFit.CONTAIN,
+    )
+    user = ft.Row(
+        [
+            ft.Column(
+                [
+                    ft.Text(_get(contexto, "usr_nombre_usuario", "Usuario"), size=14, weight=ft.FontWeight.W_600, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(rol_visible_contextual(contexto), size=13, color=ft.Colors.ON_SURFACE_VARIANT),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.END,
+                spacing=3,
+                tight=True,
+                expand=True,
+            ),
+            _avatar_menu(contexto, on_preferences, on_logout, on_change_context, on_manage_locations, on_manage_events, on_select_event, on_excel_import, on_manage_users),
+        ],
+        alignment=ft.MainAxisAlignment.END,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        spacing=8,
+    )
+    if layout in {LayoutMode.TABLET_LANDSCAPE, LayoutMode.DESKTOP_WIDE}:
+        content: ft.Control = ft.Row(
+            [logo, ft.Column(details, spacing=4, tight=True, expand=True), ft.Container(user, width=240)],
+            spacing=16,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+    elif layout == LayoutMode.TABLET_PORTRAIT:
+        context_line: list[ft.Control] = [ft.Column(details[:2], spacing=3, tight=True, expand=True)]
+        if len(details) > 2:
+            context_line.append(details[2])
+        content = ft.Column(
             [
-                ft.Container(
-                    content=ft.Image(
-                        src="brand/EventPlus_logo_v2.0_horizontal.png",
-                        width=180,
-                        fit=ft.BoxFit.CONTAIN,
-                    ),
-                    col={"xs": 12, "sm": 4, "md": 3},
-                    padding=ft.Padding.only(bottom=8),
-                ),
-                ft.Container(
-                    content=ft.Column(details, spacing=6, tight=True),
-                    col={"xs": 12, "sm": 8, "md": 5},
-                ),
-                ft.Container(
-                    content=ft.Row(
-                        [
-                            ft.Column(
-                                [
-                                    ft.Text(
-                                        _get(contexto, "usr_nombre_usuario", "Usuario"),
-                                        size=14,
-                                        weight=ft.FontWeight.W_600,
-                                        overflow=ft.TextOverflow.ELLIPSIS,
-                                    ),
-                                    ft.Text(
-                                        rol_visible_contextual(contexto),
-                                        size=13,
-                                        color=ft.Colors.ON_SURFACE_VARIANT,
-                                    ),
-                                ],
-                                horizontal_alignment=ft.CrossAxisAlignment.END,
-                                spacing=4,
-                                tight=True,
-                                expand=True,
-                            ),
-                            _avatar_menu(
-                                contexto,
-                                on_preferences,
-                                on_logout,
-                                on_change_context,
-                                on_manage_locations,
-                                on_manage_events,
-                                on_select_event,
-                                on_excel_import,
-                                on_manage_users,
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.END,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=10,
-                    ),
-                    col={"xs": 12, "md": 4},
-                    alignment=ft.Alignment.CENTER_RIGHT,
-                ),
+                ft.Row([logo, ft.Container(user, expand=True)], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                ft.Row(context_line, spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ],
-            spacing=12,
-            run_spacing=8,
-        ),
-        padding=16,
+            spacing=7,
+            tight=True,
+        )
+    else:
+        content = ft.Column(
+            [ft.Row([logo, ft.Container(user, expand=True)], spacing=8), ft.Column(details, spacing=4, tight=True)],
+            spacing=8,
+            tight=True,
+        )
+
+    return ft.Container(
+        content=content,
+        padding=12 if layout in {LayoutMode.PHONE, LayoutMode.PHONE_LARGE, LayoutMode.TABLET_PORTRAIT} else 16,
         border=ft.Border.only(
             bottom=ft.BorderSide(width=1, color=ft.Colors.OUTLINE_VARIANT),
         ),
         bgcolor=ft.Colors.SURFACE,
+        data={"responsive_component": "event_header", "layout_mode": layout.value},
     )
