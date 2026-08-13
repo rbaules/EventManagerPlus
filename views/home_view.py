@@ -53,14 +53,17 @@ from services.invitado_service import (
     eliminar_invitado_imprevisto,
     listar_invitaciones_evento,
     listar_invitados,
+    guardar_novedad,
     obtener_invitado_por_id,
     puede_administrar_invitados_planificados,
     puede_confirmar_llegada,
     puede_eliminar_imprevisto,
+    puede_editar_novedad,
     puede_registrar_imprevisto,
     puede_reversar_llegada,
     reversar_llegada,
 )
+from services.time_service import fecha_hora_panama
 from services.session_service import PageSessionController
 from services.navigation_service import ROUTES, parse_app_route, route_for
 from services.lugar_service import (
@@ -173,6 +176,8 @@ def build_home_view(
         "arrivals_saving": False,
         "arrivals_request_id": 0,
         "arrivals_event_key": None,
+        "novedad_request_id": 0,
+        "novedad_saving": False,
         "lugares_estado": "idle",
         "lugares_mensaje": "",
         "lugares": [],
@@ -421,6 +426,9 @@ def build_home_view(
                 on_confirm_arrival=confirmar_llegada_invitado,
                 on_reverse_arrival=confirmar_reversion_llegada,
                 on_delete_unexpected=confirmar_eliminacion_imprevisto,
+                on_novelty=mostrar_novedad_invitado,
+                is_mobile=float(page.width or 1200) < 760,
+                can_edit_novelty=puede_editar_novedad(contexto_usuario),
             )
 
         if state["selected"] == "arrivals":
@@ -445,6 +453,9 @@ def build_home_view(
                     on_confirm_selected=confirmar_seleccion_llegadas,
                     on_reverse_arrival=confirmar_reversion_llegadas,
                     on_retry=reintentar_llegadas,
+                    on_novelty=mostrar_novedad_invitado,
+                    can_edit_novelty=puede_editar_novedad(contexto_usuario),
+                    is_mobile=float(page.width or 1200) < 760,
                 )
             return _placeholder(
                 "Acceso no permitido",
@@ -1653,6 +1664,141 @@ def build_home_view(
             confirmar_llegada,
             "confirmar_llegada",
         )
+
+    def mostrar_novedad_invitado(invitado: dict[str, Any]) -> None:
+        editable = puede_editar_novedad(contexto_usuario)
+        existente = bool(invitado.get("tiene_novedad"))
+        nombre = str(invitado.get("nombre_completo") or "Invitado")
+        texto_inicial = str(invitado.get("descripcion_novedad") or "")
+        error = ft.Text("", color=ft.Colors.ERROR, visible=False)
+        contador = ft.Text(f"{len(texto_inicial)}/200", size=12, color=ft.Colors.ON_SURFACE_VARIANT, visible=editable)
+        campo = ft.TextField(
+            label="Novedad",
+            value=texto_inicial,
+            multiline=True,
+            min_lines=3,
+            max_lines=6,
+            max_length=200,
+            read_only=not editable,
+            autofocus=editable,
+        )
+        progreso = ft.ProgressRing(width=22, height=22, visible=False)
+        guardar = ft.Button(content="Guardar", icon=ft.Icons.SAVE)
+
+        def actualizar_contador(e: Any) -> None:
+            contador.value = f"{len(str(campo.value or ''))}/200"
+            page.update()
+
+        campo.on_change = actualizar_contador
+        detalles_readonly: list[ft.Control] = []
+        if not editable:
+            detalles_readonly = [
+                ft.Text(
+                    f"Fecha creación: {fecha_hora_panama(invitado.get('novedad_creada')) or '-'}",
+                    size=12,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                ),
+                ft.Text(
+                    f"Fecha modificación: {fecha_hora_panama(invitado.get('novedad_mod')) or '-'}",
+                    size=12,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                ),
+            ]
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Ver novedad" if not editable else ("Ver / Editar novedad" if existente else "Registrar novedad")),
+            content=ft.Container(
+                content=ft.Column([
+                    ft.Text("Invitado", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text(nombre, weight=ft.FontWeight.BOLD),
+                    campo,
+                    *detalles_readonly,
+                    ft.Row([contador, progreso], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    error,
+                ], tight=True, scroll=ft.ScrollMode.AUTO),
+                width=480,
+            ),
+            actions=[],
+        )
+
+        def cerrar(e: Any = None) -> None:
+            if state["novedad_saving"]:
+                return
+            dialog.open = False
+            page.update()
+
+        def ejecutar_guardado() -> None:
+            if state["novedad_saving"]:
+                return
+            active_key = evento_activo_key()
+            if active_key is None or (invitado.get("cuenta_id"), invitado.get("evento_id")) != active_key:
+                error.value = "El evento activo cambió. Abre nuevamente la novedad."
+                error.visible = True
+                page.update()
+                return
+            texto = str(campo.value or "").strip()
+            if len(texto) > 200:
+                error.value = "La novedad no puede exceder 200 caracteres."
+                error.visible = True
+                page.update()
+                return
+            state["novedad_saving"] = True
+            state["novedad_request_id"] += 1
+            request_id = state["novedad_request_id"]
+            guardar.disabled = True
+            progreso.visible = True
+            error.visible = False
+            page.update()
+
+            def worker() -> None:
+                resultado = guardar_novedad(str(invitado.get("invitado_uuid") or ""), texto, supabase=supabase)
+                if request_id != state["novedad_request_id"] or active_key != evento_activo_key():
+                    print("[INVITADOS][WARNING] Resultado antiguo de novedad ignorado.")
+                    if request_id == state["novedad_request_id"]:
+                        state["novedad_saving"] = False
+                    return
+                state["novedad_saving"] = False
+                guardar.disabled = False
+                progreso.visible = False
+                if not resultado.ok:
+                    error.value = resultado.mensaje
+                    error.visible = True
+                    page.update()
+                    return
+                dialog.open = False
+                invalidar_dashboard()
+                invitado_uuid = str(invitado.get("invitado_uuid") or "")
+                if state.get("invitado_detalle") and str(state["invitado_detalle"].get("invitado_uuid")) == invitado_uuid:
+                    cargar_detalle_invitado_uuid(invitado_uuid, navegar=False)
+                if state.get("invitados_event_key") == active_key:
+                    cargar_invitados(reset=True)
+                if state.get("arrivals_event_key") == active_key and state.get("arrivals_invitacion"):
+                    grupo = cargar_grupo_invitacion(contexto_usuario.get("evento_actual"), invitado, supabase=supabase)
+                    if grupo.ok:
+                        state["arrivals_invitacion"] = grupo.invitacion
+                        state["arrivals_integrantes"] = grupo.invitados
+                page.show_dialog(ft.SnackBar(content=ft.Text(resultado.mensaje)))
+                render()
+
+            page.run_thread(worker)
+
+        def solicitar_guardado(e: Any = None) -> None:
+            if existente and not str(campo.value or "").strip():
+                mostrar_dialogo_confirmacion(
+                    "Eliminar novedad",
+                    "¿Desea eliminar la novedad registrada?",
+                    "Eliminar",
+                    ejecutar_guardado,
+                )
+            else:
+                ejecutar_guardado()
+
+        if editable:
+            guardar.on_click = solicitar_guardado
+            dialog.actions = [ft.TextButton(content="Cancelar", on_click=cerrar), guardar]
+        else:
+            dialog.actions = [ft.TextButton(content="Cerrar", on_click=cerrar)]
+        page.show_dialog(dialog)
 
     def mostrar_dialogo_confirmacion(
         titulo: str,

@@ -4,6 +4,8 @@ from typing import Any
 
 import flet as ft
 
+from services.time_service import hora_panama
+
 
 def _get(source: dict[str, Any] | None, key: str, default: str = "-") -> Any:
     if not source:
@@ -51,6 +53,11 @@ def _resultado_card(invitado: dict[str, Any], on_select: Any) -> ft.Control:
                             size=12,
                             color=ft.Colors.ON_SURFACE_VARIANT,
                         ),
+                        ft.Text(
+                            f"{('Prin' if invitado.get('es_invitado_principal') else 'Acom')} · Novedad: {'Sí' if invitado.get('tiene_novedad') else 'No'}",
+                            size=12,
+                            color=ft.Colors.ON_SURFACE_VARIANT,
+                        ),
                     ],
                     spacing=3,
                     expand=True,
@@ -68,6 +75,44 @@ def _resultado_card(invitado: dict[str, Any], on_select: Any) -> ft.Control:
     )
 
 
+def _resultados_table(resultados: list[dict[str, Any]], on_select: Any) -> ft.Control:
+    rows = []
+    for invitado in resultados:
+        llegada = bool(invitado.get("llegada_confirmada"))
+        grupo = "Prin" if invitado.get("es_invitado_principal") else "Acom"
+        invitacion = invitado.get("invitacion_id")
+        rows.append(ft.DataRow(cells=[
+            ft.DataCell(ft.Text(str(_get(invitado, "nombre_completo", "Invitado sin nombre")))),
+            ft.DataCell(ft.Text(f"{invitacion} - {grupo}" if invitacion is not None else grupo)),
+            ft.DataCell(ft.Text(str(_get(invitado, "mesa_texto", "Sin mesa")))),
+            ft.DataCell(ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE if llegada else ft.Icons.SCHEDULE, size=18), ft.Text("Llegó" if llegada else "Pendiente")], spacing=6)),
+            ft.DataCell(ft.Text("Sí" if invitado.get("tiene_novedad") else "No")),
+            ft.DataCell(ft.FilledTonalButton(content="Seleccionar", icon=ft.Icons.GROUP, on_click=lambda e, item=invitado: on_select(item))),
+        ]))
+    return ft.Row([ft.DataTable(
+        columns=[ft.DataColumn(label) for label in ("Invitado", "Invitación / Grupo", "Mesa", "Estado", "Novedad", "Acciones")],
+        rows=rows,
+        column_spacing=18,
+        heading_row_color=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+        border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+        border_radius=10,
+        data_row_min_height=52,
+        data_row_max_height=72,
+        data={"arrivals_grid": "search"},
+    )], scroll=ft.ScrollMode.AUTO)
+
+
+def _novedad_action(invitado: dict[str, Any], on_novelty: Any, can_edit_novelty: bool) -> ft.Control | None:
+    if not invitado.get("tiene_novedad") and not can_edit_novelty:
+        return None
+    readonly = not can_edit_novelty
+    return ft.IconButton(
+        icon=ft.Icons.VISIBILITY if readonly else (ft.Icons.EDIT_NOTE if invitado.get("tiene_novedad") else ft.Icons.NOTE_ADD),
+        tooltip="Ver novedad" if readonly else ("Ver / Editar novedad" if invitado.get("tiene_novedad") else "Registrar novedad"),
+        on_click=lambda e: on_novelty(invitado),
+    )
+
+
 def construir_fila_llegada(
     invitado: dict[str, Any],
     selected: bool,
@@ -75,12 +120,15 @@ def construir_fila_llegada(
     can_reverse_arrival: bool,
     on_toggle: Any,
     on_reverse_arrival: Any,
+    on_novelty: Any,
+    can_edit_novelty: bool = True,
 ) -> ft.Control:
     llegada = bool(invitado.get("llegada_confirmada"))
     invitado_id = _get(invitado, "invitado_id", "sin_id")
     nombre = str(_get(invitado, "nombre_completo", "Invitado sin nombre"))
     mesa = str(_get(invitado, "mesa_texto", "Sin mesa"))
     puesto = str(_get(invitado, "puesto_texto", "Sin puesto"))
+    hora_llegada = hora_panama(invitado.get("fecha_hora_conf_llegada")) if llegada else None
     print("[LLEGADAS][INFO] Construyendo fila de invitado:", invitado_id)
 
     accion: ft.Control
@@ -109,6 +157,18 @@ def construir_fila_llegada(
                         [
                             ft.Text(nombre, size=15, weight=ft.FontWeight.W_600, overflow=ft.TextOverflow.ELLIPSIS),
                             ft.Text(f"{mesa} - {puesto}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                            ft.Text(
+                                f"Novedad: {'Sí' if invitado.get('tiene_novedad') else 'No'}",
+                                size=12,
+                                color=ft.Colors.ON_SURFACE_VARIANT,
+                                tooltip=invitado.get("descripcion_novedad") or None,
+                            ),
+                            ft.Text(
+                                f"Hora de llegada: {hora_llegada}",
+                                size=12,
+                                color=ft.Colors.ON_SURFACE_VARIANT,
+                                visible=bool(hora_llegada),
+                            ),
                         ],
                         spacing=3,
                     ),
@@ -122,7 +182,7 @@ def construir_fila_llegada(
                     col={"xs": 6, "sm": 2, "md": 2},
                 ),
                 ft.Container(
-                    content=accion,
+                    content=ft.Row([item for item in (_novedad_action(invitado, on_novelty, can_edit_novelty), accion) if item is not None], spacing=0, alignment=ft.MainAxisAlignment.END),
                     alignment=ft.Alignment.CENTER_RIGHT,
                     col={"xs": 6, "sm": 3, "md": 3},
                 ),
@@ -159,7 +219,11 @@ def arrivals_view(
     on_confirm_selected: Any,
     on_reverse_arrival: Any,
     on_retry: Any,
+    on_novelty: Any = None,
+    is_mobile: bool = False,
+    can_edit_novelty: bool = True,
 ) -> ft.Control:
+    on_novelty = on_novelty or (lambda invitado: None)
     evento = contexto.get("evento_actual") or {}
     if not contexto.get("puede_registrar_llegadas"):
         return ft.ListView(
@@ -240,7 +304,10 @@ def arrivals_view(
         controls.append(_state_card("Sin resultados", "No se encontraron invitados con ese criterio.", ft.Icons.PEOPLE_OUTLINE))
     elif resultados:
         controls.append(ft.Text("Selecciona una persona para cargar toda su invitacion.", size=14, weight=ft.FontWeight.W_600))
-        controls.append(ft.Column([_resultado_card(item, on_select_guest) for item in resultados], spacing=8))
+        controls.append(
+            ft.ResponsiveRow([_resultado_card(item, on_select_guest) for item in resultados], spacing=8, run_spacing=8, data={"arrivals_grid": "search_cards"})
+            if is_mobile else _resultados_table(resultados, on_select_guest)
+        )
 
     if invitacion:
         print(
@@ -260,6 +327,8 @@ def arrivals_view(
                         can_reverse_arrival,
                         on_toggle_guest,
                         on_reverse_arrival,
+                        on_novelty,
+                        can_edit_novelty,
                     )
                 )
             except Exception as ex:
@@ -275,7 +344,39 @@ def arrivals_view(
 
         lista_integrantes: ft.Control
         if filas_integrantes:
-            lista_integrantes = ft.Column(filas_integrantes, spacing=8)
+            if is_mobile:
+                lista_integrantes = ft.Column(filas_integrantes, spacing=8, data={"arrivals_grid": "confirmation_cards"})
+            else:
+                desktop_rows = []
+                for item in integrantes:
+                    llegada = bool(item.get("llegada_confirmada"))
+                    selected = str(item.get("invitado_uuid")) in seleccionados
+                    if llegada and can_reverse_arrival:
+                        confirm_action = ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revertir llegada", disabled=is_saving, on_click=lambda e, row=item: on_reverse_arrival(row))
+                    elif llegada:
+                        confirm_action = ft.Text("Confirmada", size=12)
+                    else:
+                        confirm_action = ft.Checkbox(value=selected, disabled=is_saving, on_change=lambda e, row=item: on_toggle_guest(row, bool(e.control.value)))
+                    novelty_action = _novedad_action(item, on_novelty, can_edit_novelty)
+                    desktop_rows.append(ft.DataRow(cells=[
+                        ft.DataCell(ft.Text(f"{_get(item, 'nombre_completo', 'Invitado')} · {('Prin' if item.get('es_invitado_principal') else 'Acom')}")),
+                        ft.DataCell(ft.Text(str(_get(item, "mesa_texto", "Sin mesa")))),
+                        ft.DataCell(ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE if llegada else ft.Icons.SCHEDULE, size=18), ft.Text("Llegó" if llegada else "Pendiente")], spacing=6)),
+                        ft.DataCell(ft.Text(hora_panama(item.get("fecha_hora_conf_llegada")) or "—")),
+                        ft.DataCell(ft.Row([ft.Text("Sí" if item.get("tiene_novedad") else "No"), *([novelty_action] if novelty_action else [])], spacing=2)),
+                        ft.DataCell(confirm_action),
+                    ]))
+                lista_integrantes = ft.Row([ft.DataTable(
+                    columns=[ft.DataColumn(label) for label in ("Invitado", "Mesa", "Estado", "Hora llegada", "Novedad", "Confirmación")],
+                    rows=desktop_rows,
+                    column_spacing=18,
+                    heading_row_color=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+                    border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                    border_radius=10,
+                    data_row_min_height=52,
+                    data_row_max_height=72,
+                    data={"arrivals_grid": "confirmation"},
+                )], scroll=ft.ScrollMode.AUTO)
         else:
             lista_integrantes = ft.Container(
                 content=ft.Text(

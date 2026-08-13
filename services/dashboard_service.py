@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 from services.authorization_service import puede_consultar
 from services.evento_context_service import evento_key
 from services.response_utils import extract_data, safe_get, to_dict
+from services.time_service import PANAMA_TIMEZONE, instante_panama, parse_instant
 
 
 @dataclass(frozen=True)
@@ -85,17 +86,11 @@ class DashboardRefreshController:
 
 
 def _datetime(value: Any) -> datetime | None:
-    if value in (None, ""):
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return parse_instant(value)
 
 
 def _hora(value: datetime, zona: Any = None) -> str:
-    local = value.astimezone(zona) if zona is not None else value
+    local = value.astimezone(zona or PANAMA_TIMEZONE)
     hour = local.hour % 12 or 12
     suffix = "a. m." if local.hour < 12 else "p. m."
     return f"{hour}:{local.minute:02d} {suffix}"
@@ -112,11 +107,13 @@ def construir_intervalos_llegadas(
     inicio = _datetime(inicio_evento)
     if inicio is None:
         return ()
+    inicio = inicio.astimezone(PANAMA_TIMEZONE)
     cantidades = [0] * 8
     limite = inicio + timedelta(hours=2)
     for llegada in llegadas:
-        value = llegada if llegada.tzinfo is not None else llegada.replace(tzinfo=timezone.utc)
-        value = value.astimezone(inicio.tzinfo)
+        value = instante_panama(llegada)
+        if value is None:
+            continue
         if value < inicio or value >= limite:
             continue
         index = int((value - inicio).total_seconds() // 900)
@@ -168,7 +165,6 @@ def calcular_indicadores_dashboard(
         and (value := _datetime(safe_get(row, "ivt_fecha_hora_conf_llegada"))) is not None
     )
     inicio = _datetime(inicio_evento)
-    zona = inicio.tzinfo if inicio is not None else (timestamps[0].tzinfo if timestamps else None)
 
     mesas_activas = {
         int(value) for row in mesas
@@ -203,8 +199,8 @@ def calcular_indicadores_dashboard(
         mesas_sin_llegadas=mesas_sin_llegadas,
         porcentaje_mesas_completas=(mesas_completas / len(mesas_activas) * 100) if mesas_activas else 0.0,
         invitados_con_novedades=invitados_con_novedades,
-        primera_llegada=_hora(timestamps[0], zona) if timestamps else "Sin llegadas",
-        ultima_llegada=_hora(timestamps[-1], zona) if timestamps else "Sin llegadas",
+        primera_llegada=_hora(timestamps[0], PANAMA_TIMEZONE) if timestamps else "Sin llegadas",
+        ultima_llegada=_hora(timestamps[-1], PANAMA_TIMEZONE) if timestamps else "Sin llegadas",
         intervalos_llegadas=construir_intervalos_llegadas(inicio_evento, timestamps),
         inicio_evento_valido=inicio is not None,
     )

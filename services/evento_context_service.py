@@ -9,6 +9,21 @@ EVENTOS_DISPONIBLES_SESSION_KEY = "eventos_disponibles"
 USUARIO_CONTEXTO_SESSION_KEY = "usuario_contexto"
 
 
+def rol_visible_contextual(contexto: dict[str, Any] | None) -> str:
+    if not contexto:
+        return "Sin rol"
+    if contexto.get("usr_es_usuario_master") is True:
+        return "Master"
+    rol = str((contexto.get("cuenta_actual") or {}).get("rol") or "").strip()
+    return rol or "Sin rol"
+
+
+def actualizar_rol_visible(contexto: dict[str, Any]) -> str:
+    rol = rol_visible_contextual(contexto)
+    contexto["rol_visible_contextual"] = rol
+    return rol
+
+
 def evento_key(evento: dict[str, Any] | None) -> tuple[int, int] | None:
     if not evento:
         return None
@@ -51,6 +66,8 @@ def establecer_evento_activo(
             contexto["cuenta_actual"] = cuenta
             break
 
+    actualizar_rol_visible(contexto)
+
     capacidades = capacidades_contexto(contexto)
     contexto["puede_registrar_llegadas"] = bool(
         capacidades.puede_registrar_llegada
@@ -80,6 +97,7 @@ def construir_contexto_evento_activo(
 def limpiar_evento_activo(contexto: dict[str, Any]) -> None:
     contexto["evento_actual"] = None
     contexto["puede_registrar_llegadas"] = False
+    actualizar_rol_visible(contexto)
     contexto["capacidades"] = resumen_capacidades(contexto)
 
 

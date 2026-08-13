@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import services.auth_service as auth_service
+import config as app_config
 import views.login_view as login_view
 
 
@@ -39,7 +40,11 @@ class FakeAuth:
         redirect_url = credentials["options"]["redirect_to"]
         self.redirect_urls.append(redirect_url)
         return SimpleNamespace(
-            url=f"https://supabase.example/authorize?session={self.name}"
+            url="https://supabase.example/authorize?" + urlencode({
+                "provider": "google",
+                "prompt": "select_account",
+                "redirect_to": redirect_url,
+            })
         )
 
     def exchange_code_for_session(self, params: dict[str, str]) -> Any:
@@ -74,9 +79,10 @@ class FakeClient:
 
 
 class FakePage:
-    def __init__(self, *, web: bool, platform: str) -> None:
+    def __init__(self, *, web: bool, platform: str, url: str = "http://127.0.0.1:8560/") -> None:
         self.web = web
         self.platform = platform
+        self.url = url
         self.login_calls = 0
         self.authorization: auth_service.SupabaseWebAuthorization | None = None
         self.added_controls: list[Any] = []
@@ -143,9 +149,14 @@ def find_control(root: Any, *, content: str) -> Any:
 
 def assert_platform_strategies() -> None:
     web = FakePage(web=True, platform="windows")
+    android_web = FakePage(web=True, platform="android")
+    ios_web = FakePage(web=True, platform="ios")
     desktop = FakePage(web=False, platform="windows")
     android = FakePage(web=False, platform="android")
+    ios = FakePage(web=False, platform="ios")
     assert auth_service.detect_oauth_strategy(web) == auth_service.OAUTH_STRATEGY_WEB
+    assert auth_service.detect_oauth_strategy(android_web) == auth_service.OAUTH_STRATEGY_WEB
+    assert auth_service.detect_oauth_strategy(ios_web) == auth_service.OAUTH_STRATEGY_WEB
     assert (
         auth_service.detect_oauth_strategy(desktop)
         == auth_service.OAUTH_STRATEGY_DESKTOP
@@ -154,6 +165,79 @@ def assert_platform_strategies() -> None:
         auth_service.detect_oauth_strategy(android)
         == auth_service.OAUTH_STRATEGY_ANDROID
     )
+    assert auth_service.detect_oauth_strategy(ios) == auth_service.OAUTH_STRATEGY_IOS
+
+
+def assert_web_redirect_resolution() -> None:
+    original_public = app_config.EVENTPLUS_PUBLIC_BASE_URL
+    original_fallback = app_config.EVENTPLUS_WEB_OAUTH_REDIRECT_URL
+    try:
+        app_config.EVENTPLUS_PUBLIC_BASE_URL = "https://eventplus.example.com/"
+        base, redirect, source = app_config.resolve_web_oauth_redirect_url("http://192.168.1.45:8560/")
+        assert (base, redirect, source) == (
+            "https://eventplus.example.com",
+            "https://eventplus.example.com/auth/callback",
+            "config",
+        )
+
+        app_config.EVENTPLUS_PUBLIC_BASE_URL = ""
+        local = app_config.resolve_web_oauth_redirect_url("http://127.0.0.1:8560/")
+        websocket_local = app_config.resolve_web_oauth_redirect_url("ws://127.0.0.1:8560")
+        lan = app_config.resolve_web_oauth_redirect_url("http://192.168.1.45:8560/")
+        websocket_lan = app_config.resolve_web_oauth_redirect_url("ws://192.168.1.45:8560")
+        websocket_https = None
+        app_config.EVENTPLUS_PUBLIC_BASE_URL = "https://eventplus.example.com"
+        websocket_https = app_config.resolve_web_oauth_redirect_url("wss://internal.example")
+        app_config.EVENTPLUS_PUBLIC_BASE_URL = ""
+        other_lan = app_config.resolve_web_oauth_redirect_url("http://192.168.0.27:8560/")
+        assert local == ("http://127.0.0.1:8560", "http://127.0.0.1:8560/auth/callback", "request")
+        assert websocket_local == local
+        assert lan[1] == "http://192.168.1.45:8560/auth/callback" and lan[2] == "request"
+        assert websocket_lan == lan
+        assert websocket_https[1] == "https://eventplus.example.com/auth/callback"
+        assert other_lan[1] == "http://192.168.0.27:8560/auth/callback"
+        assert lan != other_lan and all("localhost:3000" not in value for value in (local[1], lan[1], other_lan[1]))
+
+        app_config.EVENTPLUS_WEB_OAUTH_REDIRECT_URL = "http://127.0.0.1:8560/auth/callback"
+        assert app_config.resolve_web_oauth_redirect_url(None)[2] == "fallback"
+        for invalid in ("not-a-url", "ftp://192.168.1.2", "http://user:pass@192.168.1.2", "https://example.com/path"):
+            app_config.EVENTPLUS_PUBLIC_BASE_URL = invalid
+            try:
+                app_config.resolve_web_oauth_redirect_url("http://127.0.0.1:8560/")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"Configuración inválida aceptada: {invalid}")
+
+        app_config.EVENTPLUS_PUBLIC_BASE_URL = ""
+        try:
+            app_config.resolve_web_oauth_redirect_url("https://attacker.example/")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Un host público de request no configurado debe rechazarse.")
+    finally:
+        app_config.EVENTPLUS_PUBLIC_BASE_URL = original_public
+        app_config.EVENTPLUS_WEB_OAUTH_REDIRECT_URL = original_fallback
+
+
+def assert_final_supabase_authorization_url() -> None:
+    for host in ("127.0.0.1", "192.168.22.201"):
+        client = FakeClient(f"url-{host}")
+        callback = f"http://{host}:8560/auth/callback"
+        authorization = auth_service.SupabaseWebAuthorization(
+            auth_service.SupabaseWebOAuthProvider(client, callback),
+            fetch_user=False,
+            fetch_groups=False,
+        )
+        final_url, _ = authorization.get_authorization_data()
+        summary = auth_service.summarize_authorization_url(final_url)
+        assert summary["path"] == "/authorize"
+        assert "redirect_to" in summary["params"]
+        assert "redirect_uri" not in summary["params"]
+        assert summary["provider_redirect_uri"] is None
+        assert summary["supabase_redirect_to"] == callback
+        assert summary["redirect_params"] == ["state"]
 
 
 async def create_web_attempt(
@@ -401,11 +485,23 @@ async def assert_success_cancels_timeout_exactly_once() -> None:
     assert client.auth.exchanged_codes == ["success-code"]
 
 
+def assert_redirect_frozen_per_attempt() -> None:
+    attempt = auth_service.WebOAuthAttempt(FakePage(web=True, platform="windows"))
+    attempt.freeze_redirect("http://127.0.0.1:8560/auth/callback", "request")
+    attempt.freeze_redirect("http://127.0.0.1:8560/auth/callback", "request")
+    try:
+        attempt.freeze_redirect("http://192.168.1.45:8560/auth/callback", "request")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("El redirect de un intento no puede cambiar.")
+
+
 async def assert_page_ui_pending_cancel_timeout_and_retry() -> None:
     original_timeout = login_view.EVENTPLUS_WEB_OAUTH_ATTEMPT_TIMEOUT_SECONDS
     login_view.EVENTPLUS_WEB_OAUTH_ATTEMPT_TIMEOUT_SECONDS = 0.02
     try:
-        page = FakePage(web=True, platform="windows")
+        page = FakePage(web=True, platform="android", url="ws://192.168.1.45:8560")
         client = FakeClient("ui")
         login_view.build_login_view(page, client)
         root = page.added_controls[0]
@@ -417,6 +513,10 @@ async def assert_page_ui_pending_cancel_timeout_and_retry() -> None:
         await login_button.on_click(SimpleNamespace())
         first_authorization = page.authorization
         assert page.login_calls == 1
+        assert client.auth.redirect_urls[0].startswith(
+            "http://192.168.1.45:8560/auth/callback?state="
+        )
+        assert auth_service.detect_oauth_strategy(page) == auth_service.OAUTH_STRATEGY_WEB
         assert page.on_login_was_set_at_login
         assert login_button.disabled
         assert cancel_button.visible
@@ -565,6 +665,9 @@ async def assert_callback_neutralizes_timeout_during_slow_phases() -> None:
 
 async def main_async() -> None:
     assert_platform_strategies()
+    assert_web_redirect_resolution()
+    assert_final_supabase_authorization_url()
+    assert_redirect_frozen_per_attempt()
     await assert_web_does_not_use_desktop_callback_resources()
     await assert_state_session_and_client_isolation()
     await assert_expired_invalid_and_provider_error_callbacks()

@@ -37,6 +37,10 @@ SELECT_INVITADO = (
     "ivt_usuario_conf_llegada,"
     "ivt_tiene_novedad,"
     "ivt_descripcion_novedad,"
+    "ivt_novedad_creada,"
+    "ivt_novedad_creada_por,"
+    "ivt_novedad_mod,"
+    "ivt_novedad_mod_por,"
     "ivt_estado"
 )
 
@@ -46,8 +50,8 @@ FILTROS_INVITADOS = {
     "pendientes",
     "con_mesa",
     "sin_mesa",
-    "previstos",
-    "imprevistos",
+    "con_novedad",
+    "sin_novedad",
 }
 
 TIPO_BUSQUEDA_INVITADO = "invitado"
@@ -153,7 +157,10 @@ def _estado_llegada(confirmada: bool) -> str:
     return "Llegada confirmada" if confirmada else "Pendiente de llegada"
 
 
-def normalizar_invitado(row: dict[str, Any]) -> dict[str, Any] | None:
+def normalizar_invitado(
+    row: dict[str, Any],
+    nombres_mesa: dict[int, str] | None = None,
+) -> dict[str, Any] | None:
     cuenta_id = _normalizar_id(safe_get(row, "ivt_cuenta_id"))
     evento_id = _normalizar_id(safe_get(row, "ivt_evento_id"))
     invitacion_id = _normalizar_id(safe_get(row, "ivt_invitacion_id"))
@@ -184,7 +191,11 @@ def normalizar_invitado(row: dict[str, Any]) -> dict[str, Any] | None:
         "email": _texto(safe_get(row, "ivt_email")),
         "telefono": _texto(safe_get(row, "ivt_telefono")),
         "mesa_id": mesa_id,
-        "mesa_texto": f"Mesa {mesa_id}" if mesa_id is not None else "Sin mesa",
+        "mesa_texto": (
+            (nombres_mesa or {}).get(mesa_id, f"Mesa {mesa_id}")
+            if mesa_id is not None
+            else "Sin mesa"
+        ),
         "puesto_id": puesto_id,
         "puesto_texto": f"Puesto {puesto_id}" if puesto_id is not None else "Sin puesto",
         "llegada_confirmada": llegada_confirmada,
@@ -193,8 +204,66 @@ def normalizar_invitado(row: dict[str, Any]) -> dict[str, Any] | None:
         "usuario_conf_llegada": _texto(safe_get(row, "ivt_usuario_conf_llegada")),
         "tiene_novedad": _normalizar_bool(safe_get(row, "ivt_tiene_novedad")),
         "descripcion_novedad": _texto(safe_get(row, "ivt_descripcion_novedad")),
+        "novedad_creada": safe_get(row, "ivt_novedad_creada"),
+        "novedad_creada_por": _texto(safe_get(row, "ivt_novedad_creada_por")),
+        "novedad_mod": safe_get(row, "ivt_novedad_mod"),
+        "novedad_mod_por": _texto(safe_get(row, "ivt_novedad_mod_por")),
         "estado": _texto(safe_get(row, "ivt_estado")) or "Sin estado",
     }
+
+
+_MENSAJES_NOVEDAD = {
+    "UNAUTHENTICATED": "La sesión no es válida. Inicia sesión nuevamente.",
+    "ACTOR_NOT_FOUND": "No fue posible identificar el usuario de EventPlus.",
+    "ACTOR_INACTIVE": "El usuario no está activo para registrar novedades.",
+    "INVITADO_NOT_FOUND": "El invitado ya no está disponible.",
+    "EVENTO_INACTIVE": "El evento no está activo.",
+    "CUENTA_INACTIVE": "La cuenta no está activa.",
+    "FORBIDDEN": "No tiene permisos para registrar novedades para este invitado.",
+    "CONSULTA_READ_ONLY": "Su perfil permite consultar la novedad, pero no modificarla.",
+    "EVENT_PHASE_READ_ONLY": "El evento está en una fase de solo lectura.",
+    "INVALID_DESCRIPTION": "La descripción de la novedad no es válida.",
+    "DESCRIPTION_TOO_LONG": "La novedad no puede exceder 200 caracteres.",
+}
+
+
+def guardar_novedad(
+    invitado_uuid: str,
+    descripcion: str | None,
+    supabase: Any = None,
+) -> ResultadoOperacionInvitado:
+    invitado_uuid = _texto(invitado_uuid)
+    if not invitado_uuid:
+        return _resultado_operacion("invalid_guest", "No fue posible identificar el invitado.")
+    descripcion_normalizada = (descripcion or "").strip()
+    if len(descripcion_normalizada) > 200:
+        return _resultado_operacion("description_too_long", _MENSAJES_NOVEDAD["DESCRIPTION_TOO_LONG"])
+    supabase = _require_supabase(supabase)
+    try:
+        response = supabase.rpc(
+            "evp_admin_guardar_novedad_invitado",
+            {"p_invitado_uuid": invitado_uuid, "p_descripcion": descripcion_normalizada or None},
+        ).execute()
+    except Exception as ex:
+        print("[INVITADOS][ERROR] Error RPC al guardar novedad:", type(ex).__name__, str(ex))
+        return _resultado_operacion("connection_error", "No fue posible guardar la novedad. Intenta nuevamente.")
+    data = extract_data(response)
+    payload = to_dict(data[0]) if isinstance(data, list) and data else to_dict(data)
+    payload = payload or {}
+    codigo = _texto(safe_get(payload, "codigo")) or "UNKNOWN"
+    if not bool(safe_get(payload, "ok", False)) or codigo != "OK":
+        return _resultado_operacion(codigo.lower(), _MENSAJES_NOVEDAD.get(codigo, "No fue posible guardar la novedad."))
+    return _resultado_operacion(
+        "success",
+        "Novedad guardada correctamente." if bool(safe_get(payload, "tiene_novedad", False)) else "Novedad eliminada correctamente.",
+        {
+            "invitado_uuid": invitado_uuid,
+            "tiene_novedad": bool(safe_get(payload, "tiene_novedad", False)),
+            "descripcion_novedad": _texto(safe_get(payload, "descripcion")),
+            "novedad_creada": safe_get(payload, "novedad_creada"),
+            "novedad_mod": safe_get(payload, "novedad_modificada"),
+        },
+    )
 
 
 def normalizar_invitacion(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -264,6 +333,18 @@ def puede_registrar_imprevisto(contexto: dict[str, Any] | None) -> bool:
 
 def puede_eliminar_imprevisto(contexto: dict[str, Any] | None) -> bool:
     return capacidades_contexto(contexto).puede_eliminar_invitado and autorizado_registrar_imprevisto(contexto)
+
+
+def puede_editar_novedad(contexto: dict[str, Any] | None) -> bool:
+    if not contexto or not contexto.get("usr_usuario_id") or not _evento_autorizado(contexto):
+        return False
+    evento = contexto.get("evento_actual") or {}
+    capacidades = capacidades_contexto(contexto)
+    return bool(
+        evento.get("estado") == "Activo"
+        and evento.get("fase_evento") in {"Pre_evento", "En_proceso"}
+        and (capacidades.puede_administrar or capacidades.puede_operar_evento)
+    )
 
 
 def _resultado_operacion(estado: str, mensaje: str, invitado: dict[str, Any] | None = None) -> ResultadoOperacionInvitado:
@@ -400,10 +481,10 @@ def _aplicar_filtro(query: Any, filtro: str) -> Any:
         return query.not_.is_("ivt_mesa_id", "null")
     if filtro == "sin_mesa":
         return query.is_("ivt_mesa_id", "null")
-    if filtro == "previstos":
-        return query.eq("ivt_es_invitado_imprevisto", False)
-    if filtro == "imprevistos":
-        return query.eq("ivt_es_invitado_imprevisto", True)
+    if filtro == "con_novedad":
+        return query.eq("ivt_tiene_novedad", True)
+    if filtro == "sin_novedad":
+        return query.eq("ivt_tiene_novedad", False)
     return query
 
 
@@ -415,39 +496,43 @@ def _normalizar_tipo_busqueda(tipo_busqueda: str | None) -> str:
     return TIPO_BUSQUEDA_INVITADO
 
 
-def _mesa_visible_normalizada(mesa_id: int) -> str:
-    return _normalizar_busqueda(f"Mesa {mesa_id}")
+def _cargar_nombres_mesa(supabase: Any, key: tuple[int, int]) -> dict[int, str]:
+    response = (
+        supabase
+        .table("evp_mes_mesa")
+        .select("mes_mesa_id,mes_nombre_mesa")
+        .eq("mes_cuenta_id", key[0])
+        .eq("mes_evento_id", key[1])
+        .eq("mes_estado", "Activo")
+        .execute()
+    )
+    nombres: dict[int, str] = {}
+    for item in extract_data(response):
+        row = to_dict(item) or {}
+        mesa_id = _normalizar_id(safe_get(row, "mes_mesa_id"))
+        nombre = _texto(safe_get(row, "mes_nombre_mesa"))
+        if mesa_id is not None and nombre:
+            nombres[mesa_id] = nombre
+    return nombres
 
 
-def _mesa_coincide(mesa_id: int, patron: str) -> bool:
+def _mesa_coincide(mesa_id: int, nombre: str, patron: str) -> bool:
     if not patron:
         return True
-    mesa_texto = _mesa_visible_normalizada(mesa_id)
+    mesa_texto = _normalizar_busqueda(nombre)
     mesa_numero = _normalizar_busqueda(str(mesa_id))
     return patron in mesa_texto or patron in mesa_numero
 
 
 def _obtener_mesas_coincidentes(
-    supabase: Any,
-    key: tuple[int, int],
+    nombres_mesa: dict[int, str],
     patron: str,
 ) -> list[int]:
-    response = (
-        supabase
-        .table("evp_ivt_invitado")
-        .select("ivt_mesa_id")
-        .eq("ivt_cuenta_id", key[0])
-        .eq("ivt_evento_id", key[1])
-        .eq("ivt_estado", "Activo")
-        .not_.is_("ivt_mesa_id", "null")
-        .execute()
+    return sorted(
+        mesa_id
+        for mesa_id, nombre in nombres_mesa.items()
+        if _mesa_coincide(mesa_id, nombre, patron)
     )
-    mesas: set[int] = set()
-    for row in extract_data(response):
-        mesa_id = _normalizar_id(safe_get(to_dict(row) or {}, "ivt_mesa_id"))
-        if mesa_id is not None and _mesa_coincide(mesa_id, patron):
-            mesas.add(mesa_id)
-    return sorted(mesas)
 
 
 def _resultado_error_consulta(ex: Exception, limit: int, offset: int) -> ResultadoInvitados:
@@ -528,9 +613,10 @@ def listar_invitados(
     supabase = _require_supabase(supabase)
     mesas_coincidentes = 0
     try:
+        nombres_mesa = _cargar_nombres_mesa(supabase, key)
         mesas_filtradas: list[int] = []
         if tipo_busqueda == TIPO_BUSQUEDA_MESA and busqueda_normalizada:
-            mesas_filtradas = _obtener_mesas_coincidentes(supabase, key, busqueda_normalizada)
+            mesas_filtradas = _obtener_mesas_coincidentes(nombres_mesa, busqueda_normalizada)
             mesas_coincidentes = len(mesas_filtradas)
             print("[INVITADOS][INFO] Mesas coincidentes:", mesas_coincidentes)
             if not mesas_filtradas:
@@ -572,7 +658,7 @@ def listar_invitados(
     invitados = [
         invitado
         for row in extract_data(response)
-        if (invitado := normalizar_invitado(to_dict(row) or {})) is not None
+        if (invitado := normalizar_invitado(to_dict(row) or {}, nombres_mesa)) is not None
     ]
     has_more = len(invitados) > limit
     invitados = invitados[:limit]
@@ -1012,6 +1098,7 @@ def cargar_grupo_invitacion(
     )
     supabase = _require_supabase(supabase)
     try:
+        nombres_mesa = _cargar_nombres_mesa(supabase, key)
         invitacion_response = (
             supabase
             .table("evp_inv_invitacion")
@@ -1047,7 +1134,7 @@ def cargar_grupo_invitacion(
     invitados = [
         invitado
         for row in extract_data(invitados_response)
-        if (invitado := normalizar_invitado(to_dict(row) or {})) is not None
+        if (invitado := normalizar_invitado(to_dict(row) or {}, nombres_mesa)) is not None
     ]
     if not invitados:
         print("[INVITADOS][WARNING] Invitacion sin integrantes recuperables.")
@@ -1406,6 +1493,7 @@ def obtener_invitado_por_id(
     print("[INVITADOS][INFO] Consultando detalle de invitado.")
     supabase = _require_supabase(supabase)
     try:
+        nombres_mesa = _cargar_nombres_mesa(supabase, key)
         response = (
             supabase
             .table("evp_ivt_invitado")
@@ -1436,7 +1524,7 @@ def obtener_invitado_por_id(
             invitado=None,
         )
 
-    invitado = normalizar_invitado(to_dict(data[0]) or {})
+    invitado = normalizar_invitado(to_dict(data[0]) or {}, nombres_mesa)
     if not invitado:
         return ResultadoInvitadoDetalle(
             ok=False,

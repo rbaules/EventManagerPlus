@@ -13,6 +13,7 @@ from config import (
     APP_VERSION,
     EVENTPLUS_WEB_OAUTH_ATTEMPT_TIMEOUT_SECONDS,
     EVENTPLUS_WEB_OAUTH_REDIRECT_URL,
+    resolve_web_oauth_redirect_url,
     SUPABASE_OAUTH_REDIRECT_URL,
     get_oauth_redirect_url,
     is_checkin_mode,
@@ -20,6 +21,7 @@ from config import (
 from services.auth_service import (
     OAUTH_STRATEGY_ANDROID,
     OAUTH_STRATEGY_DESKTOP,
+    OAUTH_STRATEGY_IOS,
     OAUTH_STRATEGY_WEB,
     WEB_OAUTH_ATTEMPT_CANCELLED,
     WEB_OAUTH_ATTEMPT_CALLBACK_RECEIVED,
@@ -114,7 +116,10 @@ def build_login_view(
 ) -> None:
     session_controller = session_controller or PageSessionController(page, supabase)
     page.navigation_bar = None
-    print("[APP][INFO] Plataforma detectada:", page.platform)
+    runtime_mode = detect_oauth_strategy(page)
+    print(f"[RUNTIME][INFO] platform={page.platform}")
+    print(f"[RUNTIME][INFO] web={bool(getattr(page, 'web', False))}")
+    print(f"[RUNTIME][INFO] runtime_mode={runtime_mode.upper()}")
     status = ft.Text(initial_message or "Listo para iniciar sesion.", size=14, selectable=True, text_align=ft.TextAlign.CENTER)
     progress = ft.ProgressRing(width=22, height=22, visible=False)
 
@@ -661,7 +666,17 @@ def build_login_view(
 
     async def run_web_login_flow() -> None:
         nonlocal current_web_attempt
+        page_id = hex(id(page))
+        page_url_raw = str(getattr(page, "url", "") or "")
+        route_raw = str(getattr(page, "route", "") or "")
+        previous_status = current_web_attempt.status if current_web_attempt else "none"
+        print("[OAUTH][TRACE] login_clicked")
+        print(f"[OAUTH][TRACE] page_id={page_id}")
+        print(f"[OAUTH][TRACE] page_url_raw={page_url_raw}")
+        print(f"[OAUTH][TRACE] route={route_raw}")
+        print(f"[OAUTH][TRACE] attempt_state_before={previous_status}")
         if current_web_attempt is not None and current_web_attempt.pending:
+            print("[OAUTH][TRACE] duplicate_login_blocked")
             return
 
         await asyncio.to_thread(session_controller.clear_residual_session)
@@ -676,11 +691,28 @@ def build_login_view(
             "o pulsa Cancelar.",
         )
         try:
+            try:
+                print(f"[OAUTH][TRACE] base_url_candidate={page_url_raw or 'fallback'}")
+                base_url, redirect_to, source = resolve_web_oauth_redirect_url(
+                    page_url_raw or None
+                )
+                print(f"[OAUTH][TRACE] redirect_to_candidate={redirect_to}")
+            except ValueError as ex:
+                print(f"[OAUTH][ERROR] redirect_resolution_failed reason={type(ex).__name__}:{ex}")
+                attempt.transition(WEB_OAUTH_ATTEMPT_CANCELLED)
+                session_controller.clear_oauth_attempt(attempt)
+                current_web_attempt = None
+                set_web_attempt_ui(False, "No se pudo determinar la dirección de retorno para iniciar sesión.")
+                return
+            attempt.freeze_redirect(redirect_to, source)
+            print(f"[OAUTH][DEBUG] base_url={base_url}")
+            print(f"[OAUTH][DEBUG] redirect_to={redirect_to}")
+            print(f"[OAUTH][DEBUG] source={source}")
             attempt.trace("page_login_called")
             await start_web_oauth(
                 page,
                 supabase,
-                redirect_url=EVENTPLUS_WEB_OAUTH_REDIRECT_URL,
+                redirect_url=redirect_to,
                 attempt=attempt,
                 on_session_exchanged=prepare_server_session_after_exchange,
             )
@@ -716,6 +748,10 @@ def build_login_view(
             return
         if strategy == OAUTH_STRATEGY_ANDROID:
             await run_android_login_flow()
+            return
+        if strategy == OAUTH_STRATEGY_IOS:
+            set_status("El inicio de sesión nativo iOS no está configurado en esta versión.")
+            set_loading(False)
             return
         if strategy == OAUTH_STRATEGY_DESKTOP:
             threading.Thread(target=run_desktop_login_flow, daemon=True).start()

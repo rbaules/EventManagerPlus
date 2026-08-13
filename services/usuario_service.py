@@ -11,6 +11,7 @@ from services.authorization_service import (
     resumen_capacidades,
 )
 from services.response_utils import extract_data, safe_get, to_dict
+from services.evento_context_service import actualizar_rol_visible
 
 
 SELECT_USUARIO = (
@@ -487,6 +488,7 @@ def cargar_contexto_usuario(supabase: Any, auth_user_id: str) -> dict[str, Any]:
         "puede_administrar_usuarios": puede_administrar_usuarios,
     }
     contexto["capacidades"] = resumen_capacidades(contexto)
+    actualizar_rol_visible(contexto)
     return contexto
 
 

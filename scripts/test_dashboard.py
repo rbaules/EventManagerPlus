@@ -140,6 +140,19 @@ def test_intervalos_y_zona_horaria() -> None:
     assert intervals[1].inicio.date() > intervals[0].inicio.date()
     assert construir_intervalos_llegadas(None, arrivals) == ()
 
+    utc_crossing = calcular_indicadores_dashboard(
+        [
+            guest("utc-a", 1, True, "2026-08-13T01:15:00+00:00"),
+            guest("utc-b", 1, True, "2026-08-13T01:29:59+00:00"),
+        ],
+        [table(1)],
+        "2026-08-12T20:00:00-05:00",
+    )
+    assert utc_crossing.primera_llegada == "8:15 p. m."
+    assert utc_crossing.ultima_llegada == "8:29 p. m."
+    assert [item.cantidad for item in utc_crossing.intervalos_llegadas[:2]] == [0, 2]
+    assert utc_crossing.intervalos_llegadas[1].inicio.date().isoformat() == "2026-08-12"
+
 
 def test_roles_acceso_y_dos_consultas() -> None:
     for role in ("Master", "Administrador", "Operador", "Consulta"):

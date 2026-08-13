@@ -18,6 +18,7 @@ from services.evento_context_service import (
     limpiar_evento_activo,
     sincronizar_evento_activo,
     establecer_evento_activo,
+    rol_visible_contextual,
 )
 from services.evento_service import normalizar_evento, obtener_eventos_disponibles
 from views.dashboard_view import dashboard_view
@@ -222,6 +223,24 @@ def assert_active_event_context() -> None:
     assert contexto["evento_actual"] is None
 
 
+def assert_contextual_header_role() -> None:
+    contexto = base_context()
+    contexto["cuentas_permitidas"] = [
+        {"cuenta_id": 1, "nombre_cuenta": "Cuenta A", "rol": "Consulta"},
+        {"cuenta_id": 2, "nombre_cuenta": "Cuenta B", "rol": "Operador"},
+    ]
+    evento_a = {"cuenta_id": 1, "evento_id": 10, "rol": "Consulta", "fase_evento": "En_proceso", "estado": "Activo"}
+    evento_b = {"cuenta_id": 2, "evento_id": 20, "rol": "Operador", "fase_evento": "En_proceso", "estado": "Activo"}
+    establecer_evento_activo(contexto, evento_a)
+    assert rol_visible_contextual(contexto) == "Consulta"
+    establecer_evento_activo(contexto, evento_b)
+    assert rol_visible_contextual(contexto) == "Operador"
+    establecer_evento_activo(contexto, evento_a)
+    assert rol_visible_contextual(contexto) == "Consulta"
+    contexto["usr_es_usuario_master"] = True
+    assert rol_visible_contextual(contexto) == "Master"
+
+
 def assert_atomic_context_and_real_key() -> None:
     evento_uno = normalizar_evento(ROWS[0], {"rol": "Consulta"})
     evento_dos = normalizar_evento(ROWS[1], {"rol": "Operador"})
@@ -315,6 +334,7 @@ def main() -> int:
     assert_service_single_empty_error_and_invalid_session()
     assert_null_normalization()
     assert_active_event_context()
+    assert_contextual_header_role()
     assert_atomic_context_and_real_key()
     assert_selection_callbacks_capture_each_event()
     assert_async_selection_without_navigation_and_rollback()

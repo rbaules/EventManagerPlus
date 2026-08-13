@@ -27,6 +27,7 @@ from services.response_utils import pretty, safe_get, to_dict
 OAUTH_STRATEGY_WEB = "web"
 OAUTH_STRATEGY_DESKTOP = "desktop"
 OAUTH_STRATEGY_ANDROID = "android"
+OAUTH_STRATEGY_IOS = "ios"
 WEB_OAUTH_ATTEMPT_CREATED = "CREATED"
 WEB_OAUTH_ATTEMPT_WAITING_CALLBACK = "WAITING_CALLBACK"
 WEB_OAUTH_ATTEMPT_CALLBACK_RECEIVED = "CALLBACK_RECEIVED"
@@ -93,8 +94,17 @@ class WebOAuthAttempt:
         self.timeout_task: Any = None
         self.exchange_started = False
         self.connected = True
+        self.redirect_to: str | None = None
+        self.redirect_source: str | None = None
         self._transition_lock = threading.Lock()
         self.trace("attempt_created")
+
+    def freeze_redirect(self, redirect_to: str, source: str) -> None:
+        with self._transition_lock:
+            if self.redirect_to is not None and self.redirect_to != redirect_to:
+                raise ValueError("El redirect OAuth ya fue fijado para este intento.")
+            self.redirect_to = redirect_to
+            self.redirect_source = source
 
     @property
     def pending(self) -> bool:
@@ -226,10 +236,13 @@ class WebOAuthAttempt:
 
 
 def detect_oauth_strategy(page: Any) -> str:
-    if is_android_platform(getattr(page, "platform", None)):
-        return OAUTH_STRATEGY_ANDROID
     if bool(getattr(page, "web", False)):
         return OAUTH_STRATEGY_WEB
+    platform = str(getattr(page, "platform", "")).lower()
+    if is_android_platform(platform):
+        return OAUTH_STRATEGY_ANDROID
+    if platform.endswith("ios"):
+        return OAUTH_STRATEGY_IOS
     return OAUTH_STRATEGY_DESKTOP
 
 
@@ -252,6 +265,35 @@ def _redirect_url_with_state(redirect_url: str, state: str) -> str:
     params["state"] = [state]
     query = urlencode(params, doseq=True)
     return urlunparse(parsed._replace(query=query))
+
+
+def summarize_authorization_url(url: str) -> dict[str, Any]:
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    redirect_to = (params.get("redirect_to") or [""])[0]
+    redirect = urlparse(redirect_to)
+    redirect_params = parse_qs(redirect.query, keep_blank_values=True)
+    return {
+        "scheme": parsed.scheme,
+        "host": parsed.netloc,
+        "path": parsed.path,
+        "params": sorted(params),
+        "provider_redirect_uri": (params.get("redirect_uri") or [None])[0],
+        "supabase_redirect_to": (
+            urlunparse(redirect._replace(query="", fragment=""))
+            if redirect_to else None
+        ),
+        "redirect_params": sorted(redirect_params),
+    }
+
+
+def trace_authorization_url(url: str) -> None:
+    summary = summarize_authorization_url(url)
+    print(f"[OAUTH][TRACE] authorization_host={summary['host']}")
+    print(f"[OAUTH][TRACE] authorization_path={summary['path']}")
+    print(f"[OAUTH][TRACE] authorization_params={summary['params']}")
+    print(f"[OAUTH][TRACE] provider_redirect_uri={summary['provider_redirect_uri']}")
+    print(f"[OAUTH][TRACE] supabase_redirect_to={summary['supabase_redirect_to']}")
 
 
 class SupabaseWebOAuthProvider:
@@ -302,6 +344,7 @@ class SupabaseWebAuthorization:
             redirect_url=redirect_url,
             select_account=True,
         )
+        trace_authorization_url(authorization_url)
         return authorization_url, self.state
 
     def validate_callback_state(self, state: str, now: datetime | None = None) -> None:

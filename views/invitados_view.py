@@ -4,6 +4,8 @@ from typing import Any
 
 import flet as ft
 
+from services.time_service import fecha_hora_panama, hora_panama
+
 
 FILTRO_LABELS = {
     "todos": "Todos",
@@ -11,8 +13,8 @@ FILTRO_LABELS = {
     "pendientes": "Pendientes",
     "con_mesa": "Con mesa",
     "sin_mesa": "Sin mesa",
-    "previstos": "Previstos",
-    "imprevistos": "Imprevistos",
+    "con_novedad": "Con novedad",
+    "sin_novedad": "Sin novedad",
 }
 
 TIPO_BUSQUEDA_LABELS = {
@@ -68,85 +70,192 @@ def _chip(text: str, bgcolor: Any = ft.Colors.SURFACE_CONTAINER) -> ft.Control:
     )
 
 
-def _invitado_card(invitado: dict[str, Any], on_detail: Any) -> ft.Control:
+def _invitacion_texto(invitado: dict[str, Any]) -> str:
+    invitacion_id = invitado.get("invitacion_id")
+    grupo = "Prin" if invitado.get("es_invitado_principal") else "Acom"
+    return f"{invitacion_id} - {grupo}" if invitacion_id is not None else grupo
+
+
+def _invitacion_tooltip(invitado: dict[str, Any]) -> str:
+    invitacion_id = invitado.get("invitacion_id")
+    grupo = "Principal" if invitado.get("es_invitado_principal") else "Acompañante"
+    return f"Invitación {invitacion_id} - {grupo}" if invitacion_id is not None else grupo
+
+
+def _hora_llegada(invitado: dict[str, Any]) -> str:
+    if not invitado.get("llegada_confirmada"):
+        return "—"
+    value = invitado.get("fecha_hora_conf_llegada")
+    if value in (None, ""):
+        return "—"
+    try:
+        return hora_panama(value) or "Hora inválida"
+    except (TypeError, ValueError):
+        return "Hora inválida"
+
+
+def _acciones_invitado(
+    invitado: dict[str, Any],
+    on_detail: Any,
+    on_edit: Any,
+    on_confirm_arrival: Any,
+    on_reverse_arrival: Any,
+    can_manage: bool,
+    can_confirm_arrival: bool,
+    can_reverse_arrival: bool,
+    on_novelty: Any = None,
+    can_edit_novelty: bool = True,
+) -> list[ft.Control]:
+    on_novelty = on_novelty or (lambda invitado: None)
+    acciones: list[ft.Control] = [
+        ft.IconButton(
+            icon=ft.Icons.VISIBILITY,
+            tooltip="Ver detalle",
+            on_click=lambda e: on_detail(invitado),
+        )
+    ]
+    if invitado.get("tiene_novedad") or can_edit_novelty:
+        acciones.append(ft.IconButton(
+            icon=(ft.Icons.DESCRIPTION if not can_edit_novelty else ft.Icons.EDIT_NOTE)
+            if invitado.get("tiene_novedad") else ft.Icons.NOTE_ADD,
+            tooltip=("Ver novedad" if not can_edit_novelty else "Ver / Editar novedad")
+            if invitado.get("tiene_novedad") else "Registrar novedad",
+            on_click=lambda e: on_novelty(invitado),
+        ))
+    if can_manage and not invitado.get("es_invitado_imprevisto"):
+        acciones.append(
+            ft.IconButton(
+                icon=ft.Icons.EDIT,
+                tooltip="Editar invitado",
+                on_click=lambda e: on_edit(invitado),
+            )
+        )
+    if can_confirm_arrival and not invitado.get("llegada_confirmada"):
+        acciones.append(
+            ft.IconButton(
+                icon=ft.Icons.HOW_TO_REG,
+                tooltip="Registrar llegada",
+                on_click=lambda e: on_confirm_arrival(invitado),
+            )
+        )
+    if can_reverse_arrival and invitado.get("llegada_confirmada"):
+        acciones.append(
+            ft.IconButton(
+                icon=ft.Icons.UNDO,
+                tooltip="Reversar llegada",
+                on_click=lambda e: on_reverse_arrival(invitado),
+            )
+        )
+    return acciones
+
+
+def _invitado_card(
+    invitado: dict[str, Any],
+    on_detail: Any,
+    on_edit: Any,
+    on_confirm_arrival: Any,
+    on_reverse_arrival: Any,
+    can_manage: bool,
+    can_confirm_arrival: bool,
+    can_reverse_arrival: bool,
+    on_novelty: Any = None,
+    can_edit_novelty: bool = True,
+) -> ft.Control:
     llegada = bool(invitado.get("llegada_confirmada"))
     return ft.Container(
-        content=ft.ResponsiveRow(
+        content=ft.Column(
             [
-                ft.Container(
-                    content=ft.Column(
-                        [
-                            ft.Text(
-                                str(_get(invitado, "nombre_completo", "Invitado sin nombre")),
-                                size=15,
-                                weight=ft.FontWeight.W_600,
-                                overflow=ft.TextOverflow.ELLIPSIS,
-                            ),
-                            ft.Text(
-                                str(_get(invitado, "mesa_texto", "Sin mesa")),
-                                size=12,
-                                color=ft.Colors.ON_SURFACE_VARIANT,
-                            ),
-                        ],
-                        spacing=2,
+                ft.Row([
+                    ft.Icon(ft.Icons.PERSON, color=ft.Colors.PRIMARY),
+                    ft.Text(
+                        str(_get(invitado, "nombre_completo", "Invitado sin nombre")),
+                        weight=ft.FontWeight.BOLD,
+                        max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                        tooltip=str(_get(invitado, "nombre_completo", "Invitado sin nombre")),
+                        expand=True,
                     ),
-                    col={"xs": 12, "sm": 6, "md": 6},
-                ),
-                ft.Container(
-                    content=_chip(
+                    _chip(
                         "Llego" if llegada else "Pendiente",
                         ft.Colors.PRIMARY_CONTAINER if llegada else ft.Colors.SECONDARY_CONTAINER,
                     ),
-                    col={"xs": 6, "sm": 2, "md": 2},
+                ]),
+                ft.Text(f"{_get(invitado, 'mesa_texto', 'Sin mesa')} · {_invitacion_texto(invitado)}"),
+                ft.Text(
+                    f"Hora: {_hora_llegada(invitado)} · Novedad: {'Si' if invitado.get('tiene_novedad') else 'No'}",
+                    size=12,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                    tooltip=invitado.get("descripcion_novedad") or None,
                 ),
-                ft.Container(
-                    content=ft.Text(
-                        "Con novedad" if invitado.get("tiene_novedad") else "Sin novedad",
-                        size=12,
-                        color=ft.Colors.ON_SURFACE_VARIANT,
+                ft.Row(
+                    _acciones_invitado(
+                        invitado, on_detail, on_edit, on_confirm_arrival, on_reverse_arrival,
+                        can_manage, can_confirm_arrival, can_reverse_arrival, on_novelty, can_edit_novelty,
                     ),
-                    col={"xs": 6, "sm": 2, "md": 2},
-                ),
-                ft.Container(
-                    content=ft.IconButton(
-                        icon=ft.Icons.PERSON,
-                        tooltip="Ver detalle",
-                        on_click=lambda e: on_detail(invitado),
-                    ),
-                    alignment=ft.Alignment.CENTER_RIGHT,
-                    col={"xs": 12, "sm": 2, "md": 2},
+                    alignment=ft.MainAxisAlignment.END,
                 ),
             ],
-            columns=12,
             spacing=8,
-            run_spacing=4,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
-        padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-        border_radius=8,
-        bgcolor=ft.Colors.SURFACE,
+        padding=14,
+        border_radius=12,
+        bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
         border=ft.Border.all(width=1, color=ft.Colors.OUTLINE_VARIANT),
+        col={"xs": 12, "sm": 6},
     )
 
 
-def _invitado_card_admin(invitado: dict[str, Any], on_detail: Any, on_edit: Any, can_manage: bool) -> ft.Control:
-    card = _invitado_card(invitado, on_detail)
-    if not can_manage or invitado.get("es_invitado_imprevisto"):
-        return card
-    content = card.content
-    if isinstance(content, ft.ResponsiveRow):
-        content.controls.append(
-            ft.Container(
-                content=ft.IconButton(
-                    icon=ft.Icons.EDIT,
-                    tooltip="Editar invitado",
-                    on_click=lambda e: on_edit(invitado),
-                ),
-                alignment=ft.Alignment.CENTER_RIGHT,
-                col={"xs": 12, "sm": 2, "md": 2},
-            )
-        )
-    return card
+def _invitados_table(
+    invitados: list[dict[str, Any]],
+    on_detail: Any,
+    on_edit: Any,
+    on_confirm_arrival: Any,
+    on_reverse_arrival: Any,
+    can_manage: bool,
+    can_confirm_arrival: bool,
+    can_reverse_arrival: bool,
+    on_novelty: Any = None,
+    can_edit_novelty: bool = True,
+) -> ft.Control:
+    rows: list[ft.DataRow] = []
+    for invitado in invitados:
+        llegada = bool(invitado.get("llegada_confirmada"))
+        novedad = invitado.get("descripcion_novedad") or None
+        rows.append(ft.DataRow(cells=[
+            ft.DataCell(ft.Text(
+                str(_get(invitado, "nombre_completo", "Invitado sin nombre")),
+                max_lines=2,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                tooltip=str(_get(invitado, "nombre_completo", "Invitado sin nombre")),
+            )),
+            ft.DataCell(ft.Text(_invitacion_texto(invitado), max_lines=2, tooltip=_invitacion_tooltip(invitado))),
+            ft.DataCell(ft.Text(str(_get(invitado, "mesa_texto", "Sin mesa")))),
+            ft.DataCell(ft.Row([
+                ft.Icon(ft.Icons.CHECK_CIRCLE if llegada else ft.Icons.SCHEDULE, size=18),
+                ft.Text("Llego" if llegada else "Pendiente"),
+            ], spacing=6)),
+            ft.DataCell(ft.Text(_hora_llegada(invitado))),
+            ft.DataCell(ft.Text("Si" if invitado.get("tiene_novedad") else "No", tooltip=novedad)),
+            ft.DataCell(ft.Row(_acciones_invitado(
+                invitado, on_detail, on_edit, on_confirm_arrival, on_reverse_arrival,
+                can_manage, can_confirm_arrival, can_reverse_arrival, on_novelty, can_edit_novelty,
+            ), spacing=0)),
+        ]))
+    return ft.Row(
+        [ft.DataTable(
+            columns=[ft.DataColumn(label) for label in (
+                "Invitado", "Invitacion / Grupo", "Mesa", "Estado", "Hora llegada", "Novedad", "Acciones",
+            )],
+            rows=rows,
+            column_spacing=18,
+            heading_row_color=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+            border_radius=10,
+            data_row_min_height=52,
+            data_row_max_height=72,
+        )],
+        scroll=ft.ScrollMode.AUTO,
+    )
 
 
 def _detail_row(label: str, value: Any) -> ft.Control:
@@ -198,15 +307,17 @@ def _detail_panel(
     detalles.extend([
         _detail_row("Nombre", invitado.get("nombre_completo")),
         _detail_row("Llegada", invitado.get("estado_llegada")),
-        _detail_row("Fecha de llegada", invitado.get("fecha_hora_conf_llegada")),
+        _detail_row("Fecha de llegada (Panamá)", fecha_hora_panama(invitado.get("fecha_hora_conf_llegada")) or "-"),
         _detail_row("Mesa", invitado.get("mesa_texto")),
         _detail_row("Puesto", invitado.get("puesto_texto")),
         _detail_row("Tipo", invitado.get("tipo_invitado")),
         _detail_row("Origen", invitado.get("origen_invitado")),
         _detail_row("Email", invitado.get("email")),
         _detail_row("Telefono", invitado.get("telefono")),
-        _detail_row("Novedad", "Si" if invitado.get("tiene_novedad") else "No"),
+        _detail_row("Novedad", "Sí" if invitado.get("tiene_novedad") else "No"),
         _detail_row("Descripcion de novedad", invitado.get("descripcion_novedad")),
+        _detail_row("Novedad creada (Panamá)", fecha_hora_panama(invitado.get("novedad_creada")) or "-"),
+        _detail_row("Novedad modificada (Panamá)", fecha_hora_panama(invitado.get("novedad_mod")) or "-"),
     ])
     if acciones:
         detalles.append(ft.Row(acciones, spacing=8, wrap=True))
@@ -449,6 +560,9 @@ def invitados_view(
     on_confirm_arrival: Any,
     on_reverse_arrival: Any,
     on_delete_unexpected: Any,
+    on_novelty: Any = None,
+    is_mobile: bool = False,
+    can_edit_novelty: bool = True,
 ) -> ft.Control:
     evento = contexto.get("evento_actual") or {}
     if not evento:
@@ -580,7 +694,8 @@ def invitados_view(
                     ft.OutlinedButton(
                         content="Agregar imprevisto",
                         icon=ft.Icons.PERSON_ADD,
-                        disabled=(not can_manage_unexpected) or is_loading or is_saving,
+                        disabled=True,
+                        tooltip="Pendiente de bloque futuro: operación temporalmente deshabilitada.",
                         on_click=lambda e: on_new_unexpected_guest(),
                     ),
                 ],
@@ -617,17 +732,17 @@ def invitados_view(
         controls.append(_state_card("Busqueda pendiente", mensaje or "Presiona Buscar para consultar los invitados.", ft.Icons.SEARCH))
     else:
         controls.append(
-            ft.Column(
-                [
-                    _invitado_card_admin(
-                        invitado,
-                        on_detail,
-                        on_edit_guest,
-                        can_manage_planned,
-                    )
-                    for invitado in invitados
-                ],
-                spacing=6,
+            ft.ResponsiveRow([
+                _invitado_card(
+                    invitado, on_detail, on_edit_guest, on_confirm_arrival, on_reverse_arrival,
+                    can_manage_planned, can_confirm_arrival, can_reverse_arrival, on_novelty, can_edit_novelty,
+                )
+                for invitado in invitados
+            ])
+            if is_mobile
+            else _invitados_table(
+                invitados, on_detail, on_edit_guest, on_confirm_arrival, on_reverse_arrival,
+                can_manage_planned, can_confirm_arrival, can_reverse_arrival, on_novelty, can_edit_novelty,
             )
         )
         controls.append(

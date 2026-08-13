@@ -192,10 +192,12 @@ def test_escrituras_denegadas_antes_del_backend() -> None:
 
 def _walk(control: Any) -> list[Any]:
     encontrados = [control]
-    for attr in ("controls", "destinations"):
-        for child in getattr(control, attr, None) or []:
-            encontrados.extend(_walk(child))
-    for attr in ("content", "leading", "trailing"):
+    for attr in ("controls", "destinations", "rows", "cells", "columns"):
+        children = getattr(control, attr, None)
+        if isinstance(children, (list, tuple)):
+            for child in children:
+                encontrados.extend(_walk(child))
+    for attr in ("content", "leading", "trailing", "label"):
         child = getattr(control, attr, None)
         if child is not None and not isinstance(child, (str, int, float, bool)):
             encontrados.extend(_walk(child))

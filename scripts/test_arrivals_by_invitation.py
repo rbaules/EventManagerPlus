@@ -119,6 +119,8 @@ class FakeQuery:
             return self.db.invitaciones
         if self.table_name == "evp_eve_evento":
             return [self.db.evento]
+        if self.table_name == "evp_mes_mesa":
+            return self.db.mesas
         return self.db.invitados
 
     def execute(self) -> Response:
@@ -149,6 +151,9 @@ class FakeSupabase:
     ) -> None:
         self.invitados = invitados
         self.invitaciones = [dict(item) for item in INVITACIONES]
+        self.mesas = [
+            {"mes_cuenta_id": 1, "mes_evento_id": 10, "mes_mesa_id": 2, "mes_nombre_mesa": "Mesa Principal", "mes_estado": "Activo"}
+        ]
         self.fail = fail
         self.evento = {
             "eve_cuenta_id": 1,
@@ -158,7 +163,7 @@ class FakeSupabase:
         }
 
     def table(self, name: str) -> FakeQuery:
-        assert name in {"evp_ivt_invitado", "evp_inv_invitacion", "evp_eve_evento"}
+        assert name in {"evp_ivt_invitado", "evp_inv_invitacion", "evp_eve_evento", "evp_mes_mesa"}
         return FakeQuery(self, name)
 
 
@@ -275,6 +280,27 @@ def test_ui_arrivals_builds() -> None:
         lambda: None,
     )
     assert control is not None
+    def walk(node: Any) -> list[Any]:
+        values = [node]
+        child = getattr(node, "content", None)
+        if child is not None and child is not node:
+            values.extend(walk(child))
+        for nested in getattr(node, "controls", None) or []:
+            values.extend(walk(nested))
+        return values
+    grids = [node.data.get("arrivals_grid") for node in walk(control) if isinstance(getattr(node, "data", None), dict) and node.data.get("arrivals_grid")]
+    assert "search" in grids and "confirmation" in grids
+
+    mobile = arrivals_view(
+        contexto(), "ready", "", "carlos", [item],
+        {"cuenta_id": 1, "evento_id": 10, "invitacion_id": 100, "destinatario": "Familia Demo", "codigo": "ABC"},
+        [item], {str(item["invitado_uuid"])}, True, False, False,
+        lambda value=None: None, lambda: None, lambda value=None: None,
+        lambda item=None, selected=False: None, lambda: None, lambda: None,
+        lambda value=None: None, lambda: None, is_mobile=True,
+    )
+    mobile_grids = [node.data.get("arrivals_grid") for node in walk(mobile) if isinstance(getattr(node, "data", None), dict) and node.data.get("arrivals_grid")]
+    assert "search_cards" in mobile_grids and "confirmation_cards" in mobile_grids
 
     bloqueado = arrivals_view(
         contexto("Consulta"),

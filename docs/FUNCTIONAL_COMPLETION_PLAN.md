@@ -1,5 +1,23 @@
 # Plan de finalización funcional de EventPlus
 
+## Ajustes posteriores a Novedades (2026-08-12)
+
+- Invitados: filtros server-side `Con novedad`/`Sin novedad`; Previsto e
+  Imprevisto salen únicamente de ese filtro. Agregar imprevisto sigue diferido.
+- Dashboard: primera/última llegada y buckets de 15 minutos se calculan en
+  `America/Panama`, incluidos cruces de fecha desde UTC.
+- Header: Master siempre muestra `Master`; otros usuarios muestran el rol UCU
+  de la cuenta activa y se refresca al cambiar evento/cuenta.
+- Consulta: sin novedad no hay acción; con novedad se ofrece `Ver novedad` y un
+  modal readonly con descripción y trazabilidad.
+- Registrar llegadas: Grid A (búsqueda) y Grid B (confirmación) usan tabla en
+  escritorio/tablet y cards bajo 760 px, sin cambiar selección grupal ni
+  introducir N+1.
+- Validación manual completada en laptop y tablet Android: listado responsive,
+  llegadas, novedades readonly de Consulta y OAuth web LAN. Permanecen fuera de
+  este paquete el flujo de imprevistos, la auditoría responsive global y la
+  configuración del dominio HTTPS público de producción.
+
 El cambio de rol sobre UCU existente está implementado. Siguiente bloque pendiente: administración general UCU/UEV —agregar, inactivar y reactivar cuentas y eventos según alcance Master/Administrador—.
 
 > Tarea 8: implementación local final preparada en la migración 202608100002; continúa abierta hasta aplicarla y completar la prueba manual.
@@ -75,9 +93,9 @@ sesiones al reiniciar y no sirve aún para escalado horizontal.
 | 3 | Selección de cuenta | Implementado parcialmente | El contexto elige cuenta predeterminada o primera autorizada. La UI selecciona eventos y el encabezado muestra cuenta; no hay selector independiente ni mantenimiento del default. |
 | 4 | Selección de evento | Implementado y probado | Dashboard lista eventos permitidos, permite activar uno y sincroniza sesión. Operador/Consulta solo reciben asignados. |
 | 5 | Dashboard | Implementado parcialmente | Muestra cuenta, evento, fase, rol y cantidades de accesos. No consume `evp_vw_evento_resumen`, mesas ni estadísticas de invitados. |
-| 6 | Invitados | Implementado y probado | Consulta paginada, filtros, búsqueda por nombre/mesa, detalle, alta/edición planificada en Pre-evento e inactivación de imprevistos. No hay baja de planificados, edición masiva ni auditoría visible. |
+| 6 | Invitados | Implementado y validado manualmente | Consulta paginada, filtros, búsqueda por nombre/mesa real, grid desktop y cards bajo 760 px. Muestra `mes_nombre_mesa`, grupo `## - Prin/Acom`, llegada en Panamá y novedad compacta. Novedades v1 usa una RPC validada 15/15, modal compartido, máximo 200, creación/edición/limpieza lógica, roles/fases server-side y trazabilidad Panamá. Consulta es solo lectura. Agregar imprevisto se difiere y está temporalmente deshabilitado. |
 | 7 | Invitaciones | Solo lectura / carga manual | Se listan para formularios y se consulta el grupo durante llegadas. No hay alta, edición, desactivación ni pantalla propia. |
-| 8 | Registro de llegadas | Implementado y probado | Confirmación individual desde Invitados y flujo dedicado en Llegadas; solo evento Activo/`En_proceso` y roles operativos. Escritura directa pendiente de RPC/RLS. |
+| 8 | Registro de llegadas | Implementado, probado y validado manualmente | Confirmación individual y grupal; persiste ISO UTC sobre `timestamptz` y presenta Panamá. Cada integrante tiene acceso táctil al mismo modal de novedad, sin propagarla al grupo. Solo evento Activo/`En_proceso` y roles operativos. Escritura de llegada directa pendiente de RPC/RLS. |
 | 9 | Reversión de llegadas | Implementado y probado | Reversión individual con revalidación de fase/estado. Falta confirmación modal explícita verificable y RPC transaccional. |
 | 10 | Llegadas grupales | Implementado y probado / no atómico | Selección por invitación y confirmación parcial. El propio diseño reconoce que puede confirmar unas filas y omitir otras. |
 | 11 | Invitados imprevistos | Implementado y probado | Alta e inactivación en `En_proceso`; deshabilitado en CHECKIN por regla actual. Requiere RPC y aclarar si CHECKIN debe permitirlo. |

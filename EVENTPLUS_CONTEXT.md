@@ -1,5 +1,48 @@
 # EVENTPLUS_CONTEXT.md
 
+## OAuth web por origen de sesión (2026-08-12)
+
+El OAuth web resuelve el retorno por intento y por `Page`: primero
+`EVENTPLUS_PUBLIC_BASE_URL`, después el origen real de `page.url` cuando es
+localhost/loopback/LAN privada y finalmente el fallback local controlado. La
+ruta real sigue siendo `/auth/callback`, atendida por Flet, y se preservan PKCE,
+state, intercambio de code, timeout y aislamiento del cliente Supabase por
+Page. `localhost:3000` no es fallback de EventPlus. Véase
+`docs/WEB_OAUTH_LAN.md`. En Flet 0.85.3 ASGI, `page.url` usa `ws://`/`wss://`;
+EventPlus lo normaliza a `http://`/`https://`. La prueba manual quedó completada
+satisfactoriamente en laptop y en Chrome Android sobre una tablet conectada por
+LAN. En el proyecto Supabase alojado fue necesario usar temporalmente el origen
+LAN como Site URL durante esa prueba; esto es propio del entorno de desarrollo
+y no sustituye la configuración HTTPS exacta requerida para producción.
+
+La selección de transporte prioriza `page.web`: Chrome Android, Safari iOS y
+navegadores de escritorio usan siempre OAuth web aunque `page.platform` refleje
+el sistema operativo móvil. Android nativo solo usa deep link cuando
+`page.web=False`; el flujo desktop nativo se conserva. iOS nativo se identifica
+por separado, pero no está configurado en esta versión.
+
+## Ajustes posteriores a Novedades (2026-08-12)
+
+El Dashboard convierte los `timestamptz` a `America/Panama` antes de calcular
+primera/última llegada y los intervalos de 15 minutos. El header muestra
+`Master` para un usuario Master y, para los demás, el rol UCU de la cuenta
+activa; UEV conserva su función de acceso al evento pero no sustituye el rol
+visible. El cambio de evento actualiza cuenta, autorización y header sin
+reiniciar la sesión.
+
+Consulta de invitados ofrece filtros server-side `Con novedad` y `Sin novedad`
+sobre `ivt_tiene_novedad`; ya no ofrece Previsto/Imprevisto. Consulta oculta la
+acción cuando no existe novedad y muestra `Ver novedad` readonly cuando existe.
+Agregar imprevisto continúa diferido y deshabilitado.
+
+Los grids de resultados y confirmación de Registrar llegadas usan `DataTable`
+en escritorio/tablet y cards bajo el breakpoint compartido de 760 px. Conservan
+selección grupal, reversión, novedad individual, mesa resuelta en lote y hora
+Panamá. La prueba manual en tablet fue satisfactoria, incluida la convivencia
+sin overflow de las acciones de detalle y Novedad. Permanecen fuera de este
+paquete el flujo de imprevistos, la auditoría responsive global y el despliegue
+público de producción.
+
 El incremento 8D de administración general UCU/UEV está preparado localmente; véase `docs/USER_ACCESS_MANAGEMENT.md`. No se ejecutó SQL remoto y permanece abierto hasta migración y prueba manual.
 
 Tras aplicar 202608100002 y realizar pruebas manuales, se preparó `202608110001_user_admin_task8_final_fixes.sql`: grid de alcance configurado para Preregistrado, promoción Preregistrado→Master sin activación, edición Admin por alcance compartido sin `usr_creado_por`, e inactivación global de Activo/Preregistrado conservando defaults. Esta migración no se ejecutó en esta tarea.
@@ -46,6 +89,31 @@ Su default vigente es `Otro`, aplicado manualmente en Supabase el 2 de agosto de
 ## 1. Objetivo del proyecto
 
 EventPlus es una aplicación web desarrollada en **Python + Flet + Supabase** para controlar la entrada de invitados a eventos.
+
+La Consulta de invitados presenta un grid operativo en escritorio y cards
+compactas bajo el breakpoint compartido de 760 px. Conserva la consulta
+paginada, búsqueda y filtros existentes; muestra invitación por ID/grupo porque
+el listado vigente no devuelve el nombre del destinatario, evitando consultas
+adicionales por fila. Las acciones visibles reutilizan las capacidades ya
+calculadas para detalle, edición y registro/reversión de llegada.
+
+La llegada se persiste como instante UTC en `ivt_fecha_hora_conf_llegada`
+(`timestamptz`) y se presenta mediante `ZoneInfo("America/Panama")` tanto en
+Consulta como en Registrar llegadas. La mesa visible usa
+`evp_mes_mesa.mes_nombre_mesa`, cargando una sola colección de mesas por
+operación para evitar N+1, y el grupo se abrevia como `## - Prin` / `## - Acom`.
+
+El esquema existente de novedades de invitado se reutilizará en v1:
+`ivt_tiene_novedad`, `ivt_descripcion_novedad` y sus campos de creación y
+modificación. La RPC `evp_admin_guardar_novedad_invitado(uuid,text)`, validada
+en PostgreSQL con 15/15 casos, es la única ruta cliente para crear, editar o
+limpiar novedades; no se hace `update` directo. El modal compartido por
+Consulta de invitados y Registrar llegadas admite hasta 200 caracteres,
+mantiene una novedad por persona y muestra trazabilidad en `America/Panama`.
+Master, Administrador y Operador autorizado escriben en `Pre_evento` y
+`En_proceso`; Consulta, `Post_evento` y `Cerrado` son solo lectura. El dashboard
+reutiliza `ivt_tiene_novedad` y se invalida tras cada cambio. Agregar imprevisto
+queda diferido y su acción permanece temporalmente deshabilitada.
 
 La primera versión del módulo incluye:
 

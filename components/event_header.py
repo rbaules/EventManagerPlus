@@ -6,6 +6,7 @@ from typing import Any
 import flet as ft
 
 from config import is_checkin_mode
+from services.evento_context_service import rol_visible_contextual
 from services.authorization_service import puede_administrar_lugares, puede_ver_administracion_eventos, puede_ver_administracion_usuarios, puede_ver_importacion_excel
 
 
@@ -191,7 +192,7 @@ def event_header(
                                         overflow=ft.TextOverflow.ELLIPSIS,
                                     ),
                                     ft.Text(
-                                        _get(contexto, "rol_global_calculado", "Sin rol"),
+                                        rol_visible_contextual(contexto),
                                         size=13,
                                         color=ft.Colors.ON_SURFACE_VARIANT,
                                     ),
