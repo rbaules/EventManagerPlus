@@ -28,6 +28,7 @@ def bottom_navigation(
     can_use_app: bool,
     can_register_arrivals: bool,
     on_select: Callable[[str], None],
+    navigation: ft.NavigationBar | None = None,
 ) -> ft.NavigationBar:
     print("[NAVEGACION][INFO] Aplicando estilo visual a la barra.")
     base_items = _CHECKIN_NAV_ITEMS if is_checkin_mode() else _NAV_ITEMS
@@ -58,10 +59,7 @@ def bottom_navigation(
             return
         on_select(key)
 
-    print("[NAVEGACION][INFO] Fondo, elevacion e indicador configurados.")
-    return ft.NavigationBar(
-        selected_index=selected_index,
-        destinations=[
+    destinations = [
             ft.NavigationBarDestination(
                 icon=_icon(icon_name),
                 selected_icon=_icon(icon_name),
@@ -69,15 +67,21 @@ def bottom_navigation(
                 disabled=destination_disabled(key, requires_arrivals),
             )
             for key, label, icon_name, requires_arrivals in nav_items
-        ],
-        label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
-        bgcolor=ft.Colors.SURFACE_CONTAINER,
-        elevation=8,
-        shadow_color=ft.Colors.OUTLINE_VARIANT,
-        indicator_color=ft.Colors.PRIMARY_CONTAINER,
-        border=ft.Border.only(
-            top=ft.BorderSide(width=1, color=ft.Colors.OUTLINE_VARIANT),
-        ),
-        on_change=handle_change,
-        data={"responsive_component": "bottom_navigation"},
-    )
+        ]
+    if navigation is None:
+        navigation = ft.NavigationBar(
+            label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
+            bgcolor=ft.Colors.SURFACE_CONTAINER,
+            elevation=8,
+            shadow_color=ft.Colors.OUTLINE_VARIANT,
+            indicator_color=ft.Colors.PRIMARY_CONTAINER,
+            border=ft.Border.only(
+                top=ft.BorderSide(width=1, color=ft.Colors.OUTLINE_VARIANT),
+            ),
+            data={"responsive_component": "bottom_navigation"},
+        )
+    navigation.selected_index = selected_index
+    navigation.destinations = destinations
+    navigation.on_change = handle_change
+    print("[NAVEGACION][INFO] Fondo, elevacion e indicador configurados.")
+    return navigation

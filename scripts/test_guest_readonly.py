@@ -242,10 +242,17 @@ def test_grid_desktop_cards_mobile_y_acciones() -> None:
     assert isinstance(desktop, ft.Row)
     assert isinstance(desktop.controls[0], ft.DataTable)
     table = desktop.controls[0]
-    assert [column.label for column in table.columns] == [
-        "Invitado", "Invitacion / Grupo", "Mesa", "Estado", "Hora llegada", "Novedad", "Acciones",
+    assert [column.label.value for column in table.columns] == [
+        "#", "Invitado", "Invitación", "Mesa", "Estado", "Hora llegada", "Acciones",
     ]
     assert len(table.rows) == 2
+    assert [row.cells[0].content.value for row in table.rows] == ["1", "2"]
+    assert [row.cells[2].content.value for row in table.rows] == ["100", "100"]
+    assert all(
+        marker not in row.cells[2].content.value
+        for row in table.rows
+        for marker in ("Principal", "Acompañante", "Prin", "Acom")
+    )
     assert len(table.rows[0].cells[-1].content.controls) == 4  # detalle, novedad, editar, registrar
     assert len(table.rows[1].cells[-1].content.controls) == 4  # detalle, novedad, editar, reversar
     assert _hora_llegada(pendientes) == "—"
@@ -266,6 +273,54 @@ def test_grid_desktop_cards_mobile_y_acciones() -> None:
     assert novelty.tooltip == "Ver novedad" and novelty.icon == ft.Icons.DESCRIPTION
     assert novelty.icon != consulta_novedad.content.controls[-1].controls[0].icon
     assert "Previstos" not in FILTRO_LABELS.values() and "Imprevistos" not in FILTRO_LABELS.values()
+    assert "Con novedad" not in FILTRO_LABELS.values() and "Sin novedad" not in FILTRO_LABELS.values()
+
+
+def test_more_results_message_is_independent_and_conditional() -> None:
+    invitado = normalizar_invitado(ROWS[0])
+    assert invitado is not None
+
+    def messages(control: Any) -> list[ft.Text]:
+        found: list[ft.Text] = []
+        pending = [control]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, ft.Text) and isinstance(current.data, dict) and current.data.get("guest_more_results"):
+                found.append(current)
+            for attribute in ("content", "controls"):
+                child = getattr(current, attribute, None)
+                if isinstance(child, list):
+                    pending.extend(child)
+                elif child is not None:
+                    pending.append(child)
+        return found
+
+    with_more = messages(build_view(CONTEXTO, "ready", [invitado], "OK", "", "todos", True, False, None))
+    assert {message.data["guest_more_results"] for message in with_more} == {"top", "bottom"}
+    assert len(with_more) == 2 and with_more[0] is not with_more[1]
+    assert all(message.value == "Hay más resultados disponibles." for message in with_more)
+
+    without_more = messages(build_view(CONTEXTO, "ready", [invitado], "OK", "", "todos", False, False, None))
+    assert without_more == []
+
+
+def test_grid_visual_numbering_for_loaded_and_replaced_sets() -> None:
+    noop = lambda value=None: None
+
+    def numbers(count: int) -> list[str]:
+        items = [normalizar_invitado(row(index, f"Invitado {index}")) for index in range(1, count + 1)]
+        table_row = _invitados_table(
+            [item for item in items if item is not None], noop, noop, noop, noop,
+            can_manage=True, can_confirm_arrival=True, can_reverse_arrival=True,
+        )
+        return [data_row.cells[0].content.value for data_row in table_row.controls[0].rows]
+
+    for count in (9, 50, 100, 120):
+        assert numbers(count) == [str(index) for index in range(1, count + 1)]
+
+    # Un filtro o una búsqueda reemplaza la lista entregada al grid.
+    assert numbers(3) == ["1", "2", "3"]
+    assert numbers(1) == ["1"]
 
 
 def build_view(
@@ -324,6 +379,8 @@ def main() -> int:
     test_evento_nulo_errores_detalle_y_normalizacion()
     test_ui_builds()
     test_grid_desktop_cards_mobile_y_acciones()
+    test_more_results_message_is_independent_and_conditional()
+    test_grid_visual_numbering_for_loaded_and_replaced_sets()
     print("OK - guest read-only service, search, filters, pagination, detail, and UI tests passed.")
     return 0
 

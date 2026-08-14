@@ -13,7 +13,7 @@ import flet as ft
 from config import is_checkin_mode
 from components.app_shell import app_shell
 from components.bottom_navigation import bottom_navigation
-from components.responsive import layout_mode
+from components.responsive import layout_mode, uses_operational_cards
 from services.auth_service import sign_out_local_session
 from services.authorization_service import capacidades_contexto, puede_administrar_lugares, puede_ver_administracion_eventos, puede_ver_administracion_usuarios, puede_ver_importacion_excel
 from services.excel_import_service import consultar_evento_tiene_datos, ejecutar_importacion, generar_archivo_errores, leer_archivo_excel, preview_coincide_contexto, validar_contexto_importacion, vincular_preview_contexto
@@ -158,6 +158,7 @@ def build_home_view(
         "invitados_mensaje": "",
         "invitados_tipo_busqueda": "invitado",
         "invitados_busqueda": "",
+        "invitados_busqueda_draft": "",
         "invitados_filtro": "todos",
         "invitados_offset": 0,
         "invitados_has_more": False,
@@ -225,6 +226,7 @@ def build_home_view(
         "usuarios_admin_detalle_usuario_id": None,
         "usuarios_admin_detalle_recien_creado": False,
     }
+    ui: dict[str, ft.Control | None] = {"root": None, "navigation": None}
 
     def _puede_editar_datos_usuario(detalle: Any) -> bool:
         if detalle is None or detalle.estado not in {"Activo", "Preregistrado"}:
@@ -400,6 +402,7 @@ def build_home_view(
                 mensaje=state["invitados_mensaje"],
                 tipo_busqueda=state["invitados_tipo_busqueda"],
                 busqueda=state["invitados_busqueda"],
+                busqueda_draft=state["invitados_busqueda_draft"],
                 filtro=state["invitados_filtro"],
                 has_more=state["invitados_has_more"],
                 is_loading=state["invitados_loading"],
@@ -414,6 +417,7 @@ def build_home_view(
                 form_message=state["invitado_form_message"],
                 is_saving=state["invitado_saving"],
                 on_search=buscar_invitados,
+                on_search_draft_change=actualizar_borrador_busqueda_invitados,
                 on_search_type_change=cambiar_tipo_busqueda_invitados,
                 on_clear=limpiar_busqueda_invitados,
                 on_filter=filtrar_invitados,
@@ -476,21 +480,10 @@ def build_home_view(
             on_select_event=lambda: navigate("event_selection"),
         )
 
-    def build_shell() -> ft.Control:
-        content = build_content()
+    def build_shell_with_content(content: ft.Control | None) -> ft.Control:
         if content is None:
             raise RuntimeError("La vista solicitada devolvio None; se esperaba un control Flet.")
 
-        can_use_app = bool(
-            contexto_usuario.get("cuenta_actual")
-            and (contexto_usuario.get("evento_actual") or contexto_usuario.get("eventos_permitidos"))
-        )
-        navigation = bottom_navigation(
-            selected=state["selected"],
-            can_use_app=can_use_app,
-            can_register_arrivals=bool(contexto_usuario.get("puede_registrar_llegadas")),
-            on_select=select_tab,
-        )
         return app_shell(
             contexto=contexto_usuario,
             selected=state["selected"],
@@ -504,16 +497,36 @@ def build_home_view(
             on_excel_import=lambda: select_tab("excel_import"),
             on_manage_users=lambda: select_tab("users_admin"),
             layout=state["layout_mode"],
-            navigation=navigation,
         )
+
+    def build_shell() -> ft.Control:
+        return build_shell_with_content(build_content())
+
+    def sync_navigation() -> ft.NavigationBar:
+        can_use_app = bool(
+            contexto_usuario.get("cuenta_actual")
+            and (contexto_usuario.get("evento_actual") or contexto_usuario.get("eventos_permitidos"))
+        )
+        navigation = bottom_navigation(
+            selected=state["selected"],
+            can_use_app=can_use_app,
+            can_register_arrivals=bool(contexto_usuario.get("puede_registrar_llegadas")),
+            on_select=select_tab,
+            navigation=ui["navigation"] if isinstance(ui["navigation"], ft.NavigationBar) else None,
+        )
+        ui["navigation"] = navigation
+        page.navigation_bar = navigation
+        return navigation
 
     def render() -> None:
         _sincronizar_actualizacion_dashboard()
+        sync_navigation()
         home_control = build_shell()
         if home_control is None:
             raise RuntimeError("build_home_view devolvio None; se esperaba un control Flet.")
 
         home_control.data = {**_home_callbacks(), "responsive_component": "app_shell"}
+        ui["root"] = home_control
         page.clean()
         page.add(home_control)
         page.update()
@@ -522,8 +535,25 @@ def build_home_view(
         new_mode = layout_mode(getattr(page, "width", None))
         if new_mode == state["layout_mode"] or not state["session_active"]:
             return
+        old_mode = state["layout_mode"]
         state["layout_mode"] = new_mode
-        render()
+        root = ui["root"]
+        navigation = ui["navigation"]
+        if not isinstance(root, ft.SafeArea) or not isinstance(root.content, ft.Column):
+            raise RuntimeError("El root persistente de EventPlus no esta disponible durante resize.")
+        preserve_module = bool(
+            state["selected"] in {"guests", "arrivals"}
+            and not uses_operational_cards(old_mode)
+            and not uses_operational_cards(new_mode)
+        )
+        current_content = root.content.controls[1].content
+        replacement = build_shell_with_content(current_content) if preserve_module else build_shell()
+        if not isinstance(replacement.content, ft.Column):
+            raise RuntimeError("El shell responsive no contiene la estructura esperada.")
+        root.content.controls[0] = replacement.content.controls[0]
+        if not preserve_module:
+            root.content.controls[1].content = replacement.content.controls[1].content
+        page.update()
 
     def _marca_actualizacion() -> str:
         now = datetime.now().astimezone()
@@ -1284,6 +1314,7 @@ def build_home_view(
         state["invitados_mensaje"] = ""
         state["invitados_tipo_busqueda"] = "invitado"
         state["invitados_busqueda"] = ""
+        state["invitados_busqueda_draft"] = ""
         state["invitados_filtro"] = "todos"
         state["invitados_offset"] = 0
         state["invitados_has_more"] = False
@@ -1396,8 +1427,12 @@ def build_home_view(
             state["invitaciones"] = []
             print("[INVITADOS][WARNING] No se pudieron cargar invitaciones:", resultado.estado)
 
+    def actualizar_borrador_busqueda_invitados(texto: str) -> None:
+        state["invitados_busqueda_draft"] = texto or ""
+
     def buscar_invitados(texto: str) -> None:
-        state["invitados_busqueda"] = (texto or "").strip()
+        state["invitados_busqueda_draft"] = texto or ""
+        state["invitados_busqueda"] = state["invitados_busqueda_draft"].strip()
         print(
             "[INVITADOS][INFO] Busqueda aplicada:",
             f"tipo={state['invitados_tipo_busqueda']}",
@@ -1421,6 +1456,7 @@ def build_home_view(
 
     def limpiar_busqueda_invitados() -> None:
         state["invitados_busqueda"] = ""
+        state["invitados_busqueda_draft"] = ""
         state["invitados_filtro"] = "todos"
         print("[INVITADOS][INFO] Busqueda limpiada.")
         cargar_invitados(reset=True)
@@ -2901,6 +2937,7 @@ def build_home_view(
         except Exception:
             pass
         page.on_resize = None
+        page.navigation_bar = None
         if hasattr(page, "scroll"):
             page.scroll = ft.ScrollMode.AUTO
         page.clean()
@@ -2922,7 +2959,8 @@ def build_home_view(
             page.run_task(navigate_to_server_logout)
 
     page.on_resize = handle_page_resize
-    page.navigation_bar = None
+    sync_navigation()
     home_control = build_shell()
     home_control.data = {**_home_callbacks(), "responsive_component": "app_shell"}
+    ui["root"] = home_control
     return home_control

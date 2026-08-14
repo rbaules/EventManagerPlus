@@ -13,8 +13,6 @@ FILTRO_LABELS = {
     "pendientes": "Pendientes",
     "con_mesa": "Con mesa",
     "sin_mesa": "Sin mesa",
-    "con_novedad": "Con novedad",
-    "sin_novedad": "Sin novedad",
 }
 
 TIPO_BUSQUEDA_LABELS = {
@@ -82,6 +80,11 @@ def _invitacion_tooltip(invitado: dict[str, Any]) -> str:
     return f"Invitación {invitacion_id} - {grupo}" if invitacion_id is not None else grupo
 
 
+def _invitacion_grid_texto(invitado: dict[str, Any]) -> str:
+    invitacion_id = invitado.get("invitacion_id")
+    return str(invitacion_id) if invitacion_id is not None else "—"
+
+
 def _hora_llegada(invitado: dict[str, Any]) -> str:
     if not invitado.get("llegada_confirmada"):
         return "—"
@@ -105,6 +108,7 @@ def _acciones_invitado(
     can_reverse_arrival: bool,
     on_novelty: Any = None,
     can_edit_novelty: bool = True,
+    compact: bool = False,
 ) -> list[ft.Control]:
     on_novelty = on_novelty or (lambda invitado: None)
     acciones: list[ft.Control] = [
@@ -146,6 +150,12 @@ def _acciones_invitado(
                 on_click=lambda e: on_reverse_arrival(invitado),
             )
         )
+    if compact:
+        for accion in acciones:
+            accion.width = 42
+            accion.height = 42
+            accion.icon_size = 22
+            accion.padding = 6
     return acciones
 
 
@@ -217,37 +227,58 @@ def _invitados_table(
     on_novelty: Any = None,
     can_edit_novelty: bool = True,
 ) -> ft.Control:
+    column_widths = (40, 150, 64, 74, 92, 88, 186)
     rows: list[ft.DataRow] = []
-    for invitado in invitados:
+    for row_number, invitado in enumerate(invitados, start=1):
         llegada = bool(invitado.get("llegada_confirmada"))
-        novedad = invitado.get("descripcion_novedad") or None
         rows.append(ft.DataRow(cells=[
+            ft.DataCell(ft.Text(
+                str(row_number),
+                width=column_widths[0],
+                text_align=ft.TextAlign.CENTER,
+                no_wrap=True,
+            )),
             ft.DataCell(ft.Text(
                 str(_get(invitado, "nombre_completo", "Invitado sin nombre")),
                 max_lines=2,
                 overflow=ft.TextOverflow.ELLIPSIS,
                 tooltip=str(_get(invitado, "nombre_completo", "Invitado sin nombre")),
+                width=column_widths[1],
             )),
-            ft.DataCell(ft.Text(_invitacion_texto(invitado), max_lines=2, tooltip=_invitacion_tooltip(invitado))),
-            ft.DataCell(ft.Text(str(_get(invitado, "mesa_texto", "Sin mesa")))),
+            ft.DataCell(ft.Text(
+                _invitacion_grid_texto(invitado),
+                tooltip=f"Invitación {_invitacion_grid_texto(invitado)}",
+                width=column_widths[2],
+            )),
+            ft.DataCell(ft.Text(
+                str(_get(invitado, "mesa_texto", "Sin mesa")),
+                max_lines=2,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                tooltip=str(_get(invitado, "mesa_texto", "Sin mesa")),
+                width=column_widths[3],
+            )),
             ft.DataCell(ft.Row([
                 ft.Icon(ft.Icons.CHECK_CIRCLE if llegada else ft.Icons.SCHEDULE, size=18),
                 ft.Text("Llego" if llegada else "Pendiente"),
-            ], spacing=6)),
-            ft.DataCell(ft.Text(_hora_llegada(invitado))),
-            ft.DataCell(ft.Text("Si" if invitado.get("tiene_novedad") else "No", tooltip=novedad)),
+            ], spacing=4, width=column_widths[4])),
+            ft.DataCell(ft.Text(_hora_llegada(invitado), width=column_widths[5])),
             ft.DataCell(ft.Row(_acciones_invitado(
                 invitado, on_detail, on_edit, on_confirm_arrival, on_reverse_arrival,
-                can_manage, can_confirm_arrival, can_reverse_arrival, on_novelty, can_edit_novelty,
-            ), spacing=0)),
+                can_manage, can_confirm_arrival, can_reverse_arrival, on_novelty, can_edit_novelty, True,
+            ), spacing=6, width=column_widths[6])),
         ]))
     return ft.Row(
         [ft.DataTable(
-            columns=[ft.DataColumn(label) for label in (
-                "Invitado", "Invitacion / Grupo", "Mesa", "Estado", "Hora llegada", "Novedad", "Acciones",
-            )],
+            columns=[
+                ft.DataColumn(ft.Text(label, width=width, max_lines=2))
+                for label, width in zip(
+                    ("#", "Invitado", "Invitación", "Mesa", "Estado", "Hora llegada", "Acciones"),
+                    column_widths,
+                )
+            ],
             rows=rows,
-            column_spacing=18,
+            column_spacing=8,
+            horizontal_margin=8,
             heading_row_color=ft.Colors.SURFACE_CONTAINER_HIGHEST,
             border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
             border_radius=10,
@@ -255,6 +286,7 @@ def _invitados_table(
             data_row_max_height=72,
         )],
         scroll=ft.ScrollMode.AUTO,
+        data={"responsive_component": "guest_grid_scroll"},
     )
 
 
@@ -269,6 +301,15 @@ def _detail_row(label: str, value: Any) -> ft.Control:
             tight=True,
         ),
         padding=ft.Padding.only(bottom=8),
+    )
+
+
+def _more_results_message(position: str) -> ft.Text:
+    return ft.Text(
+        "Hay más resultados disponibles.",
+        size=13,
+        color=ft.Colors.ON_SURFACE_VARIANT,
+        data={"guest_more_results": position},
     )
 
 
@@ -563,6 +604,8 @@ def invitados_view(
     on_novelty: Any = None,
     is_mobile: bool = False,
     can_edit_novelty: bool = True,
+    busqueda_draft: str | None = None,
+    on_search_draft_change: Any = None,
 ) -> ft.Control:
     evento = contexto.get("evento_actual") or {}
     if not evento:
@@ -596,9 +639,10 @@ def invitados_view(
     search_field = ft.TextField(
         label=search_label,
         hint_text=search_hint,
-        value=busqueda,
+        value=busqueda if busqueda_draft is None else busqueda_draft,
         prefix_icon=ft.Icons.TABLE_RESTAURANT if tipo_es_mesa else ft.Icons.PERSON_SEARCH,
         on_submit=lambda e: on_search(e.control.value),
+        on_change=(lambda e: on_search_draft_change(e.control.value)) if on_search_draft_change else None,
         disabled=is_loading,
     )
     tipo_dropdown = ft.Dropdown(
@@ -731,6 +775,8 @@ def invitados_view(
     elif estado == "idle":
         controls.append(_state_card("Busqueda pendiente", mensaje or "Presiona Buscar para consultar los invitados.", ft.Icons.SEARCH))
     else:
+        if has_more:
+            controls.append(_more_results_message("top"))
         controls.append(
             ft.ResponsiveRow([
                 _invitado_card(
@@ -748,12 +794,7 @@ def invitados_view(
         controls.append(
             ft.Row(
                 [
-                    ft.Text(
-                        "Hay mas resultados disponibles." if has_more else "No hay mas resultados para mostrar.",
-                        size=13,
-                        color=ft.Colors.ON_SURFACE_VARIANT,
-                        expand=True,
-                    ),
+                    *([_more_results_message("bottom")] if has_more else []),
                     ft.OutlinedButton(
                         content="Cargar mas",
                         icon=ft.Icons.EXPAND_MORE,
@@ -761,6 +802,7 @@ def invitados_view(
                         on_click=lambda e: on_load_more(),
                     ),
                 ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN if has_more else ft.MainAxisAlignment.END,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
         )

@@ -22,7 +22,6 @@ def app_shell(
     on_excel_import: Callable[[], None] | None = None,
     on_manage_users: Callable[[], None] | None = None,
     layout: LayoutMode = LayoutMode.DESKTOP_WIDE,
-    navigation: ft.Control | None = None,
 ) -> ft.Control:
     return ft.SafeArea(
         content=ft.Column(
@@ -46,7 +45,6 @@ def app_shell(
                     clip_behavior=ft.ClipBehavior.HARD_EDGE,
                     data={"responsive_component": "content"},
                 ),
-                *([navigation] if navigation is not None else []),
             ],
             expand=True,
             spacing=0,

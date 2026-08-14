@@ -15,6 +15,7 @@ import flet as ft
 from components.responsive import LayoutMode, layout_mode
 from views.arrivals_view import arrivals_view
 from views.home_view import build_home_view
+from views.invitados_view import _invitados_table, invitados_view
 
 
 def walk(node: Any) -> list[Any]:
@@ -133,13 +134,32 @@ def assert_shell_structure(control: Any) -> None:
     components = responsive_components(control)
     assert components.count("event_header") == 1
     assert components.count("content") == 1
-    assert components.count("bottom_navigation") == 1
+    assert components.count("bottom_navigation") == 0
     shell = next(node for node in walk(control) if isinstance(getattr(node, "data", None), dict) and node.data.get("responsive_component") == "app_shell")
     column = shell.content
     assert isinstance(column, ft.Column)
-    assert column.controls[-1].data["responsive_component"] == "bottom_navigation"
+    assert len(column.controls) == 2
     content_zone = next(node for node in column.controls if isinstance(getattr(node, "data", None), dict) and node.data.get("responsive_component") == "content")
     assert content_zone.expand is True
+
+
+def test_bottom_navigation_is_viewport_constrained_for_wide_content() -> None:
+    from components.bottom_navigation import bottom_navigation
+
+    navigation = None
+    navigation_id = None
+    for width in (768, 800, 900, 1024, 1180, 1280, 1440):
+        for guest_count in (9, 50, 120, 500):
+            navigation = bottom_navigation(
+                selected="guests",
+                can_use_app=True,
+                can_register_arrivals=True,
+                on_select=lambda _key: None,
+                navigation=navigation,
+            )
+            navigation_id = navigation_id or id(navigation)
+            assert len(navigation.destinations) == 3
+            assert id(navigation) == navigation_id
 
 
 class FakePage:
@@ -255,8 +275,9 @@ def test_shell_is_viewport_bound_for_row_volumes() -> None:
     try:
         config.APP_MODE = config.APP_MODE_FULL
         for count in (0, 1, 5, 20, 50, 100, 200):
-            page = FakePage(800)
+            page = FakePage(700)
             control = build_home_view(page, context("Operador"), NoQuerySupabase())
+            page.add(control)
             callbacks = control.data
             state = callbacks["state"]
             items = [guest(index) for index in range(1, count + 1)]
@@ -265,14 +286,15 @@ def test_shell_is_viewport_bound_for_row_volumes() -> None:
                 "arrivals_resultados": items, "arrivals_invitacion": ({"invitacion_id": 100, "destinatario": "Familia"} if count else None),
                 "arrivals_integrantes": items, "arrivals_seleccionados": set(),
             })
-            page.width = 1280
+            page.width = 800
             page.on_resize(None)
-            shell = page.added[0]
+            shell = control
             assert_shell_structure(shell)
             content_zone = next(node for node in walk(shell) if isinstance(getattr(node, "data", None), dict) and node.data.get("responsive_component") == "content")
             assert isinstance(content_zone.content, ft.ListView)
             assert content_zone.content.expand is True
-            assert page.scroll is None and page.navigation_bar is None
+            assert page.scroll is None and isinstance(page.navigation_bar, ft.NavigationBar)
+            assert len(page.navigation_bar.destinations) == 3
     finally:
         config.APP_MODE = original_mode
 
@@ -282,9 +304,10 @@ def test_individual_toggles_are_local_for_long_lists() -> None:
     try:
         for runtime_mode in (config.APP_MODE_FULL, config.APP_MODE_CHECKIN):
             config.APP_MODE = runtime_mode
-            page = FakePage(800)
+            page = FakePage(700)
             db = NoQuerySupabase()
             control = build_home_view(page, context("Operador"), db)
+            page.add(control)
             state = control.data["state"]
             items = [guest(identifier) for identifier in range(1, 201)]
             state.update({
@@ -294,9 +317,9 @@ def test_individual_toggles_are_local_for_long_lists() -> None:
                 "arrivals_integrantes": items, "arrivals_seleccionados": set(),
                 "arrivals_event_key": (1, 10),
             })
-            page.width = 1280
+            page.width = 800
             page.on_resize(None)
-            shell = page.added[0]
+            shell = control
             table = next(node for node in walk(shell) if isinstance(node, ft.DataTable) and getattr(node, "data", {}).get("arrivals_grid") == "confirmation")
             checkboxes = [cell.content for row in table.rows for cell in row.cells if isinstance(cell.content, ft.Checkbox)]
             confirm = next(node for node in walk(shell) if getattr(node, "data", None) == {"arrivals_action": "confirm_selected"})
@@ -327,12 +350,15 @@ def test_resize_preserves_state_without_queries_full_and_checkin() -> None:
     try:
         for runtime_mode in (config.APP_MODE_FULL, config.APP_MODE_CHECKIN):
             config.APP_MODE = runtime_mode
-            page = FakePage(800)
+            page = FakePage(700)
             db = NoQuerySupabase()
             active_context = context("Operador")
             control = build_home_view(page, active_context, db)
+            page.add(control)
             assert page.scroll is None
             callbacks = control.data
+            root_id = id(control)
+            navigation_id = id(page.navigation_bar)
             state = callbacks["state"]
             many_guests = [guest(identifier) for identifier in range(1, 51)]
             state.update({
@@ -350,19 +376,36 @@ def test_resize_preserves_state_without_queries_full_and_checkin() -> None:
                 state["arrivals_integrantes"], state["arrivals_seleccionados"], active_context["evento_actual"],
             )
             assert callable(page.on_resize)
+            page.width = 800
+            page.on_resize(None)
+            live_content = control.content.controls[1].content
+            live_tables = {
+                node.data["arrivals_grid"]: node
+                for node in walk(live_content)
+                if isinstance(node, ft.DataTable) and isinstance(node.data, dict) and node.data.get("arrivals_grid")
+            }
             transitions = (900, 1280, 800, 1280, 800, 1280, 800, 1024, 768, 1180, 900)
-            expected_renders = 0
+            expected_updates = 1
             for width in transitions:
                 previous_mode = state["layout_mode"]
                 page.width = width
                 page.on_resize(None)
                 if layout_mode(width) != previous_mode:
-                    expected_renders += 1
+                    expected_updates += 1
                     assert len(page.added) == 1
-                    assert_shell_structure(page.added[0])
-                    assert {"search", "confirmation"} <= grids(page.added[0])
+                    assert id(page.added[0]) == root_id
+                    assert id(page.navigation_bar) == navigation_id
+                    assert_shell_structure(control)
+                    assert {"search", "confirmation"} <= grids(control)
+                    assert control.content.controls[1].content is live_content
+                    current_tables = {
+                        node.data["arrivals_grid"]: node
+                        for node in walk(live_content)
+                        if isinstance(node, ft.DataTable) and isinstance(node.data, dict) and node.data.get("arrivals_grid")
+                    }
+                    assert current_tables == live_tables
                 assert state["layout_mode"] == layout_mode(width)
-                assert page.clean_count == expected_renders and page.update_count == expected_renders
+                assert page.clean_count == 0 and page.update_count == expected_updates
                 assert page.on_resize == callbacks["handle_resize"]
             current_values = (
                 state["arrivals_busqueda"], state["arrivals_resultados"], state["arrivals_invitacion"],
@@ -374,13 +417,124 @@ def test_resize_preserves_state_without_queries_full_and_checkin() -> None:
         config.APP_MODE = original_mode
 
 
+def test_guest_grid_actions_fit_tablet_portrait_and_remain_compact() -> None:
+    items = [guest(index) for index in range(1, 10)]
+    grid = _invitados_table(
+        items, lambda *_: None, lambda *_: None, lambda *_: None, lambda *_: None,
+        True, True, True,
+    )
+    table = grid.controls[0]
+    estimated_width = sum(column.label.width for column in table.columns) + (6 * table.column_spacing) + (2 * table.horizontal_margin)
+    tablet_content_width = 800 - 32
+
+    assert estimated_width == 758
+    assert estimated_width <= tablet_content_width
+    assert table.horizontal_margin == 8 and table.column_spacing == 8
+    assert [column.label.value for column in table.columns] == [
+        "#", "Invitado", "Invitación", "Mesa", "Estado", "Hora llegada", "Acciones",
+    ]
+    assert table.columns[0].label.width == 40
+    for data_row in table.rows:
+        number = data_row.cells[0].content
+        assert number.width == 40 and number.no_wrap is True and number.text_align == ft.TextAlign.CENTER
+        actions = data_row.cells[-1].content
+        assert actions.width == 186 and actions.spacing == 6
+        assert all(
+            action.width == 42 and action.height == 42 and action.icon_size == 22
+            for action in actions.controls
+        )
+
+    large_grid = _invitados_table(
+        [guest(index) for index in range(1, 121)],
+        lambda *_: None, lambda *_: None, lambda *_: None, lambda *_: None,
+        True, True, True,
+    )
+    assert [large_grid.controls[0].rows[index - 1].cells[0].content.value for index in (99, 100, 120)] == [
+        "99", "100", "120",
+    ]
+    assert all(
+        large_grid.controls[0].rows[index - 1].cells[0].content.no_wrap is True
+        for index in (99, 100, 120)
+    )
+
+    assert estimated_width <= (1280 - 32)
+    assert estimated_width <= (1440 - 32)
+
+
+def test_three_guest_actions_have_uniform_touch_separation_at_800() -> None:
+    item = guest(1)
+    grid = _invitados_table(
+        [item], lambda *_: None, lambda *_: None, lambda *_: None, lambda *_: None,
+        can_manage=False,
+        can_confirm_arrival=True,
+        can_reverse_arrival=False,
+        can_edit_novelty=True,
+    )
+    actions = grid.controls[0].rows[0].cells[-1].content
+    button_widths = [button.width for button in actions.controls]
+
+    assert len(actions.controls) == 3
+    assert button_widths == [42, 42, 42]
+    assert actions.spacing == 6
+    assert sum(button_widths) + actions.spacing * (len(button_widths) - 1) == 138
+    assert actions.width == 186
+    estimated_width = sum(column.label.width for column in grid.controls[0].columns) + 6 * 8 + 2 * 8
+    assert estimated_width == 758
+    assert estimated_width <= 800 - 32
+    assert estimated_width <= 1280 - 32
+
+
+def test_guest_controls_and_unapplied_draft_survive_tablet_rotations() -> None:
+    page = FakePage(700)
+    db = NoQuerySupabase()
+    control = build_home_view(page, context("Consulta"), db)
+    page.add(control)
+    state = control.data["state"]
+    items = [guest(index) for index in range(1, 121)]
+    state.update({
+        "selected": "guests", "invitados_estado": "ready", "invitados": items,
+        "invitados_busqueda": "aplicado", "invitados_busqueda_draft": "aplicado",
+        "invitados_filtro": "pendientes", "invitados_event_key": (1, 10),
+    })
+    page.width = 800
+    page.on_resize(None)
+    guest_content = control.content.controls[1].content
+    search_field = next(
+        node for node in walk(guest_content)
+        if isinstance(node, ft.TextField) and node.label in {"Buscar invitado", "Buscar mesa"}
+    )
+    scroll_control = next(
+        node for node in walk(guest_content)
+        if isinstance(node, ft.Row) and isinstance(node.data, dict)
+        and node.data.get("responsive_component") == "guest_grid_scroll"
+    )
+    search_field.value = "perez sin enviar"
+    search_field.on_change(SimpleNamespace(control=search_field))
+    assert state["invitados_busqueda_draft"] == "perez sin enviar"
+    assert state["invitados_busqueda"] == "aplicado"
+
+    for width in (1280, 800, 1280, 800, 1280, 800):
+        page.width = width
+        page.on_resize(None)
+        assert control.content.controls[1].content is guest_content
+        assert next(node for node in walk(guest_content) if node is search_field) is search_field
+        assert next(node for node in walk(guest_content) if node is scroll_control) is scroll_control
+        assert search_field.value == "perez sin enviar"
+        assert state["invitados_busqueda"] == "aplicado"
+    assert db.calls == 0 and page.clean_count == 0
+
+
 def main() -> int:
     test_layout_boundaries()
     test_arrivals_layouts_and_roles()
     test_alphabetical_order_in_both_grids()
+    test_bottom_navigation_is_viewport_constrained_for_wide_content()
     test_shell_is_viewport_bound_for_row_volumes()
     test_individual_toggles_are_local_for_long_lists()
     test_resize_preserves_state_without_queries_full_and_checkin()
+    test_guest_grid_actions_fit_tablet_portrait_and_remain_compact()
+    test_three_guest_actions_have_uniform_touch_separation_at_800()
+    test_guest_controls_and_unapplied_draft_survive_tablet_rotations()
     print("OK - responsive modes, arrivals layouts, roles, FULL/CHECKIN and resize state preservation.")
     return 0
 
