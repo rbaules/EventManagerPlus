@@ -5,6 +5,7 @@ import flet as ft
 from config import APP_MODE, APP_VERSION
 from db import create_supabase_client
 from services.session_service import PageSessionController
+from services.web_reliability import PageWebTelemetry
 from views.login_view import build_login_view
 
 
@@ -13,6 +14,8 @@ def main(
     *,
     server_session_binding: object = None,
 ) -> None:
+    web_telemetry = PageWebTelemetry(page)
+    web_telemetry.page_created()
     supabase = create_supabase_client()
     print("[APP][INFO] Modo de aplicacion:", APP_MODE)
     page.title = f"EventPlus - {APP_MODE} {APP_VERSION}"
@@ -26,6 +29,10 @@ def main(
         supabase,
         server_session_binding=server_session_binding,
     )
+    web_telemetry.bind_session(
+        lambda: session_controller.authenticated,
+        lambda: session_controller.context,
+    )
 
     def notify_home(callback_name: str) -> None:
         for control in list(page.controls):
@@ -33,17 +40,21 @@ def main(
             if callable(callback):
                 callback()
 
-    def disconnected(_event: ft.ControlEvent) -> None:
+    def disconnected(_event: ft.Event[ft.Page]) -> None:
+        web_telemetry.disconnect()
         session_controller.set_connected(False)
         notify_home("pause_dashboard")
 
-    async def connected(_event: ft.ControlEvent) -> None:
+    async def connected(_event: ft.Event[ft.Page]) -> None:
+        web_telemetry.connect()
         if not session_controller.authenticated:
             session_controller.set_connected(True)
+            web_telemetry.ready(restored_session=False)
             return
         result = await session_controller.validate_after_reconnect()
         if result.ok:
             notify_home("resume_dashboard")
+            web_telemetry.ready(restored_session=True)
             return
         await _show_login_after_invalid_session(
             page,
@@ -51,20 +62,39 @@ def main(
             session_controller,
             result.message,
         )
+        web_telemetry.ready(restored_session=False)
 
-    def closed(_event: ft.ControlEvent) -> None:
+    def closed(_event: ft.Event[ft.Page]) -> None:
+        web_telemetry.close()
         notify_home("pause_dashboard")
         session_controller.close()
+
+    def page_error(event: ft.Event[ft.Page]) -> None:
+        web_telemetry.error(event)
 
     page.on_disconnect = disconnected
     page.on_connect = connected
     page.on_close = closed
+    page.on_error = page_error
 
-    if bool(getattr(page, "web", False)) and session_controller.has_server_session:
-        validation = session_controller.validate_current_session(
-            load_context=True,
-            claim_home=True,
-        )
+    if bool(getattr(page, "web", False)):
+        restore_started = web_telemetry.restore_start()
+        if session_controller.has_server_session:
+            validation = session_controller.validate_current_session(
+                load_context=True,
+                claim_home=True,
+            )
+            web_telemetry.restore_result(
+                "OK" if validation.ok else "FAILED",
+                restore_started,
+            )
+        else:
+            validation = None
+            web_telemetry.restore_result("NONE", restore_started)
+    else:
+        validation = None
+
+    if validation is not None:
         if validation.ok and validation.should_build_home and validation.context:
             from views.home_view import build_home_view
 
@@ -88,9 +118,11 @@ def main(
                     message,
                 )
             )
+            web_telemetry.ready(restored_session=True)
             return
 
     build_login_view(page, supabase, session_controller=session_controller)
+    web_telemetry.ready(restored_session=False)
 
 
 async def _show_login_after_invalid_session(
