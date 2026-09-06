@@ -6,7 +6,7 @@ os.environ.setdefault("EVENTPLUS_ASGI", "true")
 
 import flet as ft
 from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 
 from app import main as eventplus_main
 from config import (
@@ -18,6 +18,10 @@ from services.server_session_service import (
     EventPlusSessionMiddleware,
     InMemorySessionRepository,
     create_server_session_binding,
+)
+from services.webclient_telemetry import (
+    log_webclient_telemetry,
+    parse_webclient_telemetry,
 )
 
 
@@ -41,6 +45,13 @@ app = FastAPI()
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/diagnostics/web-recovery", status_code=204)
+async def web_recovery_diagnostic(request: Request) -> Response:
+    payload = await parse_webclient_telemetry(request)
+    log_webclient_telemetry(payload)
+    return Response(status_code=204)
 
 
 @app.get("/session/logout")

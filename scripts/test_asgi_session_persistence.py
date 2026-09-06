@@ -39,6 +39,7 @@ from services.server_session_service import (  # noqa: E402
     InMemorySessionRepository,
     ServerSessionBinding,
     create_server_session_binding,
+    current_request_session_context,
 )
 from services.session_service import PageSessionController  # noqa: E402
 from views import home_view  # noqa: E402
@@ -264,6 +265,59 @@ def assert_restore_pages_logout_and_unknown_cookie() -> None:
         response = anonymous.get("/restore-test")
         assert not response.json()["restored"]
         assert "Max-Age=0" in response.headers["set-cookie"]
+
+
+async def assert_websocket_uses_raw_send_and_preserves_cookie_context() -> None:
+    repository = InMemorySessionRepository()
+    record = repository.create(
+        access_token="websocket-access",
+        refresh_token="websocket-refresh",
+        auth_user_id="websocket-user",
+        ttl_seconds=300,
+    )
+    original_send = None
+    observed_send = None
+    observed_cookie = None
+
+    async def websocket_app(
+        _scope: dict[str, Any],
+        _receive: Any,
+        send: Any,
+    ) -> None:
+        nonlocal observed_send, observed_cookie
+        observed_send = send
+        context = current_request_session_context()
+        observed_cookie = context.cookie_value if context is not None else None
+        await send({"type": "websocket.send", "bytes": b"test"})
+
+    class ExpectedDisconnect(Exception):
+        pass
+
+    async def disconnecting_send(_message: dict[str, Any]) -> None:
+        raise ExpectedDisconnect("client closed")
+
+    original_send = disconnecting_send
+    middleware = EventPlusSessionMiddleware(websocket_app, repository)
+    scope = {
+        "type": "websocket",
+        "headers": [
+            (
+                b"cookie",
+                f"{EVENTPLUS_SESSION_COOKIE_NAME}={record.opaque_id}".encode(),
+            )
+        ],
+    }
+
+    try:
+        await middleware(scope, lambda: None, original_send)
+    except ExpectedDisconnect as error:
+        assert str(error) == "client closed"
+    else:
+        raise AssertionError("WebSocket disconnect was unexpectedly suppressed")
+
+    assert observed_send is original_send
+    assert observed_cookie == record.opaque_id
+    assert current_request_session_context() is None
 
 
 def assert_expiry_revocation_and_repository_restart() -> None:
@@ -611,6 +665,7 @@ async def main_async() -> None:
     assert_asgi_health_and_routes()
     assert_cookie_creation_properties_and_rotation()
     assert_restore_pages_logout_and_unknown_cookie()
+    await assert_websocket_uses_raw_send_and_preserves_cookie_context()
     assert_expiry_revocation_and_repository_restart()
     await assert_concurrent_refresh_and_stale_write_protection()
     assert_distinct_sessions_and_safe_logs()

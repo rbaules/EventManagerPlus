@@ -298,7 +298,7 @@ def _delete_cookie_header() -> str:
 
 
 class EventPlusSessionMiddleware:
-    """Propagate the opaque cookie to HTTP callbacks and Flet WebSockets."""
+    """Expose the opaque cookie context and update HTTP responses."""
 
     def __init__(self, app: Any, repository: InMemorySessionRepository) -> None:
         self.app = app
@@ -343,8 +343,9 @@ class EventPlusSessionMiddleware:
                     )
             await send(message)
 
+        response_send = send_with_cookie if scope["type"] == "http" else send
         try:
-            await self.app(scope, receive, send_with_cookie)
+            await self.app(scope, receive, response_send)
         finally:
             _request_session_context.reset(token)
 
