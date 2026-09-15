@@ -466,6 +466,27 @@ CREATE TABLE IF NOT EXISTS "public"."evp_inv_invitacion" (
 ALTER TABLE "public"."evp_inv_invitacion" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."evp_iqr_invitacion_qr" (
+    "iqr_invitacion_qr_uuid" "uuid" DEFAULT "extensions"."gen_random_uuid"() NOT NULL,
+    "iqr_cuenta_id" integer NOT NULL,
+    "iqr_evento_id" integer NOT NULL,
+    "iqr_invitacion_id" integer NOT NULL,
+    "iqr_codigo" character varying(4) NOT NULL,
+    "iqr_estado" character varying(15) DEFAULT 'Activo'::character varying NOT NULL,
+    "iqr_valido_desde" timestamp with time zone NOT NULL,
+    "iqr_valido_hasta" timestamp with time zone NOT NULL,
+    "iqr_fecha_creacion" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "iqr_fecha_revocacion" timestamp with time zone,
+    CONSTRAINT "ck_evp_iqr_codigo_formato" CHECK (("iqr_codigo")::"text" ~ '^[A-Z0-9]{4}$'::"text"),
+    CONSTRAINT "ck_evp_iqr_estado" CHECK (("iqr_estado")::"text" = ANY (ARRAY['Activo'::"text", 'Revocado'::"text"])),
+    CONSTRAINT "ck_evp_iqr_rango_vigencia" CHECK ("iqr_valido_hasta" > "iqr_valido_desde"),
+    CONSTRAINT "ck_evp_iqr_revocacion_coherente" CHECK ((("iqr_estado")::"text" = 'Activo'::"text" AND "iqr_fecha_revocacion" IS NULL) OR (("iqr_estado")::"text" = 'Revocado'::"text" AND "iqr_fecha_revocacion" IS NOT NULL))
+);
+
+
+ALTER TABLE "public"."evp_iqr_invitacion_qr" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."evp_ivt_invitado" (
     "ivt_cuenta_id" integer NOT NULL,
     "ivt_evento_id" integer NOT NULL,
@@ -672,6 +693,14 @@ ALTER TABLE ONLY "public"."evp_inv_invitacion"
     ADD CONSTRAINT "evp_inv_invitacion_pkey" PRIMARY KEY ("inv_cuenta_id", "inv_evento_id", "inv_invitacion_id");
 
 
+ALTER TABLE ONLY "public"."evp_iqr_invitacion_qr"
+    ADD CONSTRAINT "pk_evp_iqr_invitacion_qr" PRIMARY KEY ("iqr_invitacion_qr_uuid");
+
+
+ALTER TABLE ONLY "public"."evp_iqr_invitacion_qr"
+    ADD CONSTRAINT "uq_evp_iqr_cuenta_evento_codigo" UNIQUE ("iqr_cuenta_id", "iqr_evento_id", "iqr_codigo");
+
+
 
 ALTER TABLE ONLY "public"."evp_ivt_invitado"
     ADD CONSTRAINT "evp_ivt_invitado_pkey" PRIMARY KEY ("ivt_cuenta_id", "ivt_evento_id", "ivt_invitacion_id", "ivt_invitado_id");
@@ -724,6 +753,9 @@ ALTER TABLE ONLY "public"."evp_ivt_invitado"
 
 
 CREATE UNIQUE INDEX "ux_evp_inv_cod_abrev_evento" ON "public"."evp_inv_invitacion" USING "btree" ("inv_cuenta_id", "inv_evento_id", "inv_cod_abrev_invitacion") WHERE (("inv_cod_abrev_invitacion" IS NOT NULL) AND (("inv_estado")::"text" <> 'Inactivo'::"text"));
+
+
+CREATE UNIQUE INDEX "ux_evp_iqr_invitacion_activa" ON "public"."evp_iqr_invitacion_qr" USING "btree" ("iqr_cuenta_id", "iqr_evento_id", "iqr_invitacion_id") WHERE (("iqr_estado")::"text" = 'Activo'::"text");
 
 
 
@@ -796,6 +828,10 @@ ALTER TABLE ONLY "public"."evp_eve_evento"
 
 ALTER TABLE ONLY "public"."evp_inv_invitacion"
     ADD CONSTRAINT "fk_inv_evento" FOREIGN KEY ("inv_cuenta_id", "inv_evento_id") REFERENCES "public"."evp_eve_evento"("eve_cuenta_id", "eve_evento_id");
+
+
+ALTER TABLE ONLY "public"."evp_iqr_invitacion_qr"
+    ADD CONSTRAINT "fk_evp_iqr_invitacion_qr_invitacion" FOREIGN KEY ("iqr_cuenta_id", "iqr_evento_id", "iqr_invitacion_id") REFERENCES "public"."evp_inv_invitacion"("inv_cuenta_id", "inv_evento_id", "inv_invitacion_id");
 
 
 
@@ -876,6 +912,9 @@ ALTER TABLE ONLY "public"."evp_uev_usuario_evento"
 
 ALTER TABLE ONLY "public"."evp_usr_usuario"
     ADD CONSTRAINT "fk_usr_evento_default" FOREIGN KEY ("usr_cuenta_id_default", "usr_evento_id_default") REFERENCES "public"."evp_eve_evento"("eve_cuenta_id", "eve_evento_id");
+
+
+ALTER TABLE "public"."evp_iqr_invitacion_qr" ENABLE ROW LEVEL SECURITY;
 
 
 
@@ -1005,6 +1044,11 @@ GRANT ALL ON TABLE "public"."evp_inv_invitacion" TO "authenticated";
 GRANT ALL ON TABLE "public"."evp_inv_invitacion" TO "service_role";
 
 
+REVOKE ALL ON TABLE "public"."evp_iqr_invitacion_qr" FROM PUBLIC;
+REVOKE ALL ON TABLE "public"."evp_iqr_invitacion_qr" FROM "anon";
+REVOKE ALL ON TABLE "public"."evp_iqr_invitacion_qr" FROM "authenticated";
+
+
 
 GRANT ALL ON TABLE "public"."evp_ivt_invitado" TO "anon";
 GRANT ALL ON TABLE "public"."evp_ivt_invitado" TO "authenticated";
@@ -1090,7 +1134,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
-
 
 
 
