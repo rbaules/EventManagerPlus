@@ -7,7 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 
-EXPECTED_PYTHON = (3, 14, 6)
+EXPECTED_PYTHON = (3, 14, 7)
 EXPECTED_PACKAGES = {
     "flet": "0.85.3",
     "flet-cli": "0.85.3",
