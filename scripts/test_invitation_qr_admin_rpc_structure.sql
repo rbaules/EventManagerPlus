@@ -4,6 +4,7 @@ DECLARE
     v_signature text;
     v_function_oid oid;
     v_table_oid oid := pg_catalog.to_regclass('public.evp_iqr_invitacion_qr');
+    v_expected_args text[];
 BEGIN
     FOREACH v_signature IN ARRAY ARRAY[
         'public.evp_admin_obtener_qr_invitacion(integer,integer,integer)',
@@ -12,6 +13,11 @@ BEGIN
     ] LOOP
         v_function_oid := pg_catalog.to_regprocedure(v_signature);
         IF v_function_oid IS NULL THEN RAISE EXCEPTION 'Falta %', v_signature; END IF;
+        v_expected_args := CASE v_signature
+            WHEN 'public.evp_admin_obtener_qr_invitacion(integer,integer,integer)'
+                THEN ARRAY['p_cuenta_id', 'p_evento_id', 'p_invitacion_id']
+            ELSE ARRAY['p_cuenta_id', 'p_evento_id', 'p_invitacion_id', 'p_codigo']
+        END;
         IF NOT EXISTS (
             SELECT 1 FROM pg_catalog.pg_proc AS p
             JOIN pg_catalog.pg_roles AS r ON r.oid = p.proowner
@@ -29,6 +35,10 @@ BEGIN
                     ) = ''
               )
         ) THEN RAISE EXCEPTION 'Metadatos inseguros o retorno incorrecto: %', v_signature; END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_proc AS p
+            WHERE p.oid = v_function_oid AND p.proargnames = v_expected_args
+        ) THEN RAISE EXCEPTION 'Nombres de parametros incorrectos: %', v_signature; END IF;
         IF EXISTS (
             SELECT 1 FROM pg_catalog.pg_proc AS p
             CROSS JOIN LATERAL pg_catalog.aclexplode(
@@ -54,6 +64,11 @@ BEGIN
         WHERE attrelid = v_table_oid AND attnum > 0 AND NOT attisdropped) <> 10 THEN
         RAISE EXCEPTION 'Columnas QR-1B alteradas';
     END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_attribute AS a
+        WHERE a.attrelid = v_table_oid AND a.attname = 'iqr_codigo'
+          AND a.atttypid = 'pg_catalog.varchar'::pg_catalog.regtype AND a.atttypmod = 8
+    ) THEN RAISE EXCEPTION 'iqr_codigo no es varchar(4)'; END IF;
     IF NOT EXISTS (
         SELECT 1 FROM pg_catalog.pg_constraint
         WHERE conrelid = v_table_oid AND conname = 'uq_evp_iqr_cuenta_evento_codigo' AND contype = 'u'
