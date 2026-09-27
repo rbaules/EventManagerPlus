@@ -1,6 +1,6 @@
 ## Compatibilidad del entorno
 
-- El proyecto utiliza Python 3.14.6.
+- El proyecto utiliza Python 3.14.7.
 - Utilizar siempre `env\Scripts\python.exe`.
 - No utilizar el Python global.
 - El proyecto utiliza Flet 0.85.3 hasta que exista una decision explicita de actualizacion.
