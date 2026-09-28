@@ -1,0 +1,130 @@
+-- Llegadas por invitacion: backend comun para check-in manual y QR-2B.
+CREATE FUNCTION public.evp_oper_obtener_grupo_invitacion(
+    p_cuenta_id integer, p_evento_id integer, p_invitacion_id integer
+) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $function$
+DECLARE
+    v_actor public.evp_usr_usuario%ROWTYPE;
+    v_cuenta public.evp_cta_cuenta%ROWTYPE;
+    v_evento public.evp_eve_evento%ROWTYPE;
+    v_invitacion public.evp_inv_invitacion%ROWTYPE;
+    v_invitados jsonb;
+BEGIN
+    SELECT * INTO v_actor FROM public.evp_usr_usuario
+    WHERE usr_usuario_auth_uuid = auth.uid() AND usr_estado = 'Activo';
+    IF NOT FOUND THEN RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_NOT_ALLOWED'); END IF;
+    IF NOT v_actor.usr_es_usuario_master AND NOT EXISTS (
+        SELECT 1 FROM public.evp_ucu_usuario_cuenta r
+        WHERE r.ucu_usuario_id = v_actor.usr_usuario_id AND r.ucu_cuenta_id = p_cuenta_id
+          AND r.ucu_estado = 'Activo' AND r.ucu_rol = 'Administrador'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM public.evp_ucu_usuario_cuenta r JOIN public.evp_uev_usuario_evento e
+          ON e.uev_usuario_id = r.ucu_usuario_id AND e.uev_cuenta_id = p_cuenta_id AND e.uev_evento_id = p_evento_id
+        WHERE r.ucu_usuario_id = v_actor.usr_usuario_id AND r.ucu_cuenta_id = p_cuenta_id
+          AND r.ucu_estado = 'Activo' AND r.ucu_rol IN ('Operador', 'Consulta') AND e.uev_estado = 'Activo'
+    ) THEN RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_NOT_ALLOWED'); END IF;
+    SELECT * INTO v_cuenta FROM public.evp_cta_cuenta WHERE cta_cuenta_id = p_cuenta_id;
+    IF NOT FOUND OR v_cuenta.cta_estado <> 'Activo' THEN RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_EVENT_NOT_ALLOWED'); END IF;
+    SELECT * INTO v_evento FROM public.evp_eve_evento WHERE eve_cuenta_id = p_cuenta_id AND eve_evento_id = p_evento_id;
+    IF NOT FOUND OR v_evento.eve_estado <> 'Activo' OR v_evento.eve_fase_evento <> 'En_proceso' THEN RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_EVENT_NOT_ALLOWED'); END IF;
+    SELECT * INTO v_invitacion FROM public.evp_inv_invitacion
+    WHERE inv_cuenta_id = p_cuenta_id AND inv_evento_id = p_evento_id AND inv_invitacion_id = p_invitacion_id;
+    IF NOT FOUND OR v_invitacion.inv_estado <> 'Activo' THEN RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_INVITATION_NOT_FOUND'); END IF;
+    SELECT pg_catalog.coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+        'invitado_id', i.ivt_invitado_id, 'nombre', i.ivt_nombre_invitado,
+        'mesa_id', i.ivt_mesa_id, 'mesa_nombre', m.mes_nombre_mesa,
+        'llegada_confirmada', i.ivt_llegada_confirmada,
+        'fecha_hora_llegada', i.ivt_fecha_hora_conf_llegada
+    ) ORDER BY i.ivt_puesto_id NULLS LAST, i.ivt_invitado_id), '[]'::jsonb)
+    INTO v_invitados
+    FROM public.evp_ivt_invitado i
+    LEFT JOIN public.evp_mes_mesa m ON m.mes_cuenta_id=i.ivt_cuenta_id AND m.mes_evento_id=i.ivt_evento_id
+      AND m.mes_mesa_id=i.ivt_mesa_id
+    WHERE i.ivt_cuenta_id=p_cuenta_id AND i.ivt_evento_id=p_evento_id
+      AND i.ivt_invitacion_id=p_invitacion_id AND i.ivt_estado='Activo';
+    RETURN pg_catalog.jsonb_build_object('ok', true, 'codigo_resultado', 'ARRIVAL_GROUP_LOADED',
+      'cuenta_id', p_cuenta_id, 'evento_id', p_evento_id, 'invitacion_id', p_invitacion_id,
+      'destinatario', v_invitacion.inv_destinatario_invitacion, 'invitados', v_invitados);
+EXCEPTION WHEN OTHERS THEN
+    RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_OPERATION_ERROR');
+END;
+$function$;
+
+CREATE FUNCTION public.evp_oper_confirmar_llegadas_invitacion(
+    p_cuenta_id integer, p_evento_id integer, p_invitacion_id integer, p_invitado_ids integer[]
+) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $function$
+DECLARE
+    v_actor public.evp_usr_usuario%ROWTYPE;
+    v_cuenta public.evp_cta_cuenta%ROWTYPE;
+    v_evento public.evp_eve_evento%ROWTYPE;
+    v_invitacion public.evp_inv_invitacion%ROWTYPE;
+    v_encontrados integer[];
+    v_ya_confirmado boolean := false;
+    v_solicitados integer;
+    v_confirmados integer;
+    v_fecha_confirmacion timestamp with time zone;
+BEGIN
+    IF p_invitado_ids IS NULL OR pg_catalog.cardinality(p_invitado_ids) = 0 THEN
+        RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_EMPTY_SELECTION');
+    END IF;
+    IF pg_catalog.array_position(p_invitado_ids, NULL) IS NOT NULL
+       OR (SELECT pg_catalog.count(*) <> pg_catalog.count(DISTINCT x) FROM pg_catalog.unnest(p_invitado_ids) AS u(x)) THEN
+        RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_INVALID_SELECTION');
+    END IF;
+    v_solicitados := pg_catalog.cardinality(p_invitado_ids);
+    SELECT * INTO v_actor FROM public.evp_usr_usuario
+    WHERE usr_usuario_auth_uuid = auth.uid() AND usr_estado = 'Activo';
+    IF NOT FOUND THEN RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_NOT_ALLOWED'); END IF;
+    IF NOT v_actor.usr_es_usuario_master AND NOT EXISTS (
+        SELECT 1 FROM public.evp_ucu_usuario_cuenta r WHERE r.ucu_usuario_id=v_actor.usr_usuario_id
+          AND r.ucu_cuenta_id=p_cuenta_id AND r.ucu_estado='Activo' AND r.ucu_rol='Administrador'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM public.evp_ucu_usuario_cuenta r JOIN public.evp_uev_usuario_evento e
+          ON e.uev_usuario_id=r.ucu_usuario_id AND e.uev_cuenta_id=p_cuenta_id AND e.uev_evento_id=p_evento_id
+        WHERE r.ucu_usuario_id=v_actor.usr_usuario_id AND r.ucu_cuenta_id=p_cuenta_id
+          AND r.ucu_estado='Activo' AND r.ucu_rol='Operador' AND e.uev_estado='Activo'
+    ) THEN RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_NOT_ALLOWED'); END IF;
+    SELECT * INTO v_cuenta FROM public.evp_cta_cuenta WHERE cta_cuenta_id=p_cuenta_id;
+    IF NOT FOUND OR v_cuenta.cta_estado<>'Activo' THEN RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_EVENT_NOT_ALLOWED'); END IF;
+    SELECT * INTO v_evento FROM public.evp_eve_evento WHERE eve_cuenta_id=p_cuenta_id AND eve_evento_id=p_evento_id;
+    IF NOT FOUND OR v_evento.eve_estado<>'Activo' OR v_evento.eve_fase_evento<>'En_proceso' THEN RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_EVENT_NOT_ALLOWED'); END IF;
+    SELECT * INTO v_invitacion FROM public.evp_inv_invitacion WHERE inv_cuenta_id=p_cuenta_id
+      AND inv_evento_id=p_evento_id AND inv_invitacion_id=p_invitacion_id FOR UPDATE;
+    IF NOT FOUND OR v_invitacion.inv_estado<>'Activo' THEN RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_INVITATION_NOT_FOUND'); END IF;
+    SELECT pg_catalog.array_agg(g.ivt_invitado_id ORDER BY g.ivt_invitado_id),
+           pg_catalog.coalesce(pg_catalog.bool_or(g.ivt_llegada_confirmada), false)
+    INTO v_encontrados, v_ya_confirmado
+    FROM (
+        SELECT i.ivt_invitado_id, i.ivt_llegada_confirmada FROM public.evp_ivt_invitado i
+        WHERE i.ivt_cuenta_id=p_cuenta_id AND i.ivt_evento_id=p_evento_id AND i.ivt_invitacion_id=p_invitacion_id
+          AND i.ivt_invitado_id=ANY(p_invitado_ids) AND i.ivt_estado='Activo' FOR UPDATE
+    ) AS g;
+    IF pg_catalog.coalesce(pg_catalog.cardinality(v_encontrados), 0) <> v_solicitados THEN
+        RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_INVALID_SELECTION');
+    END IF;
+    IF v_ya_confirmado THEN RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_ALREADY_CONFIRMED'); END IF;
+    v_fecha_confirmacion := pg_catalog.clock_timestamp();
+    UPDATE public.evp_ivt_invitado SET ivt_llegada_confirmada=true,
+      ivt_fecha_hora_conf_llegada=v_fecha_confirmacion, ivt_usuario_conf_llegada=v_actor.usr_usuario_id
+    WHERE ivt_cuenta_id=p_cuenta_id AND ivt_evento_id=p_evento_id AND ivt_invitacion_id=p_invitacion_id
+      AND ivt_invitado_id=ANY(p_invitado_ids) AND ivt_estado='Activo' AND ivt_llegada_confirmada=false;
+    GET DIAGNOSTICS v_confirmados = ROW_COUNT;
+    IF v_confirmados <> v_solicitados THEN RAISE EXCEPTION 'Arrival batch changed unexpectedly'; END IF;
+    RETURN pg_catalog.jsonb_build_object('ok', true, 'codigo_resultado', 'ARRIVAL_CONFIRMED',
+      'cuenta_id',p_cuenta_id,'evento_id',p_evento_id,'invitacion_id',p_invitacion_id,
+      'solicitados',v_solicitados,'confirmados',v_confirmados,'invitado_ids',p_invitado_ids,
+      'fecha_hora_confirmacion',v_fecha_confirmacion,'usuario_confirmacion',v_actor.usr_usuario_id);
+EXCEPTION WHEN OTHERS THEN
+    RETURN pg_catalog.jsonb_build_object('ok', false, 'codigo_resultado', 'ARRIVAL_OPERATION_ERROR');
+END;
+$function$;
+
+ALTER FUNCTION public.evp_oper_obtener_grupo_invitacion(integer,integer,integer) OWNER TO postgres;
+ALTER FUNCTION public.evp_oper_confirmar_llegadas_invitacion(integer,integer,integer,integer[]) OWNER TO postgres;
+REVOKE ALL ON FUNCTION public.evp_oper_obtener_grupo_invitacion(integer,integer,integer) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.evp_oper_confirmar_llegadas_invitacion(integer,integer,integer,integer[]) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.evp_oper_obtener_grupo_invitacion(integer,integer,integer) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.evp_oper_confirmar_llegadas_invitacion(integer,integer,integer,integer[]) TO authenticated;

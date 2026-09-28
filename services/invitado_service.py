@@ -1090,52 +1090,49 @@ def cargar_grupo_invitacion(
             invitados=[],
         )
 
-    print(
-        "[INVITADOS][INFO] Cargando grupo de invitacion:",
-        f"cuenta={key[0]}",
-        f"evento={key[1]}",
-        f"invitacion={invitacion_id}",
-    )
+    print("[INVITADOS][INFO] Cargando grupo de invitacion por RPC:", f"cuenta={key[0]}", f"evento={key[1]}", f"invitacion={invitacion_id}")
     supabase = _require_supabase(supabase)
     try:
-        nombres_mesa = _cargar_nombres_mesa(supabase, key)
-        invitacion_response = (
-            supabase
-            .table("evp_inv_invitacion")
-            .select(
-                "inv_cuenta_id,inv_evento_id,inv_invitacion_id,"
-                "inv_cod_abrev_invitacion,inv_destinatario_invitacion,inv_estado"
-            )
-            .eq("inv_cuenta_id", key[0])
-            .eq("inv_evento_id", key[1])
-            .eq("inv_invitacion_id", invitacion_id)
-            .eq("inv_estado", "Activo")
-            .limit(1)
-            .execute()
-        )
-        invitados_response = (
-            supabase
-            .table("evp_ivt_invitado")
-            .select(SELECT_INVITADO)
-            .eq("ivt_cuenta_id", key[0])
-            .eq("ivt_evento_id", key[1])
-            .eq("ivt_invitacion_id", invitacion_id)
-            .eq("ivt_estado", "Activo")
-            .order("ivt_puesto_id")
-            .execute()
-        )
+        response = supabase.rpc("evp_oper_obtener_grupo_invitacion", {
+            "p_cuenta_id": key[0], "p_evento_id": key[1], "p_invitacion_id": invitacion_id,
+        }).execute()
     except Exception as ex:
-        print("[INVITADOS][ERROR] Error al cargar grupo de invitacion:", type(ex).__name__, str(ex))
+        print("[INVITADOS][ERROR] Error RPC al cargar grupo:", type(ex).__name__, str(ex))
         err = _resultado_error_operacion(ex)
         return ResultadoGrupoInvitacion(False, err.estado, "No fue posible cargar la invitacion seleccionada.", None, [])
 
-    invitacion_data = extract_data(invitacion_response)
-    invitacion = normalizar_invitacion(to_dict(invitacion_data[0]) or {}) if invitacion_data else None
-    invitados = [
-        invitado
-        for row in extract_data(invitados_response)
-        if (invitado := normalizar_invitado(to_dict(row) or {}, nombres_mesa)) is not None
-    ]
+    data = extract_data(response)
+    payload = to_dict(data[0]) if isinstance(data, list) and data else to_dict(data)
+    payload = payload or {}
+    codigo = _texto(safe_get(payload, "codigo_resultado")) or "ARRIVAL_OPERATION_ERROR"
+    if not bool(safe_get(payload, "ok", False)) or codigo != "ARRIVAL_GROUP_LOADED":
+        return ResultadoGrupoInvitacion(False, codigo.lower(), "No fue posible cargar la invitacion seleccionada.", None, [])
+    invitados = []
+    for row in safe_get(payload, "invitados") or []:
+        item = to_dict(row) or {}
+        invitado_id_rpc = _normalizar_id(safe_get(item, "invitado_id"))
+        if invitado_id_rpc is None:
+            continue
+        mesa_id = _normalizar_id(safe_get(item, "mesa_id"))
+        invitados.append({
+            "cuenta_id": key[0], "evento_id": key[1], "invitacion_id": invitacion_id,
+            # Identificador local de UI; la RPC nunca expone ivt_invitado_uuid.
+            "invitado_uuid": f"arrival-{key[0]}-{key[1]}-{invitacion_id}-{invitado_id_rpc}",
+            "invitado_id": invitado_id_rpc, "nombre_completo": _texto(safe_get(item, "nombre")) or "Invitado sin nombre",
+            "mesa_id": mesa_id, "mesa_texto": _texto(safe_get(item, "mesa_nombre")) or (f"Mesa {mesa_id}" if mesa_id is not None else "Sin mesa"),
+            "llegada_confirmada": _normalizar_bool(safe_get(item, "llegada_confirmada")),
+            "estado_llegada": _estado_llegada(_normalizar_bool(safe_get(item, "llegada_confirmada"))),
+            "fecha_hora_conf_llegada": safe_get(item, "fecha_hora_llegada"), "usuario_conf_llegada": "",
+            "es_invitado_principal": False, "tipo_invitado": "Acompanante", "es_invitado_imprevisto": False,
+            "origen_invitado": "Previsto", "email": "", "telefono": "", "puesto_id": None,
+            "puesto_texto": "Sin puesto", "tiene_novedad": False, "descripcion_novedad": "",
+            "novedad_creada": None, "novedad_creada_por": "", "novedad_mod": None, "novedad_mod_por": "", "estado": "Activo",
+        })
+    invitacion = {
+        "cuenta_id": key[0], "evento_id": key[1], "invitacion_id": invitacion_id,
+        "destinatario": _texto(safe_get(payload, "destinatario")) or f"Invitacion {invitacion_id}",
+        "codigo": "", "estado": "Activo",
+    }
     if not invitados:
         print("[INVITADOS][WARNING] Invitacion sin integrantes recuperables.")
         return ResultadoGrupoInvitacion(
@@ -1199,68 +1196,39 @@ def confirmar_llegadas_invitados(
             [],
         )
 
+    ids = [_normalizar_id(item.get("invitado_id")) for item in invitados_seleccionados]
+    if any(item is None for item in ids):
+        return ResultadoConfirmacionGrupo(False, "invalid_selection", "La seleccion contiene un invitado invalido.", 0, 0, [])
+    if any((_normalizar_id(item.get("cuenta_id")), _normalizar_id(item.get("evento_id"))) != key
+           or _normalizar_id(item.get("invitacion_id")) != invitacion_id for item in invitados_seleccionados):
+        return ResultadoConfirmacionGrupo(False, "invalid_selection", "La seleccion contiene un invitado de otra invitacion.", 0, 0, [])
     supabase = _require_supabase(supabase)
-    bloqueo_real = _validar_evento_real_operativo(evento_activo, supabase)
-    if bloqueo_real:
-        return ResultadoConfirmacionGrupo(False, bloqueo_real.estado, bloqueo_real.mensaje, 0, 0, [])
-
-    confirmados = 0
-    omitidos = 0
-    actualizados: list[dict[str, Any]] = []
-    print("[INVITADOS][INFO] Llegadas solicitadas:", len(invitados_seleccionados))
-    for invitado in invitados_seleccionados:
-        invitado_key = (
-            _normalizar_id(invitado.get("cuenta_id")),
-            _normalizar_id(invitado.get("evento_id")),
-        )
-        if invitado_key != key or _normalizar_id(invitado.get("invitacion_id")) != invitacion_id:
-            omitidos += 1
-            print("[INVITADOS][WARNING] Invitado fuera de invitacion rechazado.")
-            continue
-        resultado = confirmar_llegada(contexto, invitado, supabase=supabase)
-        if resultado.ok:
-            confirmados += 1
-        else:
-            omitidos += 1
-        if resultado.invitado:
-            actualizados.append(resultado.invitado)
-
-    grupo = cargar_grupo_invitacion(
-        evento_activo,
-        {
-            "cuenta_id": key[0],
-            "evento_id": key[1],
-            "invitacion_id": invitacion_id,
-            "invitado_id": invitados_seleccionados[0].get("invitado_id"),
-        },
-        supabase=supabase,
-    )
-    invitados_actuales = grupo.invitados if grupo.ok else actualizados
-    if confirmados == 0:
-        return ResultadoConfirmacionGrupo(
-            ok=False,
-            estado="no_updates",
-            mensaje="No se confirmaron nuevas llegadas. El estado fue actualizado para revisar la invitacion.",
-            confirmados=0,
-            omitidos=omitidos,
-            invitados=invitados_actuales,
-        )
-    mensaje = (
-        f"Se confirmo correctamente {confirmados} llegada."
-        if confirmados == 1
-        else f"Se confirmaron correctamente {confirmados} llegadas."
-    )
-    if omitidos:
-        mensaje = f"{mensaje} {omitidos} seleccion no requirio actualizacion."
-    print("[INVITADOS][INFO] Llegadas confirmadas:", confirmados, "omitidas:", omitidos)
-    return ResultadoConfirmacionGrupo(
-        ok=True,
-        estado="success",
-        mensaje=mensaje,
-        confirmados=confirmados,
-        omitidos=omitidos,
-        invitados=invitados_actuales,
-    )
+    try:
+        response = supabase.rpc("evp_oper_confirmar_llegadas_invitacion", {
+            "p_cuenta_id": key[0], "p_evento_id": key[1], "p_invitacion_id": invitacion_id,
+            "p_invitado_ids": ids,
+        }).execute()
+    except Exception as ex:
+        print("[INVITADOS][ERROR] Error RPC al confirmar llegadas:", type(ex).__name__, str(ex))
+        return ResultadoConfirmacionGrupo(False, "connection_error", "No fue posible confirmar las llegadas. Intenta nuevamente.", 0, 0, [])
+    data = extract_data(response)
+    payload = to_dict(data[0]) if isinstance(data, list) and data else to_dict(data)
+    payload = payload or {}
+    codigo = _texto(safe_get(payload, "codigo_resultado")) or "ARRIVAL_OPERATION_ERROR"
+    grupo = cargar_grupo_invitacion(evento_activo, {"cuenta_id": key[0], "evento_id": key[1], "invitacion_id": invitacion_id, "invitado_id": ids[0]}, supabase=supabase)
+    invitados_actuales = grupo.invitados if grupo.ok else []
+    if not bool(safe_get(payload, "ok", False)) or codigo != "ARRIVAL_CONFIRMED":
+        estados_rpc = {
+            "ARRIVAL_ALREADY_CONFIRMED": "no_updates",
+            "ARRIVAL_INVALID_SELECTION": "invalid_selection",
+            "ARRIVAL_EMPTY_SELECTION": "empty_selection",
+            "ARRIVAL_EVENT_NOT_ALLOWED": "phase_denied",
+            "ARRIVAL_NOT_ALLOWED": "role_denied",
+        }
+        return ResultadoConfirmacionGrupo(False, estados_rpc.get(codigo, codigo.lower()), "No se confirmaron nuevas llegadas. Revisa el grupo e intenta nuevamente.", 0, 0, invitados_actuales)
+    confirmados = _normalizar_id(safe_get(payload, "confirmados")) or 0
+    mensaje = f"Se confirmo correctamente {confirmados} llegada." if confirmados == 1 else f"Se confirmaron correctamente {confirmados} llegadas."
+    return ResultadoConfirmacionGrupo(True, "success", mensaje, confirmados, 0, invitados_actuales)
 
 
 def reversar_llegada(

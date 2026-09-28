@@ -167,6 +167,33 @@ class FakeSupabase:
         assert name in {"evp_ivt_invitado", "evp_inv_invitacion", "evp_eve_evento", "evp_mes_mesa"}
         return FakeQuery(self, name)
 
+    def rpc(self, name: str, params: dict[str, Any]) -> Any:
+        db = self
+        class Rpc:
+            def execute(self) -> Response:
+                if db.fail:
+                    raise db.fail
+                if db.evento["eve_fase_evento"] != "En_proceso" or db.evento["eve_estado"] != "Activo":
+                    return Response({"ok": False, "codigo_resultado": "ARRIVAL_EVENT_NOT_ALLOWED"})
+                cuenta, evento, invitacion = params["p_cuenta_id"], params["p_evento_id"], params["p_invitacion_id"]
+                miembros = [x for x in db.invitados if (x["ivt_cuenta_id"], x["ivt_evento_id"], x["ivt_invitacion_id"]) == (cuenta, evento, invitacion) and x["ivt_estado"] == "Activo"]
+                if name == "evp_oper_obtener_grupo_invitacion":
+                    inv = next((x for x in db.invitaciones if (x["inv_cuenta_id"], x["inv_evento_id"], x["inv_invitacion_id"]) == (cuenta, evento, invitacion)), None)
+                    if not inv:
+                        return Response({"ok": False, "codigo_resultado": "ARRIVAL_INVITATION_NOT_FOUND"})
+                    return Response({"ok": True, "codigo_resultado": "ARRIVAL_GROUP_LOADED", "destinatario": inv["inv_destinatario_invitacion"], "invitados": [{"invitado_id": x["ivt_invitado_id"], "nombre": x["ivt_nombre_invitado"], "mesa_id": x["ivt_mesa_id"], "mesa_nombre": "Mesa Principal", "llegada_confirmada": x["ivt_llegada_confirmada"], "fecha_hora_llegada": x["ivt_fecha_hora_conf_llegada"]} for x in miembros]})
+                ids = params["p_invitado_ids"]
+                if not ids:
+                    return Response({"ok": False, "codigo_resultado": "ARRIVAL_EMPTY_SELECTION"})
+                if len(ids) != len(set(ids)):
+                    return Response({"ok": False, "codigo_resultado": "ARRIVAL_INVALID_SELECTION"})
+                selected = [x for x in miembros if x["ivt_invitado_id"] in ids]
+                if len(selected) != len(ids): return Response({"ok": False, "codigo_resultado": "ARRIVAL_INVALID_SELECTION"})
+                if any(x["ivt_llegada_confirmada"] for x in selected): return Response({"ok": False, "codigo_resultado": "ARRIVAL_ALREADY_CONFIRMED"})
+                for item in selected: item.update({"ivt_llegada_confirmada": True, "ivt_fecha_hora_conf_llegada": "batch-time", "ivt_usuario_conf_llegada": "user-1"})
+                return Response({"ok": True, "codigo_resultado": "ARRIVAL_CONFIRMED", "confirmados": len(selected)})
+        return Rpc()
+
 
 def contexto(rol: str = "Operador", fase: str = "En_proceso", estado: str = "Activo") -> dict[str, Any]:
     evento = {
@@ -254,7 +281,7 @@ def test_reglas_fase_rol_evento_y_integridad() -> None:
 
     otro_evento = dict(grupo.invitados[0], cuenta_id=2)
     integridad = confirmar_llegadas_invitados(contexto(), grupo.invitacion, [otro_evento], supabase=db)
-    assert not integridad.ok and integridad.estado == "no_updates"
+    assert not integridad.ok and integridad.estado == "invalid_selection"
 
 
 def test_ui_arrivals_builds() -> None:
