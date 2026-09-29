@@ -15,7 +15,7 @@ from components.app_shell import app_shell
 from components.bottom_navigation import bottom_navigation
 from components.responsive import layout_mode, uses_operational_cards
 from services.auth_service import sign_out_local_session
-from services.authorization_service import capacidades_contexto, puede_administrar_lugares, puede_ver_administracion_eventos, puede_ver_administracion_usuarios, puede_ver_importacion_excel
+from services.authorization_service import capacidades_contexto, puede_administrar_lugares, puede_consultar, puede_ver_administracion_eventos, puede_ver_administracion_usuarios, puede_ver_importacion_excel
 from services.excel_import_service import consultar_evento_tiene_datos, ejecutar_importacion, generar_archivo_errores, leer_archivo_excel, preview_coincide_contexto, validar_contexto_importacion, vincular_preview_contexto
 from services.excel_template_service import TEMPLATE_FILENAME, generar_plantilla_excel
 from services.dashboard_service import DashboardRefreshController, IndicadoresDashboard, obtener_indicadores_dashboard
@@ -63,6 +63,7 @@ from services.invitado_service import (
     puede_registrar_imprevisto,
     puede_reversar_llegada,
     reversar_llegada,
+    resolver_invitacion_qr,
 )
 from services.time_service import fecha_hora_panama
 from services.session_service import PageSessionController
@@ -173,6 +174,7 @@ def build_home_view(
         "arrivals_estado": "idle",
         "arrivals_mensaje": "",
         "arrivals_busqueda": "",
+        "arrivals_qr_codigo": "",
         "arrivals_resultados": [],
         "arrivals_invitacion": None,
         "arrivals_integrantes": [],
@@ -440,7 +442,7 @@ def build_home_view(
             )
 
         if state["selected"] == "arrivals":
-            if contexto_usuario.get("puede_registrar_llegadas"):
+            if puede_consultar(contexto_usuario):
                 return arrivals_view(
                     contexto=contexto_usuario,
                     estado=state["arrivals_estado"],
@@ -464,10 +466,13 @@ def build_home_view(
                     on_novelty=mostrar_novedad_invitado,
                     can_edit_novelty=puede_editar_novedad(contexto_usuario),
                     layout=state["layout_mode"],
+                    qr_codigo=state["arrivals_qr_codigo"],
+                    on_qr_search=buscar_qr_llegadas,
+                    can_confirm_arrival=bool(contexto_usuario.get("puede_registrar_llegadas")),
                 )
             return _placeholder(
                 "Acceso no permitido",
-                "El evento actual no permite registrar llegadas con tu rol o fase actual.",
+                "El evento actual no permite consultar llegadas con tu rol o fase actual.",
             )
 
         if state["selected"] == "preferences":
@@ -511,6 +516,7 @@ def build_home_view(
             selected=state["selected"],
             can_use_app=can_use_app,
             can_register_arrivals=bool(contexto_usuario.get("puede_registrar_llegadas")),
+            can_view_arrivals=puede_consultar(contexto_usuario),
             on_select=select_tab,
             navigation=ui["navigation"] if isinstance(ui["navigation"], ft.NavigationBar) else None,
         )
@@ -1331,6 +1337,7 @@ def build_home_view(
         state["arrivals_estado"] = "idle"
         state["arrivals_mensaje"] = ""
         state["arrivals_busqueda"] = ""
+        state["arrivals_qr_codigo"] = ""
         state["arrivals_resultados"] = []
         state["arrivals_invitacion"] = None
         state["arrivals_integrantes"] = []
@@ -2081,9 +2088,12 @@ def build_home_view(
             state["arrivals_mensaje"] = "Selecciona un evento antes de registrar llegadas."
             render()
             return
-        if not contexto_usuario.get("puede_registrar_llegadas"):
+        if not puede_consultar(contexto_usuario):
             state["arrivals_estado"] = "error"
-            state["arrivals_mensaje"] = "El registro de llegadas solo esta disponible cuando el evento se encuentra en fase Evento en proceso."
+            state["arrivals_mensaje"] = "No tiene permisos para consultar llegadas en el evento actual."
+        elif not contexto_usuario.get("puede_registrar_llegadas"):
+            state["arrivals_estado"] = "idle"
+            state["arrivals_mensaje"] = "Puede consultar invitaciones; su perfil es de solo lectura."
         else:
             state["arrivals_estado"] = "idle"
             state["arrivals_mensaje"] = "Busca un invitado para cargar su invitacion completa."
@@ -2150,6 +2160,62 @@ def build_home_view(
 
     def reintentar_llegadas() -> None:
         buscar_llegadas(str(state["arrivals_busqueda"]))
+
+    def buscar_qr_llegadas(codigo: str) -> None:
+        active_key = evento_activo_key()
+        if active_key is None:
+            reset_llegadas()
+            state["arrivals_estado"] = "event_required"
+            state["arrivals_mensaje"] = "Selecciona un evento antes de consultar un código QR."
+            render()
+            return
+        codigo_normalizado = (codigo or "").strip().upper()
+        state["arrivals_qr_codigo"] = codigo_normalizado
+        if not codigo_normalizado:
+            state["arrivals_estado"] = "idle"
+            state["arrivals_mensaje"] = "Ingresa un código QR."
+            render()
+            return
+        if state["arrivals_loading"] or state["arrivals_saving"]:
+            return
+
+        state["arrivals_loading"] = True
+        state["arrivals_estado"] = "loading"
+        state["arrivals_mensaje"] = "Consultando código QR..."
+        state["arrivals_request_id"] += 1
+        request_id = state["arrivals_request_id"]
+        state["arrivals_event_key"] = active_key
+        render()
+
+        def worker() -> None:
+            try:
+                resolucion = resolver_invitacion_qr(
+                    active_key[0], active_key[1], codigo_normalizado, supabase=supabase,
+                )
+                if request_id != state["arrivals_request_id"] or active_key != evento_activo_key():
+                    print("[QR][WARNING] Resultado QR antiguo ignorado.")
+                    return
+                if not resolucion.ok or not resolucion.invitacion:
+                    state["arrivals_estado"] = "error"
+                    state["arrivals_mensaje"] = resolucion.mensaje
+                    return
+                grupo = cargar_grupo_invitacion(
+                    contexto_usuario.get("evento_actual"), resolucion.invitacion, supabase=supabase,
+                )
+                if request_id != state["arrivals_request_id"] or active_key != evento_activo_key():
+                    print("[QR][WARNING] Grupo QR antiguo ignorado.")
+                    return
+                state["arrivals_estado"] = grupo.estado if grupo.ok else "error"
+                state["arrivals_mensaje"] = grupo.mensaje
+                state["arrivals_invitacion"] = grupo.invitacion
+                state["arrivals_integrantes"] = grupo.invitados
+                state["arrivals_resultados"] = []
+                state["arrivals_seleccionados"] = set()
+            finally:
+                state["arrivals_loading"] = False
+                render()
+
+        page.run_thread(worker)
 
     def seleccionar_invitado_llegadas(invitado: dict[str, Any]) -> None:
         active_key = evento_activo_key()
@@ -2220,6 +2286,10 @@ def build_home_view(
 
     def confirmar_seleccion_llegadas() -> None:
         if state["arrivals_saving"]:
+            return
+        if not contexto_usuario.get("puede_registrar_llegadas"):
+            state["arrivals_mensaje"] = "Su perfil permite consultar, pero no confirmar llegadas."
+            render()
             return
         seleccionados = set(state["arrivals_seleccionados"])
         integrantes = [

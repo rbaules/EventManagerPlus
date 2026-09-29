@@ -135,6 +135,7 @@ def construir_fila_llegada(
     on_reverse_arrival: Any,
     on_novelty: Any,
     can_edit_novelty: bool = True,
+    can_confirm_arrival: bool = True,
 ) -> ft.Control:
     llegada = bool(invitado.get("llegada_confirmada"))
     invitado_id = _get(invitado, "invitado_id", "sin_id")
@@ -154,13 +155,15 @@ def construir_fila_llegada(
         )
     elif llegada:
         accion = ft.Text("Llegada confirmada", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
-    else:
+    elif can_confirm_arrival:
         accion = ft.Checkbox(
             label="Seleccionar",
             value=selected,
             disabled=is_saving,
             on_change=lambda e: on_toggle(invitado, bool(e.control.value)),
         )
+    else:
+        accion = ft.Text("Solo lectura", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
 
     return ft.Container(
         content=ft.ResponsiveRow(
@@ -235,21 +238,28 @@ def arrivals_view(
     on_novelty: Any = None,
     layout: LayoutMode = LayoutMode.DESKTOP_WIDE,
     can_edit_novelty: bool = True,
+    qr_codigo: str = "",
+    on_qr_search: Any = None,
+    can_confirm_arrival: bool | None = None,
 ) -> ft.Control:
     on_novelty = on_novelty or (lambda invitado: None)
+    on_qr_search = on_qr_search or (lambda codigo: None)
+    if can_confirm_arrival is None:
+        can_confirm_arrival = bool(contexto.get("puede_registrar_llegadas"))
     evento = contexto.get("evento_actual") or {}
-    if not contexto.get("puede_registrar_llegadas"):
-        return ft.ListView(
-            controls=[
-                _state_card(
-                    "Registro no disponible",
-                    "El registro de llegadas solo esta disponible cuando el evento esta Activo y en fase Evento en proceso.",
-                    ft.Icons.EVENT_BUSY,
-                )
-            ],
-            spacing=16,
-            expand=True,
-        )
+
+    qr_field = ft.TextField(
+        label="Código QR",
+        hint_text="Ingresa los 4 caracteres",
+        value=qr_codigo,
+        prefix_icon=ft.Icons.SEARCH,
+        max_length=4,
+        capitalization=ft.TextCapitalization.CHARACTERS,
+        autofocus=False,
+        disabled=is_loading or is_saving,
+        on_submit=lambda e: on_qr_search(e.control.value),
+        data={"arrivals_qr": "input"},
+    )
 
     search_field = ft.TextField(
         label="Buscar invitado",
@@ -272,6 +282,24 @@ def arrivals_view(
                 ft.Text("Registrar llegadas", size=26, weight=ft.FontWeight.BOLD, expand=True),
             ],
             vertical_alignment=ft.CrossAxisAlignment.START,
+        ),
+        ft.ResponsiveRow(
+            [
+                ft.Container(qr_field, col={"xs": 12, "md": 8}),
+                ft.Container(
+                    ft.Button(
+                        content="Consultar QR",
+                        icon=ft.Icons.SEARCH,
+                        disabled=is_loading or is_saving,
+                        on_click=lambda e: on_qr_search(qr_field.value),
+                        data={"arrivals_qr": "submit"},
+                    ),
+                    col={"xs": 12, "md": 4},
+                ),
+            ],
+            spacing=12,
+            run_spacing=12,
+            data={"arrivals_qr": "block"},
         ),
         ft.ResponsiveRow(
             [
@@ -348,7 +376,7 @@ def arrivals_view(
                 return
             count = len(seleccionados)
             button.content = f"Confirmar seleccionados ({count})"
-            button.disabled = is_saving or count == 0
+            button.disabled = is_saving or not can_confirm_arrival or count == 0
             try:
                 button.update()
             except RuntimeError as ex:
@@ -368,6 +396,7 @@ def arrivals_view(
                         on_reverse_arrival,
                         on_novelty,
                         can_edit_novelty,
+                        can_confirm_arrival,
                     )
                 )
             except Exception as ex:
@@ -387,7 +416,7 @@ def arrivals_view(
                 icon=ft.Icons.HOW_TO_REG,
                 bgcolor=ft.Colors.PRIMARY,
                 color=ft.Colors.ON_PRIMARY,
-                disabled=is_saving or seleccion_count == 0,
+                disabled=is_saving or not can_confirm_arrival or seleccion_count == 0,
                 on_click=lambda e: on_confirm_selected(),
                 data={"arrivals_action": "confirm_selected"},
             )
@@ -411,8 +440,10 @@ def arrivals_view(
                         confirm_action = ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revertir llegada", disabled=is_saving, on_click=lambda e, row=item: on_reverse_arrival(row))
                     elif llegada:
                         confirm_action = ft.Text("Confirmada", size=12)
-                    else:
+                    elif can_confirm_arrival:
                         confirm_action = ft.Checkbox(value=selected, disabled=is_saving, on_change=lambda e, row=item: handle_local_toggle(row, bool(e.control.value)))
+                    else:
+                        confirm_action = ft.Text("Solo lectura", size=12)
                     novelty_action = _novedad_action(item, on_novelty, can_edit_novelty)
                     desktop_rows.append(ft.DataRow(cells=[
                         ft.DataCell(ft.Text(f"{_get(item, 'nombre_completo', 'Invitado')} · {('Prin' if item.get('es_invitado_principal') else 'Acom')}")),
@@ -477,7 +508,7 @@ def arrivals_view(
                                 ft.OutlinedButton(
                                     content="Seleccionar pendientes",
                                     icon=ft.Icons.CHECKLIST,
-                                    disabled=is_saving or not pendientes,
+                                    disabled=is_saving or not can_confirm_arrival or not pendientes,
                                     on_click=lambda e: on_select_pending(),
                                     data={"arrivals_action": "select_pending"},
                                 ),

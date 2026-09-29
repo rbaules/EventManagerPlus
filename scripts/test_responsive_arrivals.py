@@ -231,12 +231,20 @@ def test_arrivals_layouts_and_roles() -> None:
         assert required <= grids(build_arrivals(width))
     for role in ("Operador", "Administrador", "Master"):
         assert {"search", "confirmation"} <= grids(build_arrivals(800, role))
-    assert not grids(build_arrivals(800, "Consulta"))
+    consulta = build_arrivals(800, "Consulta")
+    assert {"search", "confirmation"} <= grids(consulta)
+    assert all(
+        getattr(node, "disabled", False)
+        for node in walk(consulta)
+        if getattr(node, "data", None) in ({"arrivals_action": "select_pending"}, {"arrivals_action": "confirm_selected"})
+    )
     for width in (430, 768, 800, 900, 1024, 1280):
         built = build_arrivals(width)
         fields = [node for node in walk(built) if isinstance(node, ft.TextField)]
         search = next(node for node in fields if node.label == "Buscar invitado")
         assert search.value == "tablet" and search.autofocus is False
+        qr = next(node for node in fields if node.label == "Código QR")
+        assert qr.max_length == 4 and qr.capitalization == ft.TextCapitalization.CHARACTERS
         action_row = next(node for node in walk(built) if isinstance(getattr(node, "data", None), dict) and node.data.get("arrivals_action_row") == "group_confirmation")
         select_pending = next(node for node in action_row.controls if getattr(node, "data", None) == {"arrivals_action": "select_pending"})
         confirm = next(node for node in action_row.controls if getattr(node, "data", None) == {"arrivals_action": "confirm_selected"})

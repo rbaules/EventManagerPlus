@@ -29,12 +29,15 @@ def bottom_navigation(
     can_register_arrivals: bool,
     on_select: Callable[[str], None],
     navigation: ft.NavigationBar | None = None,
+    can_view_arrivals: bool | None = None,
 ) -> ft.NavigationBar:
     print("[NAVEGACION][INFO] Aplicando estilo visual a la barra.")
     base_items = _CHECKIN_NAV_ITEMS if is_checkin_mode() else _NAV_ITEMS
+    if can_view_arrivals is None:
+        can_view_arrivals = can_register_arrivals
     nav_items = tuple(
         item for item in base_items
-        if item[0] != "arrivals" or can_register_arrivals
+        if item[0] != "arrivals" or can_view_arrivals
     )
     if is_checkin_mode():
         print("[CHECKIN][INFO] Navegacion disponible: Invitados, Registrar llegadas")
@@ -45,7 +48,7 @@ def bottom_navigation(
         if key == "dashboard":
             return False
         if requires_arrivals:
-            return (not can_use_app) or (not can_register_arrivals)
+            return (not can_use_app) or (not can_view_arrivals)
         return not can_use_app
 
     def handle_change(e: ft.ControlEvent) -> None:

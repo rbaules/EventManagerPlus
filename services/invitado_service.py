@@ -112,6 +112,14 @@ class ResultadoGrupoInvitacion:
 
 
 @dataclass(frozen=True)
+class ResultadoResolucionQr:
+    ok: bool
+    estado: str
+    mensaje: str
+    invitacion: dict[str, int] | None
+
+
+@dataclass(frozen=True)
 class ResultadoConfirmacionGrupo:
     ok: bool
     estado: str
@@ -147,6 +155,75 @@ def _normalizar_busqueda(value: str | None) -> str:
     texto = " ".join(texto.split())
     texto = unicodedata.normalize("NFKD", texto)
     return "".join(char for char in texto if not unicodedata.combining(char))
+
+
+_MENSAJES_RESOLUCION_QR = {
+    "QR_INVALID_FORMAT": "Código QR inválido.",
+    "QR_NOT_FOUND": "No se encontró una invitación asociada a este código.",
+    "QR_NOT_AVAILABLE": "Este código QR no está disponible para este evento.",
+    "QR_REVOKED": "Este código QR ya no es válido.",
+    "QR_NOT_ALLOWED": "No tiene permisos para consultar este código en el evento seleccionado.",
+}
+
+
+def resolver_invitacion_qr(
+    cuenta_id: Any,
+    evento_id: Any,
+    codigo: str | None,
+    supabase: Any = None,
+) -> ResultadoResolucionQr:
+    """Resuelve un QR de cuatro caracteres sin exponerlo en logs ni en la UI."""
+    cuenta_normalizada = _normalizar_id(cuenta_id)
+    evento_normalizado = _normalizar_id(evento_id)
+    codigo_normalizado = _texto(codigo).upper()
+    if cuenta_normalizada is None or evento_normalizado is None:
+        return ResultadoResolucionQr(False, "invalid_context", "No fue posible consultar el código QR.", None)
+    if not codigo_normalizado:
+        return ResultadoResolucionQr(False, "empty_code", "Ingresa un código QR.", None)
+
+    supabase = _require_supabase(supabase)
+    try:
+        response = supabase.rpc("evp_oper_resolver_invitacion_qr", {
+            "p_cuenta_id": cuenta_normalizada,
+            "p_evento_id": evento_normalizado,
+            "p_codigo": codigo_normalizado,
+        }).execute()
+    except Exception as ex:
+        print("[QR][ERROR] Error RPC al resolver QR:", type(ex).__name__)
+        return ResultadoResolucionQr(False, "QR_OPERATION_ERROR", "No fue posible consultar el código QR.", None)
+
+    data = extract_data(response)
+    payload = to_dict(data[0]) if isinstance(data, list) and data else to_dict(data)
+    payload = payload or {}
+    codigo_resultado = _texto(safe_get(payload, "codigo_resultado")) or "QR_OPERATION_ERROR"
+    if not bool(safe_get(payload, "ok", False)) or codigo_resultado != "QR_RESOLVED":
+        return ResultadoResolucionQr(
+            False,
+            codigo_resultado,
+            _MENSAJES_RESOLUCION_QR.get(codigo_resultado, "No fue posible consultar el código QR."),
+            None,
+        )
+
+    respuesta_cuenta = _normalizar_id(safe_get(payload, "cuenta_id"))
+    respuesta_evento = _normalizar_id(safe_get(payload, "evento_id"))
+    invitacion_id = _normalizar_id(safe_get(payload, "invitacion_id"))
+    if (
+        invitacion_id is None
+        or respuesta_cuenta != cuenta_normalizada
+        or respuesta_evento != evento_normalizado
+    ):
+        print("[QR][ERROR] Respuesta QR con contexto inconsistente.")
+        return ResultadoResolucionQr(False, "unexpected_response", "No fue posible consultar el código QR.", None)
+    return ResultadoResolucionQr(
+        True,
+        "QR_RESOLVED",
+        "Invitación QR encontrada.",
+        {
+            "cuenta_id": cuenta_normalizada,
+            "evento_id": evento_normalizado,
+            "invitacion_id": invitacion_id,
+        },
+    )
 
 
 def _normalizar_nombre_bd(value: str) -> str:

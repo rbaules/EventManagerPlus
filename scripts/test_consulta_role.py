@@ -205,10 +205,10 @@ def _walk(control: Any) -> list[Any]:
 
 
 def test_interfaz_solo_lectura() -> None:
-    nav = bottom_navigation("guests", True, False, lambda key: None)
+    nav = bottom_navigation("guests", True, False, lambda key: None, can_view_arrivals=True)
     labels = [destino.label for destino in nav.destinations]
     assert "Dashboard" in labels and "Invitados" in labels
-    assert "Registrar llegadas" not in labels
+    assert "Registrar llegadas" in labels
 
     vista = invitados_view(
         contexto=contexto_consulta(),
