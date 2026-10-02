@@ -199,7 +199,6 @@ def build_home_view(
         "qr_scanner_camera_mounted": False,
         "qr_scanner_image_stream_active": False,
         "qr_scanner_snapshot_task_active": False,
-        "qr_scanner_lifecycle_lock": asyncio.Lock(),
         "qr_scanner_description": None,
         "qr_scanner_event_key": None,
         "qr_scanner_gate": QrFrameGate(),
@@ -1540,7 +1539,7 @@ def build_home_view(
 
         async def desmontar() -> None:
             try:
-                lock: asyncio.Lock = state["qr_scanner_lifecycle_lock"]
+                lock: asyncio.Lock = qr_runtime.lifecycle_lock
                 print("[QR-SCAN][LIFECYCLE] Home cleanup lock waiting")
                 async with lock:
                     print("[QR-SCAN][LIFECYCLE] Home cleanup lock acquired")
@@ -1632,7 +1631,7 @@ def build_home_view(
         wait_for_polling: bool,
     ) -> None:
         """Serializa el cleanup físico; nunca pausa durante una captura activa."""
-        lock: asyncio.Lock = state["qr_scanner_lifecycle_lock"]
+        lock: asyncio.Lock = qr_runtime.lifecycle_lock
         print("[QR-SCAN][LIFECYCLE] close lock waiting")
         async with lock:
             print("[QR-SCAN][LIFECYCLE] close lock acquired")
@@ -1957,7 +1956,7 @@ def build_home_view(
                         )
                         return
                     try:
-                        lock: asyncio.Lock = state["qr_scanner_lifecycle_lock"]
+                        lock: asyncio.Lock = qr_runtime.lifecycle_lock
                         print("[QR-SCAN][LIFECYCLE] resume_preview lock waiting")
                         try:
                             async with lock:
@@ -2001,7 +2000,7 @@ def build_home_view(
                     )
                     return
                 _log_identidad_scanner(camera, "after Page update")
-                lock = state["qr_scanner_lifecycle_lock"]
+                lock = qr_runtime.lifecycle_lock
                 print("[QR-SCAN][LIFECYCLE] initialize lock waiting")
                 lock_acquired = False
                 try:

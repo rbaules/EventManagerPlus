@@ -11,6 +11,7 @@ class QrCameraRuntime:
         self.snapshot_task: asyncio.Task[object] | None = None
         self.controller_initialized = False
         self.preview_paused = False
+        self.lifecycle_lock = asyncio.Lock()
 
     def invalidate(self) -> int:
         self.generation += 1

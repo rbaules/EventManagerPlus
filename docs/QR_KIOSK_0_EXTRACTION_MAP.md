@@ -6,7 +6,7 @@
 
 | Elemento | Tipo | Dependencias | Destino 0B |
 |---|---|---|---|
-| `qr_scanner_generation`, `qr_scanner_snapshot_task`, `qr_scanner_lifecycle_lock` | estado técnico | polling/finalizador | controller |
+| `generation`, `snapshot_task`, `lifecycle_lock` | estado técnico en `QrCameraRuntime` | polling/finalizador | runtime parcial |
 | `qr_scanner_camera`, `qr_scanner_description`, initialized/paused | estado técnico | Flet Camera | controller |
 | `_obtener_camera_scanner`, `abrir_scanner_qr`, `cerrar_scanner_qr`, `_limpiar_camera_scanner`, `_desmontar_scanner_overlay` | lifecycle | Page/overlay | controller |
 | `_on_qr_detected` | frontera | negocio Llegadas | callback `on_qr_detected(codigo)` |
@@ -22,8 +22,33 @@ UI directa: Camera, `persistent_camera_host`, `scanner_overlay`, chrome y retry.
 | snapshot task | `QrCameraRuntime` | referencia real de la tarea de polling |
 | controller initialized | `QrCameraRuntime` | cache local de inicialización del controller nativo |
 | preview paused | `QrCameraRuntime` | cache local del estado de preview |
+| lifecycle lock | `QrCameraRuntime` | exclusión mutua de operaciones nativas de lifecycle |
+| CameraDescription cacheada | `state["qr_scanner_description"]` en `home_view` | selección de cámara para initialize/recovery |
 | camera state textual | `state["qr_scanner_camera_state"]` en `home_view` | representación para UI/logs |
 
 `_scanner_state_change(event: CameraStateEvent)` recibe la fuente nativa y actualiza los caches `runtime.controller_initialized` y `runtime.preview_paused` desde `event.is_initialized` y `event.is_preview_paused`; ante `event.has_error` invalida el controller y deja `camera_state` en error.
 
 Tras initialize se marca initialized y se limpia preview paused; pause marca paused; resume limpia preview paused. El runtime conserva caches locales, pero una respuesta real del plugin tiene autoridad final: si el cache dice initialized y `resume_preview()` devuelve `Camera is not initialized...`, se invalida controller initialized y se activa recovery. En teardown el mismo error es benigno, deja initialized falso y no recupera. `preview_paused=True` nunca prueba validez si `controller_initialized` es falso.
+
+### Lifecycle lock
+
+El único lock actual es `qr_runtime.lifecycle_lock`, creado como `asyncio.Lock()` por instancia de `QrCameraRuntime`. No se comparte entre instancias/Home y no es reentrante: cada operación libera el lock antes de iniciar una operación posterior que pueda necesitarlo.
+
+Lo adquieren estas rutas:
+
+- `desmontar()` de `_desmontar_scanner_overlay`: cancela y espera polling, detiene stream y pausa preview durante teardown.
+- `_limpiar_camera_scanner()`: serializa stop de stream y `pause_preview()` para close/cancel y para el finalizador QR.
+- `inicializar()` al reutilizar la cámara: serializa `resume_preview()`.
+- `inicializar()` normal o tras controller lost: serializa enumeración, selección de descripción e `initialize()`; la recuperación ocurre después de que el lock de resume fue liberado.
+
+Retry entra por `_reintentar_scanner_qr()` y vuelve a `abrir_scanner_qr()`, por lo que reutiliza la misma ruta protegida. `take_picture()` y polling no toman el lock: antes de pausar, cerrar o desmontar, las rutas protegidas cancelan y esperan la tarea de polling para evitar solaparla con operaciones nativas excluyentes. No deben ejecutarse simultáneamente initialize, resume, pause, stop de stream ni teardown.
+
+El lock ya vive en `QrCameraRuntime`; las funciones lifecycle permanecen en Home y sólo consumen esa misma instancia.
+
+### Cached CameraDescription
+
+La caché actual es `state["qr_scanner_description"]`, inicializada en `None` al construir Home. La primera inicialización enumera mediante `enumerate_cameras_with_retry`, selecciona la cámara trasera si existe y guarda la descripción. Dentro de la vida de ese Home no se invalida explícitamente; se reinicia al crear un nuevo estado Home.
+
+Ante controller lost durante `resume_preview()`, el flujo marca `recovery_from_resume=True`; si existe descripción cacheada, `initialize()` la reutiliza sin reenumerar. Si no existe caché —o la apertura no es recovery— se vuelve a enumerar. Los errores transitorios `cameraNotReadable` y `cameraAbort` conservan la estrategia actual de retry para enumeración e initialize; no borran por sí mismos la descripción cacheada. Teardown no intenta recovery ni consume la caché.
+
+La caché sólo transporta `CameraDescription` hacia `camera.initialize()` y no contiene lógica de negocio. Destino futuro propuesto: moverla por separado, porque su dependencia es de datos para recovery y no exige compartir titularidad con la exclusión mutua.
