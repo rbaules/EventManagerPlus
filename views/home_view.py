@@ -9,6 +9,7 @@ import threading
 from typing import Any
 
 import flet as ft
+import flet_camera as fcam
 
 from config import is_checkin_mode
 from components.app_shell import app_shell
@@ -64,6 +65,14 @@ from services.invitado_service import (
     puede_reversar_llegada,
     reversar_llegada,
     resolver_invitacion_qr,
+)
+from services.qr_scanner_service import (
+    QrFrameGate,
+    decode_qr_frame,
+    enumerate_cameras_with_retry,
+    is_camera_transient,
+    poll_qr_snapshots,
+    scanner_strategy,
 )
 from services.time_service import fecha_hora_panama
 from services.session_service import PageSessionController
@@ -175,6 +184,28 @@ def build_home_view(
         "arrivals_mensaje": "",
         "arrivals_busqueda": "",
         "arrivals_qr_codigo": "",
+        "qr_scanner_active": False,
+        "qr_scanner_message": "",
+        "qr_scanner_camera": None,
+        "qr_scanner_overlay": None,
+        "qr_scanner_camera_host": None,
+        "qr_scanner_chrome": None,
+        "qr_scanner_retry_button": None,
+        "qr_scanner_camera_creations": 0,
+        "qr_scanner_strategy": "none",
+        "qr_scanner_camera_state": "uninitialized",
+        "qr_scanner_preview_paused": False,
+        "qr_scanner_closing": False,
+        "qr_scanner_camera_mounted": False,
+        "qr_scanner_camera_initialized": False,
+        "qr_scanner_image_stream_active": False,
+        "qr_scanner_snapshot_task_active": False,
+        "qr_scanner_snapshot_task": None,
+        "qr_scanner_lifecycle_lock": asyncio.Lock(),
+        "qr_scanner_description": None,
+        "qr_scanner_event_key": None,
+        "qr_scanner_generation": 0,
+        "qr_scanner_gate": QrFrameGate(),
         "arrivals_resultados": [],
         "arrivals_invitacion": None,
         "arrivals_integrantes": [],
@@ -469,6 +500,13 @@ def build_home_view(
                     qr_codigo=state["arrivals_qr_codigo"],
                     on_qr_search=buscar_qr_llegadas,
                     can_confirm_arrival=bool(contexto_usuario.get("puede_registrar_llegadas")),
+                    # El preview vive en un overlay persistente de Page. No se
+                    # inserta en este árbol, porque render() lo desmonta.
+                    scanner_active=state["qr_scanner_active"],
+                    scanner_message=state["qr_scanner_message"],
+                    scanner_preview=None,
+                    on_open_scanner=abrir_scanner_qr,
+                    on_close_scanner=cerrar_scanner_qr,
                 )
             return _placeholder(
                 "Acceso no permitido",
@@ -666,6 +704,8 @@ def build_home_view(
         page.run_thread(worker)
 
     def navigate(section: str, identifier: Any = None, action: str | None = None) -> None:
+        if section != "arrivals" and state.get("qr_scanner_active"):
+            cerrar_scanner_qr(reason="navigation")
         current = state.get("selected")
         if current not in {"guest_detail", "guest_form", "event_detail", "event_form", "users_admin_detail"}:
             state["previous_section"] = current or "dashboard"
@@ -1334,6 +1374,8 @@ def build_home_view(
         state["invitados_event_key"] = None
 
     def reset_llegadas() -> None:
+        if state.get("qr_scanner_active"):
+            cerrar_scanner_qr(reason="navigation")
         state["arrivals_estado"] = "idle"
         state["arrivals_mensaje"] = ""
         state["arrivals_busqueda"] = ""
@@ -1346,6 +1388,721 @@ def build_home_view(
         state["arrivals_saving"] = False
         state["arrivals_request_id"] += 1
         state["arrivals_event_key"] = None
+
+    def _mensaje_error_scanner(error: Exception | str | None) -> str:
+        detalle = str(error or "").lower()
+        if "permission" in detalle or "denied" in detalle:
+            return "Permiso de cámara denegado. Puede usar el código QR manual."
+        if "not found" in detalle or "no camera" in detalle:
+            return "No se encontró una cámara disponible. Puede usar el código QR manual."
+        return "No fue posible iniciar la cámara. Puede usar el código QR manual."
+
+    def _controller_camera_no_inicializado(error: Exception | str) -> bool:
+        """Reconoce el único estado benigno durante teardown del controller Web."""
+        return "camera is not initialized. call initialize() first." in str(error).lower()
+
+    def _log_scanner_exception(contexto: str, ex: Exception) -> None:
+        print(
+            f"[QR-SCAN][ERROR] {contexto}: "
+            f"{type(ex).__name__}: {str(ex)}; repr={ex!r}"
+        )
+        print(traceback.format_exc())
+
+    def _obtener_camera_scanner() -> fcam.Camera:
+        """Crea y monta una única cámara persistente para este Home/Page."""
+        camera = state.get("qr_scanner_camera")
+        if isinstance(camera, fcam.Camera):
+            return camera
+        camera = fcam.Camera(
+            preview_enabled=True,
+            content=ft.Container(
+                content=ft.Text("Área QR", color=ft.Colors.ON_SURFACE, weight=ft.FontWeight.BOLD),
+                alignment=ft.Alignment.CENTER,
+                border=ft.Border.all(width=2, color=ft.Colors.PRIMARY),
+                border_radius=12,
+                margin=32,
+            ),
+            on_state_change=_scanner_state_change,
+            on_stream_image=_scanner_frame_received,
+            height=280,
+            data={"arrivals_qr": "camera"},
+        )
+        state["qr_scanner_camera"] = camera
+        state["qr_scanner_camera_creations"] += 1
+        state["qr_scanner_camera_mounted"] = False
+        state["qr_scanner_camera_initialized"] = False
+        state["qr_scanner_camera_state"] = "mounted"
+        creation = state["qr_scanner_camera_creations"]
+        print(
+            "[QR-SCAN][DEBUG] Camera CREATED",
+            f"#{creation}",
+            f"python_id={id(camera)}",
+            f"control_id={getattr(camera, '_i', None)}",
+            f"page_id={id(page)}",
+            f"route={getattr(page, 'route', None)}",
+        )
+
+        # El host es siempre visible: opacity/tamaño esconden el preview sin
+        # desmontar su widget Flutter/Web. El chrome sí puede ocultarse porque
+        # no es ancestro de Camera.
+        camera_host = ft.Container(
+            content=camera,
+            visible=True,
+            opacity=0,
+            width=1,
+            height=1,
+            ignore_interactions=True,
+            alignment=ft.Alignment.CENTER,
+            border_radius=8,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            data={"arrivals_qr": "persistent_camera_host"},
+        )
+        retry_button = ft.OutlinedButton(
+            content="Reintentar cámara",
+            icon=ft.Icons.REFRESH,
+            visible=False,
+            on_click=lambda _event: _reintentar_scanner_qr(),
+            data={"arrivals_qr": "retry"},
+        )
+        chrome = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Text("Escanear código QR", size=16, weight=ft.FontWeight.BOLD),
+                    ft.Text("Apunte la cámara al código QR.", size=13, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.OutlinedButton(
+                        content="Cancelar escaneo",
+                        icon=ft.Icons.CLOSE,
+                        on_click=lambda _event: cerrar_scanner_qr(reason="cancel"),
+                        data={"arrivals_qr": "cancel"},
+                    ),
+                    retry_button,
+                ],
+                spacing=10,
+            ),
+            visible=False,
+            width=560,
+            padding=16,
+            border_radius=8,
+            bgcolor=ft.Colors.SURFACE,
+            border=ft.Border.all(width=1, color=ft.Colors.OUTLINE_VARIANT),
+            data={"arrivals_qr": "scanner_chrome"},
+        )
+        overlay = ft.Container(
+            content=ft.Column([camera_host, chrome], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            visible=True,
+            # Un control en Page.overlay puede cubrir la página aun cuando sus
+            # hijos sean transparentes/minúsculos. Cerrado debe dejar pasar todo
+            # el puntero sin desmontar Camera.
+            ignore_interactions=True,
+            alignment=ft.Alignment.CENTER,
+            bgcolor=ft.Colors.with_opacity(0, ft.Colors.SCRIM),
+            data={"arrivals_qr": "scanner_overlay"},
+        )
+        state["qr_scanner_overlay"] = overlay
+        state["qr_scanner_camera_host"] = camera_host
+        state["qr_scanner_chrome"] = chrome
+        state["qr_scanner_retry_button"] = retry_button
+        page_overlay = getattr(page, "overlay", None)
+        if page_overlay is not None:
+            page_overlay.append(overlay)
+            print("[QR-SCAN][DEBUG] Persistent overlay attached; camera_controls=1")
+        else:
+            print("[QR-SCAN][WARN] Page no expone overlay; la cámara no puede montarse en pruebas sin UI.")
+        return camera
+
+    def _actualizar_visibilidad_scanner(visible: bool) -> None:
+        host = state.get("qr_scanner_camera_host")
+        chrome = state.get("qr_scanner_chrome")
+        retry_button = state.get("qr_scanner_retry_button")
+        overlay = state.get("qr_scanner_overlay")
+        if isinstance(host, ft.Container):
+            host.visible = True
+            host.opacity = 1 if visible else 0
+            host.width = 528 if visible else 1
+            host.height = 280 if visible else 1
+            host.ignore_interactions = not visible
+        if isinstance(chrome, ft.Container):
+            chrome.visible = visible
+        if isinstance(retry_button, ft.OutlinedButton):
+            retry_button.visible = visible and state.get("qr_scanner_camera_state") == "error"
+        if isinstance(overlay, ft.Container):
+            overlay.visible = True
+            overlay.ignore_interactions = not visible
+
+    def _desmontar_scanner_overlay() -> None:
+        """Libera el preview antes de retirar el overlay al cerrar Home."""
+        camera = state.get("qr_scanner_camera")
+        overlay = state.get("qr_scanner_overlay")
+        if not isinstance(camera, fcam.Camera) or not isinstance(overlay, ft.Container):
+            return
+        state["qr_scanner_generation"] += 1
+        state["qr_scanner_active"] = False
+        state["qr_scanner_gate"].stop()
+
+        async def desmontar() -> None:
+            try:
+                lock: asyncio.Lock = state["qr_scanner_lifecycle_lock"]
+                print("[QR-SCAN][LIFECYCLE] Home cleanup lock waiting")
+                async with lock:
+                    print("[QR-SCAN][LIFECYCLE] Home cleanup lock acquired")
+                    polling_task = state.get("qr_scanner_snapshot_task")
+                    current_task = asyncio.current_task()
+                    if polling_task is not None and polling_task is not current_task and not polling_task.done():
+                        print("[QR-SCAN][LIFECYCLE] Home cleanup polling cancellation requested", f"task_id={id(polling_task)}")
+                        polling_task.cancel()
+                        try:
+                            await polling_task
+                        except asyncio.CancelledError:
+                            print("[QR-SCAN][LIFECYCLE] Home cleanup polling cancellation completed")
+                    if _camera_esta_montada(camera) and state.get("qr_scanner_camera_initialized"):
+                        if state.get("qr_scanner_image_stream_active"):
+                            try:
+                                await camera.stop_image_stream()
+                            except Exception as ex:
+                                _log_scanner_exception("Camera stream stop during Home cleanup failed", ex)
+                        try:
+                            print("[QR-SCAN][LIFECYCLE] Home cleanup pause_preview begin")
+                            await camera.pause_preview()
+                            print("[QR-SCAN][LIFECYCLE] Home cleanup pause_preview end")
+                        except Exception as ex:
+                            if _controller_camera_no_inicializado(ex):
+                                print("[QR-SCAN][INFO] Camera controller already uninitialized during Home cleanup")
+                            else:
+                                _log_scanner_exception("Camera preview pause during Home cleanup failed", ex)
+                            state["qr_scanner_camera_initialized"] = False
+            finally:
+                page_overlay = getattr(page, "overlay", None)
+                if page_overlay is not None and overlay in page_overlay:
+                    page_overlay.remove(overlay)
+                state["qr_scanner_camera_initialized"] = False
+                state["qr_scanner_image_stream_active"] = False
+                state["qr_scanner_snapshot_task_active"] = False
+                state["qr_scanner_snapshot_task"] = None
+                state["qr_scanner_overlay"] = None
+                print("[QR-SCAN][LIFECYCLE] Home cleanup lock released")
+                page.update()
+
+        page.run_task(desmontar)
+
+    def _log_identidad_scanner(camera: fcam.Camera, phase: str) -> None:
+        overlay = state.get("qr_scanner_overlay")
+        host = state.get("qr_scanner_camera_host")
+        print(
+            "[QR-SCAN][DEBUG]",
+            phase,
+            f"python_id={id(camera)}",
+            f"control_id={getattr(camera, '_i', None)}",
+            f"page_id={id(page)}",
+            f"camera_page_is_page={getattr(camera, 'page', None) is page}",
+            f"camera_visible={getattr(camera, 'visible', None)}",
+            f"camera_host_visible={getattr(host, 'visible', None)}",
+            f"camera_host_opacity={getattr(host, 'opacity', None)}",
+            f"camera_host_size={getattr(host, 'width', None)}x{getattr(host, 'height', None)}",
+            f"overlay_visible={getattr(overlay, 'visible', None)}",
+            f"controller_initialized={state.get('qr_scanner_camera_initialized')}",
+            f"generation={state.get('qr_scanner_generation')}",
+            f"route={getattr(page, 'route', None)}",
+        )
+
+    def _camera_esta_montada(camera: fcam.Camera) -> bool:
+        try:
+            mounted = camera.page is page
+        except RuntimeError:
+            # Flet informa un control aún no agregado mediante RuntimeError.
+            # Es un estado normal entre la construcción del overlay y su primer
+            # update, no una razón para crear otra cámara.
+            mounted = False
+        state["qr_scanner_camera_mounted"] = mounted
+        return mounted
+
+    def _restaurar_estado_interaccion_qr() -> None:
+        """Libera sólo el estado del scanner; preserva QR y grupo ya consultados."""
+        state["qr_scanner_active"] = False
+        state["qr_scanner_strategy"] = "none"
+        state["qr_scanner_event_key"] = None
+        state["qr_scanner_snapshot_task_active"] = False
+        state["qr_scanner_image_stream_active"] = False
+        state["qr_scanner_gate"].stop()
+        _actualizar_visibilidad_scanner(False)
+
+    async def _limpiar_camera_scanner(
+        camera: fcam.Camera,
+        *,
+        stream_active: bool,
+        camera_initialized: bool,
+        wait_for_polling: bool,
+    ) -> None:
+        """Serializa el cleanup físico; nunca pausa durante una captura activa."""
+        lock: asyncio.Lock = state["qr_scanner_lifecycle_lock"]
+        print("[QR-SCAN][LIFECYCLE] close lock waiting")
+        async with lock:
+            print("[QR-SCAN][LIFECYCLE] close lock acquired")
+            polling_task = state.get("qr_scanner_snapshot_task")
+            current_task = asyncio.current_task()
+            if (
+                wait_for_polling
+                and polling_task is not None
+                and polling_task is not current_task
+                and not polling_task.done()
+            ):
+                print("[QR-SCAN][LIFECYCLE] polling cancellation requested", f"task_id={id(polling_task)}")
+                polling_task.cancel()
+                try:
+                    await polling_task
+                except asyncio.CancelledError:
+                    print("[QR-SCAN][LIFECYCLE] polling cancellation completed")
+            if not _camera_esta_montada(camera):
+                return
+            if stream_active:
+                try:
+                    await camera.stop_image_stream()
+                except Exception as ex:
+                    _log_scanner_exception("Camera stream stop failed", ex)
+            if not camera_initialized or not state.get("qr_scanner_camera_initialized"):
+                return
+            try:
+                print("[QR-SCAN][LIFECYCLE] pause_preview begin")
+                await camera.pause_preview()
+                print("[QR-SCAN][LIFECYCLE] pause_preview end")
+                state["qr_scanner_preview_paused"] = True
+                state["qr_scanner_camera_state"] = "paused"
+            except Exception as ex:
+                _log_scanner_exception("Camera preview pause failed", ex)
+                state["qr_scanner_camera_initialized"] = False
+                state["qr_scanner_camera_state"] = "error"
+        print("[QR-SCAN][LIFECYCLE] close lock released")
+
+    def cerrar_scanner_qr(
+        mensaje: str = "",
+        *,
+        reason: str = "cancel",
+        codigo_qr: str | None = None,
+    ) -> None:
+        camera = state.get("qr_scanner_camera")
+        camera_initialized = bool(state.get("qr_scanner_camera_initialized"))
+        stream_active = bool(state.get("qr_scanner_image_stream_active"))
+        camera_mounted = isinstance(camera, fcam.Camera) and _camera_esta_montada(camera)
+        polling_task = state.get("qr_scanner_snapshot_task")
+        state["qr_scanner_generation"] += 1
+        print(
+            "[QR-SCAN][LIFECYCLE] close requested",
+            f"reason={reason}",
+            f"generation={state['qr_scanner_generation']}",
+            f"polling_task_id={id(polling_task) if polling_task else None}",
+            f"polling_task_done={polling_task.done() if polling_task else None}",
+        )
+        state["qr_scanner_closing"] = camera_mounted and camera_initialized
+        if state["qr_scanner_closing"]:
+            state["qr_scanner_camera_state"] = "closing"
+        if codigo_qr is not None:
+            # Este camino puede provenir de la propia tarea de polling. Sólo la
+            # invalida; el finalizador externo espera su retorno antes de tocar
+            # el controller nativo o de resolver la invitación.
+            state["qr_scanner_active"] = False
+            state["qr_scanner_event_key"] = None
+            state["qr_scanner_snapshot_task_active"] = False
+            state["qr_scanner_image_stream_active"] = False
+            state["qr_scanner_gate"].stop()
+            state["qr_scanner_closing"] = True
+
+            async def finalizar_qr() -> None:
+                print(
+                    "[QR-SCAN][LIFECYCLE] qr finalizer waiting polling_task=",
+                    id(polling_task) if polling_task else None,
+                )
+                if polling_task is not None and polling_task is not asyncio.current_task() and not polling_task.done():
+                    try:
+                        await polling_task
+                    except asyncio.CancelledError:
+                        # Navegación/cancelación posterior ganó la sesión; el
+                        # finalizador aún debe dejar la cámara en estado seguro.
+                        pass
+                print("[QR-SCAN][LIFECYCLE] qr finalizer polling completed")
+                if camera_mounted and isinstance(camera, fcam.Camera):
+                    await _limpiar_camera_scanner(
+                        camera,
+                        stream_active=stream_active,
+                        camera_initialized=camera_initialized,
+                        wait_for_polling=False,
+                    )
+                _restaurar_estado_interaccion_qr()
+                state["qr_scanner_closing"] = False
+                print("[QR-SCAN][LIFECYCLE] qr finalizer camera cleanup completed")
+                render()
+                print("[QR-SCAN][LIFECYCLE] qr processing begin")
+                buscar_qr_llegadas(codigo_qr)
+
+            page.run_task(finalizar_qr)
+            print(
+                "[QR-SCAN][LIFECYCLE] qr finalizer scheduled",
+                f"polling_task_id={id(polling_task) if polling_task else None}",
+            )
+            return
+        _restaurar_estado_interaccion_qr()
+        if mensaje:
+            state["qr_scanner_message"] = mensaje
+            state["arrivals_mensaje"] = mensaje
+        # Llegadas se había renderizado con scanner_active=True tras iniciar la
+        # cámara. page.update() no modifica propiedades de controles ya creados;
+        # render() los reconstruye con los flags restaurados.
+        render()
+        if not camera_mounted or not camera_initialized:
+            if not camera_initialized:
+                state["qr_scanner_camera_state"] = "uninitialized"
+            state["qr_scanner_closing"] = False
+            return
+
+        async def detener() -> None:
+            try:
+                await _limpiar_camera_scanner(
+                    camera,
+                    stream_active=stream_active,
+                    camera_initialized=camera_initialized,
+                    wait_for_polling=True,
+                )
+            finally:
+                # Un fallo de limpieza nunca puede conservar la UI QR bloqueada.
+                _restaurar_estado_interaccion_qr()
+                state["qr_scanner_closing"] = False
+                print("[QR-SCAN][LIFECYCLE] close lock released")
+                render()
+
+        page.run_task(detener)
+
+    def _scanner_state_change(event: fcam.CameraStateEvent) -> None:
+        previous = (
+            state.get("qr_scanner_camera_initialized"),
+            state.get("qr_scanner_preview_paused"),
+        )
+        state["qr_scanner_preview_paused"] = bool(event.is_preview_paused)
+        if event.has_error:
+            state["qr_scanner_camera_initialized"] = False
+            state["qr_scanner_camera_state"] = "error"
+        elif event.is_initialized:
+            state["qr_scanner_camera_initialized"] = True
+            state["qr_scanner_camera_state"] = "paused" if event.is_preview_paused else "initialized"
+        current = (
+            state.get("qr_scanner_camera_initialized"),
+            state.get("qr_scanner_preview_paused"),
+        )
+        if event.has_error or current != previous:
+            print(
+                "[QR-SCAN][DEBUG] Camera state",
+                f"initialized={event.is_initialized}",
+                f"preview_paused={event.is_preview_paused}",
+                f"taking_picture={event.is_taking_picture}",
+                f"streaming_images={event.is_streaming_images}",
+                f"has_error={event.has_error}",
+                f"error_description={event.error_description!r}",
+            )
+        if not state.get("qr_scanner_active") or not event.has_error:
+            return
+        print("[QR-SCAN][WARN] Camera state error")
+        cerrar_scanner_qr(_mensaje_error_scanner(event.error_description), reason="error")
+
+    def _scanner_sigue_vigente(generation: int, active_key: tuple[int, int]) -> bool:
+        return (
+            generation == state.get("qr_scanner_generation")
+            and state.get("qr_scanner_active")
+            and active_key == state.get("qr_scanner_event_key")
+            and active_key == evento_activo_key()
+        )
+
+    def _on_qr_detected(codigo: str, generation: int, active_key: tuple[int, int]) -> bool:
+        """Único puente de cámara al handler QR-3A compartido con la entrada manual."""
+        if not _scanner_sigue_vigente(generation, active_key):
+            return False
+        print("[QR-SCAN][INFO] Valid EVENTPLUS QR detected: code_length=", len(codigo))
+        try:
+            detected_task = asyncio.current_task()
+        except RuntimeError:
+            detected_task = None
+        print("[QR-SCAN][LIFECYCLE] qr detected by", f"task_id={id(detected_task) if detected_task else None}")
+        state["arrivals_qr_codigo"] = codigo
+        cerrar_scanner_qr(reason="qr_detected", codigo_qr=codigo)
+        return True
+
+    def _aceptar_codigo_snapshot(codigo: str, generation: int, active_key: tuple[int, int]) -> bool:
+        gate: QrFrameGate = state["qr_scanner_gate"]
+        if not _scanner_sigue_vigente(generation, active_key) or not gate.try_begin_decode():
+            return False
+        accepted = gate.finish_decode(codigo)
+        return bool(accepted and _on_qr_detected(accepted, generation, active_key))
+
+    def _scanner_frame_received(event: fcam.CameraImageEvent) -> None:
+        active_key = state.get("qr_scanner_event_key")
+        generation = state.get("qr_scanner_generation")
+        gate: QrFrameGate = state["qr_scanner_gate"]
+        if (
+            not state.get("qr_scanner_active")
+            or active_key is None
+            or active_key != evento_activo_key()
+            or not gate.try_begin_decode()
+        ):
+            return
+        image_bytes = event.bytes
+
+        def decode_worker() -> None:
+            codigo = decode_qr_frame(image_bytes)
+            accepted = gate.finish_decode(codigo)
+            if accepted:
+                _on_qr_detected(accepted, generation, active_key)
+
+        page.run_thread(decode_worker)
+
+    def abrir_scanner_qr() -> None:
+        active_key = evento_activo_key()
+        if active_key is None:
+            state["arrivals_mensaje"] = "Selecciona un evento antes de escanear un código QR."
+            render()
+            return
+        if (
+            state.get("qr_scanner_active")
+            or state.get("qr_scanner_closing")
+            or state["arrivals_loading"]
+            or state["arrivals_saving"]
+        ):
+            return
+        reuse_initialized_camera = bool(state.get("qr_scanner_camera_initialized"))
+        gate: QrFrameGate = state["qr_scanner_gate"]
+        gate.start()
+        state["qr_scanner_generation"] += 1
+        generation = state["qr_scanner_generation"]
+        state["qr_scanner_active"] = True
+        state["qr_scanner_camera_state"] = "opening"
+        state["qr_scanner_event_key"] = active_key
+        state["qr_scanner_message"] = "Apunte la cámara al código QR."
+        state["qr_scanner_image_stream_active"] = False
+        state["qr_scanner_snapshot_task_active"] = False
+        state["qr_scanner_closing"] = False
+        camera = _obtener_camera_scanner()
+        print("[QR-SCAN][INFO] Camera panel activation requested")
+        _actualizar_visibilidad_scanner(True)
+        page.update()
+
+        async def iniciar_captura(strategy: str) -> None:
+            state["qr_scanner_strategy"] = strategy
+            state["qr_scanner_camera_state"] = "scanning"
+            state["qr_scanner_message"] = "Apunte la cámara al código QR."
+            if strategy == "stream":
+                await camera.start_image_stream()
+                state["qr_scanner_image_stream_active"] = True
+                print("[QR-SCAN][INFO] Camera scanning with image streaming")
+                render()
+                return
+
+            print("[QR-SCAN][INFO] Image streaming unavailable; using snapshot polling")
+            state["qr_scanner_snapshot_task_active"] = True
+            render()
+
+            def scanner_snapshot_vigente() -> bool:
+                return _scanner_sigue_vigente(generation, active_key)
+
+            def capture_error(intentos: int, ex: Exception) -> None:
+                print("[QR-SCAN][WARN] Snapshot capture failed:", type(ex).__name__, "attempt=", intentos)
+                if intentos >= 3 and scanner_snapshot_vigente():
+                    cerrar_scanner_qr(
+                        "No fue posible leer la cámara. Puede ingresar el código QR manualmente.",
+                        reason="error",
+                    )
+
+            polling_task = asyncio.current_task()
+            state["qr_scanner_snapshot_task"] = polling_task
+
+            async def take_snapshot() -> bytes:
+                print(
+                    "[QR-SCAN][LIFECYCLE] take_picture begin",
+                    f"generation={generation}",
+                    f"task_id={id(asyncio.current_task())}",
+                )
+                try:
+                    return await camera.take_picture()
+                finally:
+                    print(
+                        "[QR-SCAN][LIFECYCLE] take_picture end",
+                        f"generation={generation}",
+                        f"task_id={id(asyncio.current_task())}",
+                    )
+
+            try:
+                await poll_qr_snapshots(
+                    take_snapshot,
+                    scanner_snapshot_vigente,
+                    lambda codigo: _aceptar_codigo_snapshot(codigo, generation, active_key),
+                    capture_error,
+                    interval_seconds=0.65,
+                    max_consecutive_errors=3,
+                )
+            finally:
+                if state.get("qr_scanner_snapshot_task") is polling_task:
+                    state["qr_scanner_snapshot_task"] = None
+                if generation == state.get("qr_scanner_generation"):
+                    state["qr_scanner_snapshot_task_active"] = False
+                print(
+                    "[QR-SCAN][LIFECYCLE] polling task finished",
+                    f"generation={generation}",
+                    f"task_id={id(polling_task)}",
+                )
+
+        async def inicializar() -> None:
+            try:
+                recovery_from_resume = False
+                await asyncio.sleep(0)
+                if reuse_initialized_camera:
+                    if not _scanner_sigue_vigente(generation, active_key):
+                        return
+                    _log_identidad_scanner(camera, "before resume_preview")
+                    if not _camera_esta_montada(camera):
+                        cerrar_scanner_qr(
+                            "No fue posible iniciar la cámara. Puede usar el código QR manual.",
+                            reason="error",
+                        )
+                        return
+                    try:
+                        lock: asyncio.Lock = state["qr_scanner_lifecycle_lock"]
+                        print("[QR-SCAN][LIFECYCLE] resume_preview lock waiting")
+                        try:
+                            async with lock:
+                                print("[QR-SCAN][LIFECYCLE] resume_preview lock acquired")
+                                if not _scanner_sigue_vigente(generation, active_key):
+                                    return
+                                print("[QR-SCAN][LIFECYCLE] resume_preview begin")
+                                await camera.resume_preview()
+                                print("[QR-SCAN][LIFECYCLE] resume_preview end")
+                        finally:
+                            print("[QR-SCAN][LIFECYCLE] resume_preview lock released")
+                        state["qr_scanner_preview_paused"] = False
+                        strategy = state.get("qr_scanner_strategy")
+                        if strategy not in {"stream", "snapshot"}:
+                            raise RuntimeError("Camera inicializada sin estrategia de captura")
+                        print("[QR-SCAN][INFO] Reusing initialized camera; resume_preview")
+                        await iniciar_captura(strategy)
+                        return
+                    except Exception as ex:
+                        if not _controller_camera_no_inicializado(ex):
+                            raise
+                        # Un widget Web puede haber perdido su controller pese a
+                        # conservar la identidad Python. Se recupera una sola vez
+                        # por esta apertura siguiendo la inicialización normal.
+                        print("[QR-SCAN][WARN] Controller lost; recovering with clean initialize")
+                        state["qr_scanner_camera_initialized"] = False
+                        state["qr_scanner_camera_state"] = "uninitialized"
+                        state["qr_scanner_preview_paused"] = False
+                        recovery_from_resume = True
+                # camera_web necesita un turno de estabilización adicional una
+                # vez que el overlay ya fue enviado al navegador.
+                await asyncio.sleep(0.3)
+                if not _scanner_sigue_vigente(generation, active_key):
+                    return
+                _log_identidad_scanner(camera, "before get_available_cameras")
+                if not _camera_esta_montada(camera):
+                    print("[QR-SCAN][WARN] Camera is not mounted after render; initialization skipped")
+                    cerrar_scanner_qr(
+                        "No fue posible iniciar la cámara. Puede usar el código QR manual.",
+                        reason="error",
+                    )
+                    return
+                _log_identidad_scanner(camera, "after Page update")
+                lock = state["qr_scanner_lifecycle_lock"]
+                print("[QR-SCAN][LIFECYCLE] initialize lock waiting")
+                lock_acquired = False
+                try:
+                    await lock.acquire()
+                    lock_acquired = True
+                    print("[QR-SCAN][LIFECYCLE] initialize lock acquired")
+                    description = state.get("qr_scanner_description") if recovery_from_resume else None
+                    if description is not None:
+                        print("[QR-SCAN][LIFECYCLE] Reusing cached CameraDescription for recovery")
+                    else:
+                        enumeration = await enumerate_cameras_with_retry(
+                            camera.get_available_cameras,
+                            lambda: _scanner_sigue_vigente(generation, active_key),
+                            lambda retry, maximum: print(
+                                "[QR-SCAN][WARN] transient camera error during enumeration; "
+                                f"retry={retry}/{maximum}"
+                            ),
+                        )
+                        if enumeration is None:
+                            return
+                        cameras = enumeration.cameras
+                        if not cameras:
+                            cerrar_scanner_qr(
+                                "No se encontró una cámara disponible. Puede usar el código QR manual.",
+                                reason="error",
+                            )
+                            return
+                        description = next(
+                            (item for item in cameras if item.lens_direction == fcam.CameraLensDirection.BACK),
+                            cameras[0],
+                        )
+                        state["qr_scanner_description"] = description
+                        print(
+                            "[QR-SCAN][INFO] Cameras available:", len(cameras),
+                            "selected_lens=", getattr(description.lens_direction, "value", description.lens_direction),
+                        )
+                        if enumeration.attempts > 1:
+                            print("[QR-SCAN][INFO] Cameras available after retry=", enumeration.attempts)
+                    print("[QR-SCAN][LIFECYCLE] initialize begin")
+                    initialize_attempts = 3
+                    for initialize_attempt in range(1, initialize_attempts + 1):
+                        if not _scanner_sigue_vigente(generation, active_key):
+                            return
+                        try:
+                            await camera.initialize(
+                                description,
+                                fcam.ResolutionPreset.LOW,
+                                enable_audio=False,
+                                image_format_group=fcam.ImageFormatGroup.JPEG,
+                            )
+                            break
+                        except Exception as ex:
+                            if not is_camera_transient(ex) or initialize_attempt == initialize_attempts:
+                                raise
+                            delay = (0.25, 0.5)[initialize_attempt - 1]
+                            print(
+                                "[QR-SCAN][WARN] Initialize transient failure; "
+                                f"retry={initialize_attempt}/{initialize_attempts} delay={delay}",
+                            )
+                            await asyncio.sleep(delay)
+                        print("[QR-SCAN][LIFECYCLE] initialize end")
+                finally:
+                    if lock_acquired:
+                        lock.release()
+                    print("[QR-SCAN][LIFECYCLE] initialize lock released")
+                state["qr_scanner_camera_initialized"] = True
+                state["qr_scanner_preview_paused"] = False
+                state["qr_scanner_camera_state"] = "initialized"
+                if (
+                    generation != state.get("qr_scanner_generation")
+                    or not state.get("qr_scanner_active")
+                    or active_key != evento_activo_key()
+                ):
+                    cerrar_scanner_qr(reason="navigation")
+                    return
+                await iniciar_captura(scanner_strategy(await camera.supports_image_streaming()))
+            except Exception as ex:
+                _log_scanner_exception("Scanner initialization failed", ex)
+                if is_camera_transient(ex):
+                    # Tras todos los reintentos el panel permanece abierto: el
+                    # usuario puede cancelar o reintentar, sin cierre súbito.
+                    state["qr_scanner_camera_initialized"] = False
+                    state["qr_scanner_camera_state"] = "error"
+                    state["qr_scanner_message"] = "No fue posible reconectar la cámara. Puede reintentar o cancelar."
+                    print("[QR-SCAN][WARN] Transient camera recovery exhausted; scanner remains open")
+                    render()
+                    return
+                cerrar_scanner_qr(_mensaje_error_scanner(ex), reason="error")
+
+        page.run_task(inicializar)
+
+    def _reintentar_scanner_qr() -> None:
+        if state.get("qr_scanner_camera_state") != "error" or state.get("qr_scanner_closing"):
+            return
+        # La cámara Python sigue montada; sólo se inicia una nueva generación.
+        state["qr_scanner_active"] = False
+        state["qr_scanner_event_key"] = None
+        abrir_scanner_qr()
 
     def invalidar_dashboard() -> None:
         state["dashboard_event_key"] = None
@@ -2988,6 +3745,7 @@ def build_home_view(
     def logout() -> None:
         print("[EVENTOS][INFO] Cierre de sesion solicitado desde menu de usuario.")
         _pausar_home()
+        _desmontar_scanner_overlay()
         had_server_session = bool(
             session_controller is not None
             and session_controller.has_server_session
@@ -3029,6 +3787,9 @@ def build_home_view(
             page.run_task(navigate_to_server_logout)
 
     page.on_resize = handle_page_resize
+    # Se monta antes del primer shell para que su identidad no dependa de la
+    # vista seleccionada ni de los renders posteriores.
+    _obtener_camera_scanner()
     sync_navigation()
     home_control = build_shell()
     home_control.data = {**_home_callbacks(), "responsive_component": "app_shell"}

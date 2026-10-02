@@ -245,6 +245,8 @@ def test_arrivals_layouts_and_roles() -> None:
         assert search.value == "tablet" and search.autofocus is False
         qr = next(node for node in fields if node.label == "Código QR")
         assert qr.max_length == 4 and qr.capitalization == ft.TextCapitalization.CHARACTERS
+        scan = next(node for node in walk(built) if getattr(node, "data", None) == {"arrivals_qr": "scan"})
+        assert scan.disabled is False
         action_row = next(node for node in walk(built) if isinstance(getattr(node, "data", None), dict) and node.data.get("arrivals_action_row") == "group_confirmation")
         select_pending = next(node for node in action_row.controls if getattr(node, "data", None) == {"arrivals_action": "select_pending"})
         confirm = next(node for node in action_row.controls if getattr(node, "data", None) == {"arrivals_action": "confirm_selected"})
@@ -257,6 +259,39 @@ def test_arrivals_layouts_and_roles() -> None:
             assert isinstance(confirm_column.label, ft.Text) and confirm_column.label.value == "Llegada"
             assert not any(getattr(node, "data", None) == {"arrivals_action": "confirm_selected"} for node in walk(table))
         assert confirm.bgcolor == ft.Colors.PRIMARY and confirm.color == ft.Colors.ON_PRIMARY
+
+
+def test_scanner_panel_fits_arrivals_layouts() -> None:
+    for width in (430, 768, 800, 900, 1024, 1280):
+        item = guest()
+        preview = ft.Container(content=ft.Text("Vista previa QR"), height=280)
+        built = arrivals_view(
+            contexto=context(), estado="ready", mensaje="", busqueda="", resultados=[],
+            invitacion={"invitacion_id": 100, "destinatario": "Familia Tablet"},
+            integrantes=[item], seleccionados=set(), can_reverse_arrival=True,
+            is_loading=False, is_saving=False, on_search=lambda value=None: None,
+            on_clear=lambda: None, on_select_guest=lambda value=None: None,
+            on_toggle_guest=lambda value=None, selected=False: None,
+            on_select_pending=lambda: None, on_confirm_selected=lambda: None,
+            on_reverse_arrival=lambda value=None: None, on_retry=lambda: None,
+            on_novelty=lambda value=None: None, layout=layout_mode(width),
+            can_edit_novelty=True, scanner_active=True,
+            scanner_message="Apunte la cámara al código QR.", scanner_preview=preview,
+            on_open_scanner=lambda: None, on_close_scanner=lambda: None,
+        )
+        assert any(
+            getattr(node, "data", None) == {"arrivals_qr": "scanner_preview"}
+            for node in walk(built)
+        )
+        assert any(
+            getattr(node, "data", None) == {"arrivals_qr": "cancel"}
+            for node in walk(built)
+        )
+        qr_field = next(
+            node for node in walk(built)
+            if isinstance(node, ft.TextField) and node.label == "Código QR"
+        )
+        assert qr_field.disabled is True
 
 
 def test_alphabetical_order_in_both_grids() -> None:
@@ -535,6 +570,7 @@ def test_guest_controls_and_unapplied_draft_survive_tablet_rotations() -> None:
 def main() -> int:
     test_layout_boundaries()
     test_arrivals_layouts_and_roles()
+    test_scanner_panel_fits_arrivals_layouts()
     test_alphabetical_order_in_both_grids()
     test_bottom_navigation_is_viewport_constrained_for_wide_content()
     test_shell_is_viewport_bound_for_row_volumes()

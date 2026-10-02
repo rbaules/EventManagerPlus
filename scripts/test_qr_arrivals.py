@@ -100,6 +100,7 @@ def test_qr_errors_and_context_validation() -> None:
 
 def test_qr_ui_enter_and_button_share_handler_and_readonly_has_no_write_actions() -> None:
     calls: list[str] = []
+    scanner_calls: list[str] = []
     control = arrivals_view(
         contexto(), "ready", "", "", [],
         {"cuenta_id": 2, "evento_id": 1, "invitacion_id": 3, "destinatario": "Familia QR"},
@@ -108,7 +109,8 @@ def test_qr_ui_enter_and_button_share_handler_and_readonly_has_no_write_actions(
         lambda _value: None, lambda: None, lambda _item: None,
         lambda _item, _selected: None, lambda: None, lambda: None,
         lambda _item: None, lambda: None,
-        layout=LayoutMode.PHONE, qr_codigo="ab12", on_qr_search=calls.append, can_confirm_arrival=False,
+        layout=LayoutMode.PHONE, qr_codigo="ab12", on_qr_search=calls.append,
+        on_open_scanner=lambda: scanner_calls.append("open"), can_confirm_arrival=False,
     )
     fields = [node for node in walk(control) if isinstance(node, ft.TextField)]
     qr = next(field for field in fields if field.label == "Código QR")
@@ -117,8 +119,45 @@ def test_qr_ui_enter_and_button_share_handler_and_readonly_has_no_write_actions(
     button = next(node for node in walk(control) if getattr(node, "data", None) == {"arrivals_qr": "submit"})
     button.on_click(SimpleNamespace())
     assert calls == ["ab12", "ab12"]
+    scan = next(node for node in walk(control) if getattr(node, "data", None) == {"arrivals_qr": "scan"})
+    scan.on_click(SimpleNamespace())
+    assert scanner_calls == ["open"]
     disabled_actions = [node for node in walk(control) if getattr(node, "data", None) in ({"arrivals_action": "select_pending"}, {"arrivals_action": "confirm_selected"})]
     assert disabled_actions and all(node.disabled for node in disabled_actions)
+
+    close_calls: list[str] = []
+    scanner_control = arrivals_view(
+        contexto(), "ready", "", "", [], None, [], set(), False, False, False,
+        lambda _value: None, lambda: None, lambda _item: None,
+        lambda _item, _selected: None, lambda: None, lambda: None,
+        lambda _item: None, lambda: None,
+        scanner_active=True, scanner_message="Apunte la cámara al código QR.",
+        scanner_preview=ft.Container(), on_close_scanner=lambda: close_calls.append("close"),
+    )
+    cancel = next(node for node in walk(scanner_control) if getattr(node, "data", None) == {"arrivals_qr": "cancel"})
+    cancel.on_click(SimpleNamespace())
+    assert close_calls == ["close"]
+    assert any(isinstance(node, ft.TextField) and node.label == "Código QR" for node in walk(scanner_control))
+    scanner_actions = [
+        node for node in walk(scanner_control)
+        if getattr(node, "data", None) in ({"arrivals_qr": "input"}, {"arrivals_qr": "submit"}, {"arrivals_qr": "scan"})
+    ]
+    assert len(scanner_actions) == 3 and all(node.disabled for node in scanner_actions)
+
+    released_control = arrivals_view(
+        contexto(), "ready", "", "", [], None, [], set(), False, False, False,
+        lambda _value: None, lambda: None, lambda _item: None,
+        lambda _item, _selected: None, lambda: None, lambda: None,
+        lambda _item: None, lambda: None,
+        scanner_active=False, qr_codigo="AB12",
+    )
+    released_actions = [
+        node for node in walk(released_control)
+        if getattr(node, "data", None) in ({"arrivals_qr": "input"}, {"arrivals_qr": "submit"}, {"arrivals_qr": "scan"})
+    ]
+    assert len(released_actions) == 3 and all(not node.disabled for node in released_actions)
+    released_input = next(node for node in released_actions if getattr(node, "data", None) == {"arrivals_qr": "input"})
+    assert released_input.value == "AB12"
 
 
 def main() -> int:

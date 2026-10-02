@@ -241,9 +241,16 @@ def arrivals_view(
     qr_codigo: str = "",
     on_qr_search: Any = None,
     can_confirm_arrival: bool | None = None,
+    scanner_active: bool = False,
+    scanner_message: str = "",
+    scanner_preview: ft.Control | None = None,
+    on_open_scanner: Any = None,
+    on_close_scanner: Any = None,
 ) -> ft.Control:
     on_novelty = on_novelty or (lambda invitado: None)
     on_qr_search = on_qr_search or (lambda codigo: None)
+    on_open_scanner = on_open_scanner or (lambda: None)
+    on_close_scanner = on_close_scanner or (lambda: None)
     if can_confirm_arrival is None:
         can_confirm_arrival = bool(contexto.get("puede_registrar_llegadas"))
     evento = contexto.get("evento_actual") or {}
@@ -256,7 +263,7 @@ def arrivals_view(
         max_length=4,
         capitalization=ft.TextCapitalization.CHARACTERS,
         autofocus=False,
-        disabled=is_loading or is_saving,
+        disabled=is_loading or is_saving or scanner_active,
         on_submit=lambda e: on_qr_search(e.control.value),
         data={"arrivals_qr": "input"},
     )
@@ -285,16 +292,29 @@ def arrivals_view(
         ),
         ft.ResponsiveRow(
             [
-                ft.Container(qr_field, col={"xs": 12, "md": 8}),
+                ft.Container(qr_field, col={"xs": 12, "md": 6}),
                 ft.Container(
-                    ft.Button(
-                        content="Consultar QR",
-                        icon=ft.Icons.SEARCH,
-                        disabled=is_loading or is_saving,
-                        on_click=lambda e: on_qr_search(qr_field.value),
-                        data={"arrivals_qr": "submit"},
+                    ft.Row(
+                        [
+                            ft.Button(
+                                content="Consultar QR",
+                                icon=ft.Icons.SEARCH,
+                                disabled=is_loading or is_saving or scanner_active,
+                                on_click=lambda e: on_qr_search(qr_field.value),
+                                data={"arrivals_qr": "submit"},
+                            ),
+                            ft.OutlinedButton(
+                                content="Escanear QR",
+                                icon=ft.Icons.CAMERA_ALT,
+                                disabled=is_loading or is_saving or scanner_active,
+                                on_click=lambda e: on_open_scanner(),
+                                data={"arrivals_qr": "scan"},
+                            ),
+                        ],
+                        spacing=8,
+                        wrap=True,
                     ),
-                    col={"xs": 12, "md": 4},
+                    col={"xs": 12, "md": 6},
                 ),
             ],
             spacing=12,
@@ -330,6 +350,38 @@ def arrivals_view(
             run_spacing=12,
         ),
     ]
+
+    if scanner_preview is not None:
+        controls.append(
+            ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text("Escanear código QR", size=16, weight=ft.FontWeight.BOLD),
+                        ft.Text(scanner_message or "Apunte la cámara al código QR.", size=13, color=ft.Colors.ON_SURFACE_VARIANT),
+                        ft.Container(
+                            content=scanner_preview or ft.ProgressRing(),
+                            height=280,
+                            alignment=ft.Alignment.CENTER,
+                            border_radius=8,
+                            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+                        ),
+                        ft.OutlinedButton(
+                            content="Cancelar escaneo",
+                            icon=ft.Icons.CLOSE,
+                            on_click=lambda e: on_close_scanner(),
+                            data={"arrivals_qr": "cancel"},
+                        ),
+                    ],
+                    spacing=10,
+                ),
+                padding=16,
+                border_radius=8,
+                border=ft.Border.all(width=1, color=ft.Colors.OUTLINE_VARIANT),
+                visible=scanner_active,
+                data={"arrivals_qr": "scanner_preview"},
+            )
+        )
 
     if mensaje:
         controls.append(ft.Text(mensaje, size=13, color=ft.Colors.ON_SURFACE_VARIANT))
