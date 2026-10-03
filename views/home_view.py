@@ -73,6 +73,7 @@ from services.qr_scanner_service import (
     process_qr_camera_frame,
     run_qr_snapshot_polling,
     scanner_strategy,
+    select_camera_description,
 )
 from services.qr_camera_runtime import QrCameraRuntime
 from services.time_service import fecha_hora_panama
@@ -2026,16 +2027,16 @@ def build_home_view(
                         if enumeration is None:
                             return
                         cameras = enumeration.cameras
-                        if not cameras:
+                        description = select_camera_description(
+                            cameras,
+                            fcam.CameraLensDirection.BACK,
+                        )
+                        if description is None:
                             cerrar_scanner_qr(
                                 "No se encontró una cámara disponible. Puede usar el código QR manual.",
                                 reason="error",
                             )
                             return
-                        description = next(
-                            (item for item in cameras if item.lens_direction == fcam.CameraLensDirection.BACK),
-                            cameras[0],
-                        )
                         qr_runtime.camera_description = description
                         print(
                             "[QR-SCAN][INFO] Cameras available:", len(cameras),

@@ -51,6 +51,27 @@ La caché actual es `qr_runtime.camera_description`, inicializada en `None` por 
 
 Es una caché técnica, no autoridad sobre el estado actual del dispositivo. Ante controller lost durante `resume_preview()`, el flujo marca `recovery_from_resume=True`; si existe descripción cacheada, `initialize()` la reutiliza sin reenumerar. Si no existe caché —o la apertura es normal— se vuelve a enumerar. Los errores transitorios `cameraNotReadable` y `cameraAbort` conservan la estrategia actual de retry para enumeración e initialize; no borran por sí mismos la descripción cacheada. Teardown no intenta recovery ni consume la caché.
 
+## Initialization decomposition
+
+`inicializar` permanece en `views/home_view.py` y actualmente agrupa estos bloques, que aún no se han movido:
+
+1. Preparación: define `recovery_from_resume`, cede un turno al navegador y valida la sesión por `qr_runtime.is_scanner_session_current(...)`.
+2. Resume/recovery: si `reuse_initialized_camera`, toma `qr_runtime.lifecycle_lock`, intenta `camera.resume_preview()` y reinicia captura. Si el plugin informa controller perdido, marca `controller_initialized=False`, `preview_paused=False` y activa `recovery_from_resume`.
+3. Precondiciones de discovery: espera 0.3 s, vuelve a validar sesión y exige que Camera esté montada.
+4. Discovery/selección: adquiere el mismo lifecycle lock, decide entre caché y `enumerate_cameras_with_retry`, selecciona descripción y actualiza `qr_runtime.camera_description`.
+5. Inicialización nativa: ejecuta `camera.initialize(...)` con hasta tres intentos para errores transitorios.
+6. Estado y captura: actualiza initialized/paused/camera_state, verifica nuevamente generation/sesión y llama `iniciar_captura(...)`.
+7. Error terminal: los transitorios agotados dejan el panel abierto en estado `error` para retry/cancel; los no transitorios cierran por la ruta existente.
+
+## Camera discovery / selection — extracted
+
+`services/qr_scanner_service.py` contiene la infraestructura reutilizable: `enumerate_cameras_with_retry(enumerate_cameras, is_active, on_transient_error, *, max_attempts=3, retry_delays=(0.4, 0.8))` y `select_camera_description(cameras, preferred_lens) -> CameraDescription | None`.
+
+Discovery conserva un máximo de tres intentos y considera transitorios exclusivamente `cameraNotReadable` y `cameraAbort`. Si la sesión deja de ser vigente durante el backoff, devuelve `None`; los errores terminales se propagan a Home. `select_camera_description` devuelve la primera cámara BACK, o `cameras[0]` si no hay BACK, o `None` para una lista vacía; no ordena ni muta la lista.
+
+Home conserva el lifecycle lock, la decisión cache vs. discovery, el mensaje para lista vacía, los logs, y el único ownership de `qr_runtime.camera_description`. La apertura normal siempre usa discovery; recovery desde `resume_preview` con caché no nula reutiliza directamente la descripción y omite discovery/selección. Recovery sin caché vuelve a discovery. `camera.initialize(...)`, sus retries, recovery y UI permanecen en Home.
+
+
 La caché sólo transporta `CameraDescription` hacia `camera.initialize()` y no contiene lógica de negocio. Permanecen en Home el control `Camera`, las funciones lifecycle, overlay y `qr_scanner_camera_state` textual/UI.
 
 ## Lifecycle function dependency map
@@ -94,10 +115,12 @@ Por tanto, `cerrar_scanner_qr` mezcla infraestructura y negocio únicamente por 
 2. **0B4B-2 — ✅ `QrCameraRuntime.accept_snapshot_code`**: migrado desde `_aceptar_codigo_snapshot`; conserva el gate como frontera de aceptación y recibe el callback técnico de Home.
 3. **0B4B-3 — ✅ `process_qr_camera_frame` / `_decode_and_accept_qr_frame`**: migrados desde `_scanner_frame_received` / `decode_worker`; Home conserva sólo el adaptador Flet y el callback técnico.
 4. **0B4B-4 — ✅ `run_qr_snapshot_polling` / `take_qr_snapshot`**: polling técnico migrado; Home conserva estrategia, estado visual y adapters.
-5. **0B4B-5 — `inicializar / recovery`**: siguiente candidato; resume, recovery, enumeración y retry, sin moverlo todavía.
-6. **0B4B-6 — `_limpiar_camera_scanner`**: primera operación nativa reutilizable; conserva lock, cancelación/espera de polling y callbacks mínimos de montado/log/UI.
-7. **0B4B-7 — `cerrar_scanner_qr`**: separar primero el finalizador técnico de su callback `on_qr_detected(codigo)` antes de mover el coordinador de close.
-8. **0B4B-8 — `_desmontar_scanner_overlay` y luego Camera/overlay**: mantenerlos al final por dependencia directa de Page y composición visual.
+5. **0B4B-5A — ✅ caracterización**: delimitó discovery/selección sin mover lifecycle.
+6. **0B4B-5B — ✅ extracción**: `enumerate_cameras_with_retry` reutilizado y `select_camera_description` extraído a `qr_scanner_service`.
+7. **0B4B-5C — ✅ validación**: cubre BACK/fallback, retry, ownership de caché y recovery cacheada.
+8. **0B4B-6 — `_limpiar_camera_scanner`**: primera operación nativa reutilizable; conserva lock, cancelación/espera de polling y callbacks mínimos de montado/log/UI.
+9. **0B4B-7 — `cerrar_scanner_qr`**: separar primero el finalizador técnico de su callback `on_qr_detected(codigo)` antes de mover el coordinador de close.
+10. **0B4B-8 — `_desmontar_scanner_overlay` y luego Camera/overlay**: mantenerlos al final por dependencia directa de Page y composición visual.
 
 ### Vigencia de sesión migrada
 

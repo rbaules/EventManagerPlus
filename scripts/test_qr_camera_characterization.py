@@ -13,6 +13,7 @@ from services.qr_camera_runtime import QrCameraRuntime
 def main() -> int:
     source = (ROOT / "views" / "home_view.py").read_text(encoding="utf-8")
     runtime = (ROOT / "services" / "qr_camera_runtime.py").read_text(encoding="utf-8")
+    scanner_service = (ROOT / "services" / "qr_scanner_service.py").read_text(encoding="utf-8")
     for marker in (
         "QrCameraRuntime",
         "generation",
@@ -99,6 +100,43 @@ def main() -> int:
     teardown = source[source.index("def _desmontar_scanner_overlay"):source.index("def _log_identidad_scanner")]
     assert "recovery_from_resume" not in teardown
     assert "buscar_qr_llegadas" not in initialization
+
+    # QR-KIOSK-0B4B-5C: Home conserva el lifecycle y el ownership de caché;
+    # discovery/retry y la selección BACK/fallback viven en el servicio.
+    discovery = initialization[
+        initialization.index("description = qr_runtime.camera_description"):initialization.index(
+            'print("[QR-SCAN][LIFECYCLE] initialize begin")'
+        )
+    ]
+    assert discovery.index("if description is not None:") < discovery.index("else:")
+    assert discovery.index("else:") < discovery.index("await enumerate_cameras_with_retry(")
+    assert "camera.get_available_cameras" in discovery
+    assert "select_camera_description(" in discovery
+    assert "if description is None:" in discovery
+    assert 'cerrar_scanner_qr(\n                                "No se encontr' in discovery
+    assert "fcam.CameraLensDirection.BACK" in discovery
+    assert "item for item in cameras" not in discovery
+    assert "cameras[0]" not in discovery
+    assert "qr_runtime.camera_description = description" in discovery
+    assert "Cameras available after retry=" in discovery
+    assert "enumerate_cameras_with_retry" not in teardown
+    cached_recovery = discovery[:discovery.index("else:")]
+    assert "enumerate_cameras_with_retry" not in cached_recovery
+    assert "select_camera_description" not in cached_recovery
+    assert scanner_service.count("def select_camera_description(") == 1
+    assert source.count("select_camera_description(") == 1
+    assert "qr_runtime.camera_description" not in scanner_service
+    transient_initialization_error = initialization[
+        initialization.rindex("if is_camera_transient(ex):"):initialization.rindex("cerrar_scanner_qr(")
+    ]
+    for marker in (
+        "qr_runtime.controller_initialized = False",
+        'state["qr_scanner_camera_state"] = "error"',
+        "Transient camera recovery exhausted; scanner remains open",
+        "render()",
+        "return",
+    ):
+        assert marker in transient_initialization_error, marker
 
     # QR-KIOSK-0B4A: la infraestructura entrega el código al puente y el
     # negocio sólo empieza después del cleanup del finalizador externo.

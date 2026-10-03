@@ -136,6 +136,35 @@ def test_stream_or_snapshot_strategy() -> None:
     assert scanner.scanner_strategy(False) == "snapshot"
 
 
+def test_camera_description_selection() -> None:
+    back = object()
+    front = object()
+    external = object()
+
+    class CameraDescription:
+        def __init__(self, lens_direction: object, name: str, device_id: str) -> None:
+            self.lens_direction = lens_direction
+            self.name = name
+            self.device_id = device_id
+
+    first_back = CameraDescription(back, "first back", "back-1")
+    second_back = CameraDescription(back, "second back", "back-2")
+    first_front = CameraDescription(front, "front", "front-1")
+    external_camera = CameraDescription(external, "external", "usb-1")
+
+    assert scanner.select_camera_description([first_back], back) is first_back
+    assert scanner.select_camera_description([first_front, first_back], back) is first_back
+    assert scanner.select_camera_description([first_front, first_back, second_back], back) is first_back
+    assert scanner.select_camera_description([first_front, external_camera], back) is first_front
+    assert scanner.select_camera_description([external_camera], back) is external_camera
+    assert scanner.select_camera_description([], back) is None
+
+    cameras = [first_front, first_back, second_back]
+    original_order = list(cameras)
+    assert scanner.select_camera_description(cameras, back) is first_back
+    assert cameras == original_order
+
+
 def test_camera_enumeration_retry_policy() -> None:
     async def no_wait(_seconds: float) -> None:
         return None
@@ -460,6 +489,7 @@ def main() -> int:
     test_gate_throttles_and_accepts_once()
     test_stream_frame_processing_preserves_gate_and_worker_boundaries()
     test_stream_or_snapshot_strategy()
+    test_camera_description_selection()
     test_camera_enumeration_retry_policy()
     test_camera_enumeration_stops_during_backoff()
     test_snapshot_polling_detects_once_and_stops()

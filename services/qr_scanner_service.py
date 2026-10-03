@@ -84,6 +84,17 @@ async def enumerate_cameras_with_retry(
     return None
 
 
+def select_camera_description(
+    cameras: list[T],
+    preferred_lens: object,
+) -> T | None:
+    """Selecciona la primera cámara del lente preferido o la primera disponible."""
+    for camera in cameras:
+        if getattr(camera, "lens_direction", None) == preferred_lens:
+            return camera
+    return cameras[0] if cameras else None
+
+
 def _normalizar_codigo_qr(value: str | None) -> str | None:
     codigo = (value or "").strip().upper()
     return codigo if re.fullmatch(r"[A-Z0-9]{4}", codigo) else None
