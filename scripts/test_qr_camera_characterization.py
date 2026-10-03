@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from services.qr_scanner_service import is_camera_transient
+from services.qr_scanner_service import QrFrameGate, is_camera_transient
 from services.qr_camera_runtime import QrCameraRuntime
 
 
@@ -23,6 +23,7 @@ def main() -> int:
         "camera_description",
         "def invalidate",
         "def is_scanner_session_current",
+        "def accept_snapshot_code",
     ):
         assert marker in runtime, marker
     for marker in ("qr_runtime.lifecycle_lock", "persistent_camera_host", "qr finalizer", "take_picture end"):
@@ -103,7 +104,7 @@ def main() -> int:
 
     # QR-KIOSK-0B4A: la infraestructura entrega el código al puente y el
     # negocio sólo empieza después del cleanup del finalizador externo.
-    qr_callback = source[source.index("def _on_qr_detected"):source.index("def _aceptar_codigo_snapshot")]
+    qr_callback = source[source.index("def _on_qr_detected"):source.index("def _scanner_frame_received")]
     assert "buscar_qr_llegadas" not in qr_callback
     finalizer = source[source.index("async def finalizar_qr"):source.index("page.run_task(finalizar_qr)")]
     assert finalizer.index("await _limpiar_camera_scanner(") < finalizer.index("buscar_qr_llegadas(codigo_qr)")
@@ -124,7 +125,119 @@ def main() -> int:
     runtime_one.invalidate()
     assert not runtime_one.is_scanner_session_current(0, True, session_key, session_key, session_key)
     assert "_scanner_sigue_vigente" not in source
-    assert source.count("qr_runtime.is_scanner_session_current(") == 8
+    # Un call site de Home fue absorbido por accept_snapshot_code(); los otros
+    # siete continúan validando sus decisiones de lifecycle directamente.
+    assert source.count("qr_runtime.is_scanner_session_current(") == 7
+
+    # QR-KIOSK-0B4B-2B: la aceptación de snapshots tiene una única
+    # implementación técnica. Primero valida sesión, luego abre/cierra el
+    # gate; sólo después entrega el código aceptado al callback de Home.
+    assert "_aceptar_codigo_snapshot" not in source
+    assert source.count("qr_runtime.accept_snapshot_code(") == 1
+    accept_method = runtime[runtime.index("    def accept_snapshot_code"):]
+    assert accept_method.count("self.is_scanner_session_current(") == 1
+    for forbidden in ("buscar_qr_llegadas", "arrivals", "rpc", "state", "page", "overlay"):
+        assert forbidden not in accept_method, forbidden
+
+    snapshot_runtime = QrCameraRuntime()
+    callback_calls: list[tuple[str, int, tuple[int, int], bool, bool]] = []
+    valid_gate = QrFrameGate()
+    valid_gate.start()
+
+    def on_accepted(codigo: str, generation: int, key: tuple[int, int]) -> bool:
+        callback_calls.append(
+            (codigo, generation, key, valid_gate.decode_busy, valid_gate.code_already_detected)
+        )
+        return True
+
+    assert snapshot_runtime.accept_snapshot_code(
+        "T3A1", 0, True, session_key, session_key, session_key, valid_gate, on_accepted
+    )
+    # finish_decode() ya liberó el decode y marcó el código antes del callback.
+    assert callback_calls == [("T3A1", 0, session_key, False, True)]
+    assert not snapshot_runtime.accept_snapshot_code(
+        "T3A2", 0, True, session_key, session_key, session_key, valid_gate, on_accepted
+    )
+    assert len(callback_calls) == 1
+
+    def assert_rejected_without_callback(
+        generation: int,
+        scanner_active: bool,
+        candidate_session_key: tuple[int, int] | None,
+        candidate_current_key: tuple[int, int] | None,
+    ) -> None:
+        gate = QrFrameGate()
+        gate.start()
+        calls: list[str] = []
+        assert not snapshot_runtime.accept_snapshot_code(
+            "T3A1",
+            generation,
+            scanner_active,
+            session_key,
+            candidate_session_key,
+            candidate_current_key,
+            gate,
+            lambda codigo, _generation, _key: calls.append(codigo) or True,
+        )
+        assert calls == []
+        assert not gate.decode_busy
+        assert not gate.code_already_detected
+
+    assert_rejected_without_callback(1, True, session_key, session_key)
+    assert_rejected_without_callback(0, False, session_key, session_key)
+    assert_rejected_without_callback(0, True, None, session_key)
+    assert_rejected_without_callback(0, True, session_key, None)
+    assert_rejected_without_callback(0, True, (2, 10), session_key)
+    assert_rejected_without_callback(0, True, session_key, (2, 10))
+
+    busy_gate = QrFrameGate()
+    busy_gate.start()
+    assert busy_gate.try_begin_decode()
+    busy_calls: list[str] = []
+    assert not snapshot_runtime.accept_snapshot_code(
+        "T3A1",
+        0,
+        True,
+        session_key,
+        session_key,
+        session_key,
+        busy_gate,
+        lambda codigo, _generation, _key: busy_calls.append(codigo) or True,
+    )
+    assert busy_calls == []
+
+    empty_gate = QrFrameGate()
+    empty_gate.start()
+    empty_calls: list[str] = []
+    assert not snapshot_runtime.accept_snapshot_code(
+        "",
+        0,
+        True,
+        session_key,
+        session_key,
+        session_key,
+        empty_gate,
+        lambda codigo, _generation, _key: empty_calls.append(codigo) or True,
+    )
+    assert empty_calls == []
+    assert not empty_gate.decode_busy
+    assert not empty_gate.code_already_detected
+
+    false_callback_gate = QrFrameGate()
+    false_callback_gate.start()
+    false_callback_calls: list[str] = []
+    assert not snapshot_runtime.accept_snapshot_code(
+        "T3A1",
+        0,
+        True,
+        session_key,
+        session_key,
+        session_key,
+        false_callback_gate,
+        lambda codigo, _generation, _key: false_callback_calls.append(codigo) or False,
+    )
+    assert false_callback_calls == ["T3A1"]
+    assert false_callback_gate.code_already_detected
     print("OK - QR camera characterization contract preserved.")
     return 0
 

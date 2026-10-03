@@ -1817,19 +1817,6 @@ def build_home_view(
         cerrar_scanner_qr(reason="qr_detected", codigo_qr=codigo)
         return True
 
-    def _aceptar_codigo_snapshot(codigo: str, generation: int, active_key: tuple[int, int]) -> bool:
-        gate: QrFrameGate = state["qr_scanner_gate"]
-        if not qr_runtime.is_scanner_session_current(
-            generation,
-            bool(state.get("qr_scanner_active")),
-            active_key,
-            state.get("qr_scanner_event_key"),
-            evento_activo_key(),
-        ) or not gate.try_begin_decode():
-            return False
-        accepted = gate.finish_decode(codigo)
-        return bool(accepted and _on_qr_detected(accepted, generation, active_key))
-
     def _scanner_frame_received(event: fcam.CameraImageEvent) -> None:
         active_key = state.get("qr_scanner_event_key")
         generation = qr_runtime.generation
@@ -1934,7 +1921,16 @@ def build_home_view(
                 await poll_qr_snapshots(
                     take_snapshot,
                     scanner_snapshot_vigente,
-                    lambda codigo: _aceptar_codigo_snapshot(codigo, generation, active_key),
+                    lambda codigo: qr_runtime.accept_snapshot_code(
+                        codigo,
+                        generation,
+                        bool(state.get("qr_scanner_active")),
+                        active_key,
+                        state.get("qr_scanner_event_key"),
+                        evento_activo_key(),
+                        gate,
+                        _on_qr_detected,
+                    ),
                     capture_error,
                     interval_seconds=0.65,
                     max_consecutive_errors=3,
