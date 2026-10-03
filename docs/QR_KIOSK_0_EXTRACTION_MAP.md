@@ -67,13 +67,21 @@ Es una caché técnica, no autoridad sobre el estado actual del dispositivo. Ant
 
 Al abrir una nueva sesión, Home captura `reuse_initialized_camera = qr_runtime.controller_initialized` y después crea una generation nueva con `qr_runtime.invalidate()`. Si ese cache previo era verdadero, valida sesión y montaje, toma `qr_runtime.lifecycle_lock` e intenta `await camera.resume_preview()`. Un resume exitoso libera el lock, limpia `qr_runtime.preview_paused`, reutiliza la estrategia de captura ya guardada (`stream` o `snapshot`) e inicia captura sin discovery ni initialize.
 
-Controller lost se detecta únicamente por excepción cuyo texto contiene, sin distinguir mayúsculas, `Camera is not initialized. Call initialize() first.` mediante `_controller_camera_no_inicializado(...)`. Esa respuesta real del plugin prevalece sobre el cache Python: Home libera primero el lock de resume y después fija `qr_runtime.controller_initialized=False`, `qr_runtime.preview_paused=False`, `camera_state="uninitialized"` y `recovery_from_resume=True`. El panel sigue abierto; `camera_description` no se borra y generation permanece siendo la creada para esta apertura.
+Controller lost se detecta únicamente por excepción cuyo texto contiene, sin distinguir mayúsculas, `Camera is not initialized. Call initialize() first.`. Esa respuesta real del plugin prevalece sobre el cache Python: Home libera primero el lock de resume y después fija `qr_runtime.controller_initialized=False`, `qr_runtime.preview_paused=False`, `camera_state="uninitialized"` y `recovery_from_resume=True`. El panel sigue abierto; `camera_description` no se borra y generation permanece siendo la creada para esta apertura.
 
 Luego la ruta normal vuelve a validar sesión y adquiere el mismo lock para initialize. Con `recovery_from_resume=True` y `qr_runtime.camera_description` no nula, usa la caché directamente, no enumera ni selecciona, y converge en `initialize_camera_with_retry`. Si la caché es `None`, usa discovery → selección → cache → el mismo helper. Una sesión invalidada durante la espera o dentro del helper retorna sin fijar controller ni iniciar captura; después de éxito Home vuelve a validar y sólo entonces llama `iniciar_captura`.
 
 Un error de `resume_preview()` distinto del texto controller-lost no activa recovery: sale al `except` exterior. Si es `cameraNotReadable` o `cameraAbort`, conserva el panel en estado `error` con retry/cancel; cualquier otro se delega a `cerrar_scanner_qr(...)`. Esos transient errors no reciben retry automático en resume. Teardown es separado: nunca intenta resume, discovery, initialize ni recovery; durante `pause_preview()` reconoce el mismo texto como benigno, deja controller no inicializado y continúa cleanup sin abrir retry.
 
-**Siguiente micro-paso propuesto — QR-KIOSK-0B4B-7B:** extraer solamente la clasificación técnica del resultado de resume (`resumed` / `controller_lost` / `error`) mediante un helper sin Flet, runtime, UI, cache ni recovery. Home conservaría lock, decisiones y orquestación completa.
+### Resume outcome classification — extracted
+
+`services.qr_scanner_service.classify_camera_resume_outcome(error: Exception | None) -> Literal["resumed", "controller_lost", "error"]` es un helper puro. `None` devuelve `resumed`; sólo el texto case-insensitive `Camera is not initialized. Call initialize() first.` contenido en el error devuelve `controller_lost`; todo otro error, incluidos `cameraNotReadable` y `cameraAbort`, devuelve `error`.
+
+Home conserva `await camera.resume_preview()` bajo `qr_runtime.lifecycle_lock`, clasifica el éxito con `None` y clasifica la excepción después de liberar el lock. Por tanto, el orden real es acquire → resume → release → classify/reaccionar → recovery → acquire de initialize, sin reentrancia. El plugin prevalece sobre el cache `controller_initialized`: `controller_lost` conserva en Home los cambios de runtime/UI y activa recovery; `error` conserva la clasificación transient y cierre existentes. El servicio no conoce runtime, lock, Camera, UI, recovery, discovery, initialize ni negocio.
+
+Teardown conserva su helper independiente para tratar el mismo texto durante `pause_preview()` como benigno; no usa este clasificador ni inicia recovery.
+
+Estado: QR-KIOSK-0B4B-7A ✅; QR-KIOSK-0B4B-7B ✅; QR-KIOSK-0B4B-7C ✅.
 
 ## Camera discovery / selection — extracted
 

@@ -40,7 +40,8 @@ def main() -> int:
         'qr_runtime.preview_paused = True',
         'qr_runtime.preview_paused = False',
         'if not camera_initialized or not qr_runtime.controller_initialized:',
-        'if not _controller_camera_no_inicializado(ex):',
+        'if _controller_camera_no_inicializado(ex):',
+        'if classify_camera_resume_outcome(ex) == "error":',
         'print("[QR-SCAN][INFO] Camera controller already uninitialized during Home cleanup")',
         'if event.has_error:',
         'elif event.is_initialized:',
@@ -201,9 +202,11 @@ def main() -> int:
     assert "await camera.resume_preview()" in resume
     assert "async with lock:" in resume
     assert "qr_runtime.is_scanner_session_current(" in resume
+    assert 'if classify_camera_resume_outcome(None) == "resumed":' in resume
+    assert 'if classify_camera_resume_outcome(ex) == "error":' in resume
+    assert "_controller_camera_no_inicializado(ex)" not in resume
     assert "qr_runtime.preview_paused = False" in resume
     assert "await iniciar_captura(strategy)" in resume
-    assert "if not _controller_camera_no_inicializado(ex):\n                            raise" in resume
     controller_lost = resume[resume.index("print(\"[QR-SCAN][WARN] Controller lost"):]
     for marker in (
         "qr_runtime.controller_initialized = False",
@@ -215,9 +218,30 @@ def main() -> int:
     assert "cerrar_scanner_qr" not in controller_lost
     assert (
         resume.index('print("[QR-SCAN][LIFECYCLE] resume_preview lock released")')
+        < resume.index("classify_camera_resume_outcome(ex)")
         < resume.index("qr_runtime.controller_initialized = False")
         < initialization.index("await lock.acquire()")
     )
+    classifier = scanner_service[
+        scanner_service.index("def classify_camera_resume_outcome("):
+        scanner_service.index("async def enumerate_cameras_with_retry(")
+    ]
+    assert 'Literal["resumed", "controller_lost", "error"]' in classifier
+    assert "if error is None:" in classifier
+    assert 'return "resumed"' in classifier
+    assert "camera is not initialized. call initialize() first." in classifier
+    assert 'return "controller_lost"' in classifier
+    assert 'return "error"' in classifier
+    for forbidden in (
+        "QrCameraRuntime",
+        "lifecycle_lock",
+        "Camera(",
+        "recovery_from_resume",
+        "enumerate_cameras_with_retry",
+        "initialize_camera_with_retry",
+        "buscar_qr_llegadas",
+    ):
+        assert forbidden not in classifier, forbidden
 
     recovery = initialization[initialization.index("description = qr_runtime.camera_description"):]
     cached_description = recovery[:recovery.index("else:")]
@@ -248,6 +272,7 @@ def main() -> int:
     assert "enumerate_cameras_with_retry" not in home_teardown
     assert "initialize_camera_with_retry" not in home_teardown
     assert "_controller_camera_no_inicializado(ex)" in home_teardown
+    assert "classify_camera_resume_outcome" not in home_teardown
 
     # QR-KIOSK-0B4A: la infraestructura entrega el código al puente y el
     # negocio sólo empieza después del cleanup del finalizador externo.

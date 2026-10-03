@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import re
 from threading import Lock
 from time import monotonic
-from typing import Awaitable, Callable, Protocol, TypeVar
+from typing import Awaitable, Callable, Literal, Protocol, TypeVar
 
 import cv2
 import numpy as np
@@ -50,6 +50,21 @@ def is_camera_transient(error: Exception) -> bool:
     if code == "cameraAbort":
         return True
     return bool(re.search(r"(?:^|[\s(:,])cameraAbort(?:$|[\s,):])", str(error)))
+
+
+def classify_camera_resume_outcome(
+    error: Exception | None,
+) -> Literal["resumed", "controller_lost", "error"]:
+    """Clasifica el resultado nativo de ``Camera.resume_preview()``.
+
+    No toma decisiones de lifecycle: sólo reconoce el texto exacto que
+    camera_web informa cuando su controller ya no existe.
+    """
+    if error is None:
+        return "resumed"
+    if "camera is not initialized. call initialize() first." in str(error).lower():
+        return "controller_lost"
+    return "error"
 
 
 async def enumerate_cameras_with_retry(

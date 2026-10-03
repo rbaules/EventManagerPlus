@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -134,6 +135,41 @@ async def _without_wait(_seconds: float) -> None:
 def test_stream_or_snapshot_strategy() -> None:
     assert scanner.scanner_strategy(True) == "stream"
     assert scanner.scanner_strategy(False) == "snapshot"
+
+
+def test_camera_resume_outcome_classification() -> None:
+    assert scanner.classify_camera_resume_outcome(None) == "resumed"
+    assert scanner.classify_camera_resume_outcome(
+        RuntimeError("Camera is not initialized. Call initialize() first.")
+    ) == "controller_lost"
+    assert scanner.classify_camera_resume_outcome(
+        RuntimeError("CAMERA IS NOT INITIALIZED. CALL INITIALIZE() FIRST.")
+    ) == "controller_lost"
+    assert scanner.classify_camera_resume_outcome(
+        RuntimeError("plugin: Camera is not initialized. Call initialize() first. [web]")
+    ) == "controller_lost"
+    for error in (
+        RuntimeError("cameraNotReadable"),
+        RuntimeError("cameraAbort"),
+        RuntimeError("unexpected failure"),
+        RuntimeError("Camera is not initialized"),
+        RuntimeError("Call initialize first"),
+        RuntimeError("Camera initialize failed"),
+    ):
+        assert scanner.classify_camera_resume_outcome(error) == "error"
+
+    classifier_source = inspect.getsource(scanner.classify_camera_resume_outcome)
+    for forbidden in (
+        "QrCameraRuntime",
+        "lifecycle_lock",
+        "Camera(",
+        "home_view",
+        "recovery",
+        "enumerate",
+        "initialize_camera",
+        "buscar_qr_llegadas",
+    ):
+        assert forbidden not in classifier_source, forbidden
 
 
 def test_camera_description_selection() -> None:
@@ -661,6 +697,7 @@ def main() -> int:
     test_gate_throttles_and_accepts_once()
     test_stream_frame_processing_preserves_gate_and_worker_boundaries()
     test_stream_or_snapshot_strategy()
+    test_camera_resume_outcome_classification()
     test_camera_description_selection()
     test_camera_initialize_retry_policy()
     test_camera_enumeration_retry_policy()

@@ -68,6 +68,7 @@ from services.invitado_service import (
 )
 from services.qr_scanner_service import (
     QrFrameGate,
+    classify_camera_resume_outcome,
     enumerate_cameras_with_retry,
     initialize_camera_with_retry,
     is_camera_transient,
@@ -1962,15 +1963,16 @@ def build_home_view(
                                 print("[QR-SCAN][LIFECYCLE] resume_preview end")
                         finally:
                             print("[QR-SCAN][LIFECYCLE] resume_preview lock released")
-                        qr_runtime.preview_paused = False
-                        strategy = state.get("qr_scanner_strategy")
-                        if strategy not in {"stream", "snapshot"}:
-                            raise RuntimeError("Camera inicializada sin estrategia de captura")
-                        print("[QR-SCAN][INFO] Reusing initialized camera; resume_preview")
-                        await iniciar_captura(strategy)
-                        return
+                        if classify_camera_resume_outcome(None) == "resumed":
+                            qr_runtime.preview_paused = False
+                            strategy = state.get("qr_scanner_strategy")
+                            if strategy not in {"stream", "snapshot"}:
+                                raise RuntimeError("Camera inicializada sin estrategia de captura")
+                            print("[QR-SCAN][INFO] Reusing initialized camera; resume_preview")
+                            await iniciar_captura(strategy)
+                            return
                     except Exception as ex:
-                        if not _controller_camera_no_inicializado(ex):
+                        if classify_camera_resume_outcome(ex) == "error":
                             raise
                         # Un widget Web puede haber perdido su controller pese a
                         # conservar la identidad Python. Se recupera una sola vez
