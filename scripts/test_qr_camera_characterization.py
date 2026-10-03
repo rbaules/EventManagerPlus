@@ -184,6 +184,71 @@ def main() -> int:
     assert "asyncio.CancelledError" not in initialize_helper
     assert "except BaseException" not in initialize_helper
 
+    # QR-KIOSK-0B4B-7A: resume sólo se intenta si el cache local indicaba un
+    # controller inicializado antes de abrir la nueva generation. La respuesta
+    # real del plugin prevalece sobre ese cache y dispara recovery sólo para el
+    # mensaje exacto de controller perdido.
+    open_scanner = source[source.index("def abrir_scanner_qr()"):source.index("async def iniciar_captura")]
+    assert "reuse_initialized_camera = qr_runtime.controller_initialized" in open_scanner
+    assert open_scanner.index("reuse_initialized_camera = qr_runtime.controller_initialized") < open_scanner.index(
+        "generation = qr_runtime.invalidate()"
+    )
+    resume = initialization[
+        initialization.index("if reuse_initialized_camera:"):initialization.index(
+            "# camera_web necesita un turno de estabilización adicional"
+        )
+    ]
+    assert "await camera.resume_preview()" in resume
+    assert "async with lock:" in resume
+    assert "qr_runtime.is_scanner_session_current(" in resume
+    assert "qr_runtime.preview_paused = False" in resume
+    assert "await iniciar_captura(strategy)" in resume
+    assert "if not _controller_camera_no_inicializado(ex):\n                            raise" in resume
+    controller_lost = resume[resume.index("print(\"[QR-SCAN][WARN] Controller lost"):]
+    for marker in (
+        "qr_runtime.controller_initialized = False",
+        'state["qr_scanner_camera_state"] = "uninitialized"',
+        "qr_runtime.preview_paused = False",
+        "recovery_from_resume = True",
+    ):
+        assert marker in controller_lost, marker
+    assert "cerrar_scanner_qr" not in controller_lost
+    assert (
+        resume.index('print("[QR-SCAN][LIFECYCLE] resume_preview lock released")')
+        < resume.index("qr_runtime.controller_initialized = False")
+        < initialization.index("await lock.acquire()")
+    )
+
+    recovery = initialization[initialization.index("description = qr_runtime.camera_description"):]
+    cached_description = recovery[:recovery.index("else:")]
+    uncached_description = recovery[recovery.index("else:"):recovery.index('print("[QR-SCAN][LIFECYCLE] initialize begin")')]
+    assert "if description is not None:" in cached_description
+    assert "enumerate_cameras_with_retry" not in cached_description
+    assert "select_camera_description" not in cached_description
+    assert "initialize_camera_with_retry(" in recovery
+    assert "enumerate_cameras_with_retry" in uncached_description
+    assert "select_camera_description" in uncached_description
+    assert "qr_runtime.camera_description = description" in uncached_description
+    assert "if initialize_attempt is None:\n                        return" in initialization
+    assert initialization.index("if initialize_attempt is None:") < initialization.index(
+        "qr_runtime.controller_initialized = True"
+    )
+
+    # Otros errores de resume salen hacia el except exterior: los transitorios
+    # conservan panel error/retry; los demás delegan al cierre existente, sin
+    # activar recovery. Teardown se mantiene separado y trata el mismo texto
+    # como benigno durante pause_preview.
+    outer_error = initialization[initialization.rindex("except Exception as ex:"):]
+    assert "if is_camera_transient(ex):" in outer_error
+    assert 'state["qr_scanner_camera_state"] = "error"' in outer_error
+    assert "cerrar_scanner_qr(_mensaje_error_scanner(ex), reason=\"error\")" in outer_error
+    assert "recovery_from_resume = True" not in outer_error
+    home_teardown = source[source.index("def _desmontar_scanner_overlay"):source.index("def _log_identidad_scanner")]
+    assert "recovery_from_resume" not in home_teardown
+    assert "enumerate_cameras_with_retry" not in home_teardown
+    assert "initialize_camera_with_retry" not in home_teardown
+    assert "_controller_camera_no_inicializado(ex)" in home_teardown
+
     # QR-KIOSK-0B4A: la infraestructura entrega el código al puente y el
     # negocio sólo empieza después del cleanup del finalizador externo.
     qr_callback = source[source.index("def _on_qr_detected"):source.index("def _on_scanner_stream_image")]
