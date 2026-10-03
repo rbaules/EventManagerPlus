@@ -12,6 +12,7 @@ class QrCameraRuntime:
         self.controller_initialized = False
         self.preview_paused = False
         self.lifecycle_lock = asyncio.Lock()
+        self.camera_description = None
 
     def invalidate(self) -> int:
         self.generation += 1

@@ -20,6 +20,7 @@ def main() -> int:
         "controller_initialized",
         "preview_paused",
         "lifecycle_lock",
+        "camera_description",
         "def invalidate",
     ):
         assert marker in runtime, marker
@@ -80,20 +81,21 @@ def main() -> int:
         < initialization.index("await lock.acquire()")
     )
 
-    # La descripción se crea tras enumeración y se reutiliza exclusivamente
-    # durante recovery por controller perdido. No se invalida ni se recupera
-    # desde teardown; si no existe, se conserva la enumeración con retry.
+    # QR-KIOSK-0B3B-2B: la descripción es una única caché técnica del runtime.
+    # Se crea tras enumeración y se reutiliza exclusivamente durante recovery
+    # por controller perdido; no se invalida ni se recupera desde teardown.
+    assert runtime_one.camera_description is None
+    assert source.count("qr_runtime.camera_description") == 2
     for marker in (
-        '"qr_scanner_description": None',
-        'description = state.get("qr_scanner_description") if recovery_from_resume else None',
+        'description = qr_runtime.camera_description if recovery_from_resume else None',
         'print("[QR-SCAN][LIFECYCLE] Reusing cached CameraDescription for recovery")',
         'enumerate_cameras_with_retry(',
-        'state["qr_scanner_description"] = description',
+        'qr_runtime.camera_description = description',
         'await camera.initialize(',
         'if not is_camera_transient(ex) or initialize_attempt == initialize_attempts:',
     ):
         assert marker in source, marker
-    assert 'state["qr_scanner_description"] = None' not in source
+    assert '"qr_scanner_description"' not in source
     teardown = source[source.index("def _desmontar_scanner_overlay"):source.index("def _log_identidad_scanner")]
     assert "recovery_from_resume" not in teardown
     assert "buscar_qr_llegadas" not in initialization

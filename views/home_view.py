@@ -199,7 +199,6 @@ def build_home_view(
         "qr_scanner_camera_mounted": False,
         "qr_scanner_image_stream_active": False,
         "qr_scanner_snapshot_task_active": False,
-        "qr_scanner_description": None,
         "qr_scanner_event_key": None,
         "qr_scanner_gate": QrFrameGate(),
         "arrivals_resultados": [],
@@ -2007,7 +2006,7 @@ def build_home_view(
                     await lock.acquire()
                     lock_acquired = True
                     print("[QR-SCAN][LIFECYCLE] initialize lock acquired")
-                    description = state.get("qr_scanner_description") if recovery_from_resume else None
+                    description = qr_runtime.camera_description if recovery_from_resume else None
                     if description is not None:
                         print("[QR-SCAN][LIFECYCLE] Reusing cached CameraDescription for recovery")
                     else:
@@ -2032,7 +2031,7 @@ def build_home_view(
                             (item for item in cameras if item.lens_direction == fcam.CameraLensDirection.BACK),
                             cameras[0],
                         )
-                        state["qr_scanner_description"] = description
+                        qr_runtime.camera_description = description
                         print(
                             "[QR-SCAN][INFO] Cameras available:", len(cameras),
                             "selected_lens=", getattr(description.lens_direction, "value", description.lens_direction),
