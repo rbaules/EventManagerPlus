@@ -76,8 +76,8 @@ Ubicación real: las funciones scanner están en `views/home_view.py`, aproximad
 | `QrCameraRuntime.accept_snapshot_code` | generation/vigencia | — | — | — | `QrFrameGate` aportado por Home | — | E: callback técnico Home | BAJA |
 | `process_qr_camera_frame` / `_decode_and_accept_qr_frame` | vigencia aportada | bytes | — | scheduler aportado | `QrFrameGate` | — | E: callback técnico Home | MEDIA |
 | `abrir_scanner_qr` | todos los campos | obtiene/inicia | visibilidad/render | update/tarea | opening/scanning | depende de evento activo | L: cámara/visibilidad | ALTA |
-| `abrir_scanner_qr > iniciar_captura` | task/generation | stream/take picture | render | — | strategy/flags | — | E: polling; L: accept/close | ALTA |
-| `abrir_scanner_qr > take_snapshot` | generation indirecta | `take_picture` | — | tarea actual | — | — | E: polling | BAJA |
+| `abrir_scanner_qr > iniciar_captura` | adapters/generation | inicia stream | render | — | strategy/flags | — | E: polling; L: accept/close | MEDIA |
+| `qr_scanner_service.run_qr_snapshot_polling` / `take_qr_snapshot` | `snapshot_task`/generation | callback `take_picture` | — | tarea actual | gate/callbacks aportados | — | E: polling | MEDIA |
 | `abrir_scanner_qr > inicializar` | todos los campos | resume/enumerate/initialize | — | tarea/lock | error/scanning | — | L: vigente/close/capture | ALTA |
 | `_reintentar_scanner_qr` | indirecto | — | retry button | — | error/closing | — | L: open | BAJA |
 | `logout` | indirecto | teardown indirecto | `page.clean` | page/sesión | — | sesión | L: desmontar | ALTA |
@@ -93,9 +93,9 @@ Por tanto, `cerrar_scanner_qr` mezcla infraestructura y negocio únicamente por 
 1. **0B4B-1 — ✅ `QrCameraRuntime.is_scanner_session_current`**: migrado desde `_scanner_sigue_vigente` sin arrastrar lifecycle grande.
 2. **0B4B-2 — ✅ `QrCameraRuntime.accept_snapshot_code`**: migrado desde `_aceptar_codigo_snapshot`; conserva el gate como frontera de aceptación y recibe el callback técnico de Home.
 3. **0B4B-3 — ✅ `process_qr_camera_frame` / `_decode_and_accept_qr_frame`**: migrados desde `_scanner_frame_received` / `decode_worker`; Home conserva sólo el adaptador Flet y el callback técnico.
-4. **0B4B-4 — `iniciar_captura` y `take_snapshot`**: siguiente pareja; task/generation/gate/polling, sin moverla todavía.
-5. **0B4B-5 — `_limpiar_camera_scanner`**: primera operación nativa reutilizable; conserva lock, cancelación/espera de polling y callbacks mínimos de montado/log/UI.
-6. **0B4B-6 — `inicializar`**: resume, recovery, enumeración y retry; mover después de tener las primitivas anteriores.
+4. **0B4B-4 — ✅ `run_qr_snapshot_polling` / `take_qr_snapshot`**: polling técnico migrado; Home conserva estrategia, estado visual y adapters.
+5. **0B4B-5 — `inicializar / recovery`**: siguiente candidato; resume, recovery, enumeración y retry, sin moverlo todavía.
+6. **0B4B-6 — `_limpiar_camera_scanner`**: primera operación nativa reutilizable; conserva lock, cancelación/espera de polling y callbacks mínimos de montado/log/UI.
 7. **0B4B-7 — `cerrar_scanner_qr`**: separar primero el finalizador técnico de su callback `on_qr_detected(codigo)` antes de mover el coordinador de close.
 8. **0B4B-8 — `_desmontar_scanner_overlay` y luego Camera/overlay**: mantenerlos al final por dependencia directa de Page y composición visual.
 
@@ -121,4 +121,12 @@ Home conserva `_on_scanner_stream_image(event)` porque Flet entrega un `CameraIm
 
 La ruta snapshot permanece independiente: `take_picture` → decode de polling → `QrCameraRuntime.accept_snapshot_code` → gate → callback técnico. Ambas rutas reciben el mismo `QrFrameGate` de la sesión y por eso comparten throttle, exclusión de decode concurrente y deduplicación. Ninguna llama negocio: `_on_qr_detected` solicita el finalizador y `buscar_qr_llegadas(codigo_qr)` ocurre sólo después de polling/captura terminada y cleanup.
 
-0B4B-1, 0B4B-2 y 0B4B-3 quedan completados. El siguiente candidato, sin migrarlo todavía, es `iniciar_captura` + `take_snapshot` (0B4B-4).
+### Polling snapshot migrado
+
+El loop técnico antes anidado en `iniciar_captura` y su `take_snapshot` local fueron migrados a `qr_scanner_service.run_qr_snapshot_polling(...)` y `take_qr_snapshot(...)`. Home conserva solamente la selección stream/snapshot, estado visual y adapters para `camera.take_picture`, vigencia, aceptación y error.
+
+El servicio registra la tarea actual en `runtime.snapshot_task` y en su `finally` la limpia sólo si la referencia aún identifica esa misma tarea. Cleanup y el finalizador continúan invalidando generation, cancelando y esperando esa task antes de pausar la cámara; la cancelación se propaga al polling y `take_qr_snapshot` conserva el `finally` de logging. La ruta es `take_picture` → decode de polling → callback Home → `QrCameraRuntime.accept_snapshot_code` → gate → `_on_qr_detected`.
+
+Stream y snapshot permanecen separados, pero reciben el mismo `QrFrameGate` de la sesión. No hay negocio en el servicio: el finalizador externo espera polling/captura, realiza cleanup y sólo después llama `buscar_qr_llegadas(codigo_qr)`.
+
+0B4B-1, 0B4B-2, 0B4B-3 y 0B4B-4 quedan completados. El siguiente candidato, sin migrarlo todavía, es `inicializar / recovery` (0B4B-5).

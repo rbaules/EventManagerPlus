@@ -26,7 +26,7 @@ def main() -> int:
         "def accept_snapshot_code",
     ):
         assert marker in runtime, marker
-    for marker in ("qr_runtime.lifecycle_lock", "persistent_camera_host", "qr finalizer", "take_picture end"):
+    for marker in ("qr_runtime.lifecycle_lock", "persistent_camera_host", "qr finalizer"):
         assert marker in source, marker
     assert is_camera_transient(RuntimeError("cameraNotReadable"))
     assert is_camera_transient(RuntimeError("cameraAbort"))
@@ -66,8 +66,6 @@ def main() -> int:
         'await camera.pause_preview()',
         'await camera.stop_image_stream()',
         'await polling_task',
-        'async def take_snapshot()',
-        'return await camera.take_picture()',
         'def _reintentar_scanner_qr() -> None:',
         'abrir_scanner_qr()',
     ):
@@ -280,7 +278,38 @@ def main() -> int:
     for forbidden in ("buscar_qr_llegadas", "arrivals", "rpc", "supabase", "page", "overlay"):
         assert forbidden not in stream_processor, forbidden
     assert "on_stream_image=_on_scanner_stream_image" in source
-    assert "poll_qr_snapshots(" in source and "qr_runtime.accept_snapshot_code(" in source
+    assert "poll_qr_snapshots(" in scanner_service and "qr_runtime.accept_snapshot_code(" in source
+
+    # QR-KIOSK-0B4B-4B: Home sólo coordina estrategia/UI y adapta callbacks;
+    # servicio posee el loop y la única referencia técnica de snapshot_task.
+    assert "async def take_snapshot" not in source
+    capture_adapter = source[source.index("async def iniciar_captura"):source.index("async def inicializar")]
+    assert "run_qr_snapshot_polling(" in capture_adapter
+    for forbidden in ("poll_qr_snapshots(", "snapshot_task =", "async def take_snapshot"):
+        assert forbidden not in capture_adapter, forbidden
+    assert scanner_service.count("async def run_qr_snapshot_polling(") == 1
+    assert scanner_service.count("async def take_qr_snapshot(") == 1
+    snapshot_runner = scanner_service[
+        scanner_service.index("async def run_qr_snapshot_polling"):]
+    for marker in (
+        "runtime.snapshot_task = polling_task",
+        "if runtime.snapshot_task is polling_task:",
+        "runtime.snapshot_task = None",
+        "await poll_qr_snapshots(",
+        "lambda: take_qr_snapshot(take_picture, generation)",
+    ):
+        assert marker in snapshot_runner, marker
+    snapshot_capture = scanner_service[
+        scanner_service.index("async def take_qr_snapshot"):scanner_service.index("async def run_qr_snapshot_polling")
+    ]
+    assert "qr_runtime.lifecycle_lock" not in snapshot_capture
+    assert "await take_picture()" in snapshot_capture
+    assert "take_picture begin" in snapshot_capture and "take_picture end" in snapshot_capture
+    assert "buscar_qr_llegadas" not in snapshot_runner
+    assert "qr_runtime.snapshot_task" not in capture_adapter
+    assert "await polling_task" in cleanup
+    assert cleanup.index("await polling_task") < cleanup.index("await camera.pause_preview()")
+    assert finalizer.index("await polling_task") < finalizer.index("await _limpiar_camera_scanner(")
     print("OK - QR camera characterization contract preserved.")
     return 0
 

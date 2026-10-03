@@ -5,13 +5,19 @@ from dataclasses import dataclass, field
 import re
 from threading import Lock
 from time import monotonic
-from typing import Awaitable, Callable, TypeVar
+from typing import Awaitable, Callable, Protocol, TypeVar
 
 import cv2
 import numpy as np
 
 
 T = TypeVar("T")
+
+
+class SnapshotTaskOwner(Protocol):
+    """Contrato mínimo para conservar la única referencia de polling."""
+
+    snapshot_task: asyncio.Task[object] | None
 
 
 @dataclass(frozen=True)
@@ -216,3 +222,56 @@ async def poll_qr_snapshots(
             return True
         await sleep(interval_seconds)
     return False
+
+
+async def take_qr_snapshot(
+    take_picture: Callable[[], Awaitable[bytes]],
+    generation: int,
+) -> bytes:
+    """Captura un snapshot sin adquirir lifecycle_lock ni conocer Camera."""
+    print(
+        "[QR-SCAN][LIFECYCLE] take_picture begin",
+        f"generation={generation}",
+        f"task_id={id(asyncio.current_task())}",
+    )
+    try:
+        return await take_picture()
+    finally:
+        print(
+            "[QR-SCAN][LIFECYCLE] take_picture end",
+            f"generation={generation}",
+            f"task_id={id(asyncio.current_task())}",
+        )
+
+
+async def run_qr_snapshot_polling(
+    runtime: SnapshotTaskOwner,
+    take_picture: Callable[[], Awaitable[bytes]],
+    is_session_current: Callable[[], bool],
+    on_code: Callable[[str], bool],
+    on_capture_error: Callable[[int, Exception], None],
+    *,
+    generation: int,
+    interval_seconds: float = 0.65,
+    max_consecutive_errors: int = 3,
+) -> bool:
+    """Orquesta polling y conserva en runtime la única task de snapshot."""
+    polling_task = asyncio.current_task()
+    runtime.snapshot_task = polling_task
+    try:
+        return await poll_qr_snapshots(
+            lambda: take_qr_snapshot(take_picture, generation),
+            is_session_current,
+            on_code,
+            on_capture_error,
+            interval_seconds=interval_seconds,
+            max_consecutive_errors=max_consecutive_errors,
+        )
+    finally:
+        if runtime.snapshot_task is polling_task:
+            runtime.snapshot_task = None
+        print(
+            "[QR-SCAN][LIFECYCLE] polling task finished",
+            f"generation={generation}",
+            f"task_id={id(polling_task)}",
+        )

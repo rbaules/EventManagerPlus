@@ -21,6 +21,11 @@ class Detector:
         return self.value, None, None
 
 
+class SnapshotOwner:
+    def __init__(self) -> None:
+        self.snapshot_task: asyncio.Task[object] | None = None
+
+
 def test_decoder() -> None:
     with patch.object(scanner.cv2, "imdecode", return_value=object()), patch.object(scanner.cv2, "QRCodeDetector", return_value=Detector(" t3a1 ")):
         assert scanner.decode_qr_frame(b"encoded") == "T3A1"
@@ -289,6 +294,167 @@ def test_snapshot_polling_retries_one_error_and_stops_after_persistent_errors() 
     assert result is False and persistent_errors == [1, 2, 3]
 
 
+def test_take_qr_snapshot_and_snapshot_runtime_ownership() -> None:
+    async def capture() -> bytes:
+        return b"snapshot"
+
+    assert asyncio.run(scanner.take_qr_snapshot(capture, 7)) == b"snapshot"
+
+    async def failed_capture() -> bytes:
+        raise RuntimeError("capture failed")
+
+    async def assert_capture_error_propagates() -> None:
+        try:
+            await scanner.take_qr_snapshot(failed_capture, 7)
+            raise AssertionError("Se esperaba error de captura")
+        except RuntimeError as ex:
+            assert str(ex) == "capture failed"
+
+    asyncio.run(assert_capture_error_propagates())
+
+    async def valid_then_detected() -> None:
+        owner = SnapshotOwner()
+        snapshots = iter([b"without-qr", b"valid-qr"])
+        accepted: list[str] = []
+        result = await scanner.run_qr_snapshot_polling(
+            owner,
+            lambda: _next_snapshot(snapshots),
+            lambda: True,
+            lambda code: accepted.append(code) is None,
+            lambda _attempt, _error: None,
+            generation=7,
+            interval_seconds=0,
+        )
+        assert result is True and accepted == ["T3A1"] and owner.snapshot_task is None
+
+    async def expired_session() -> None:
+        owner = SnapshotOwner()
+        calls = 0
+
+        async def should_not_capture() -> bytes:
+            nonlocal calls
+            calls += 1
+            return b"unexpected"
+
+        result = await scanner.run_qr_snapshot_polling(
+            owner,
+            should_not_capture,
+            lambda: False,
+            lambda _code: True,
+            lambda _attempt, _error: None,
+            generation=8,
+            interval_seconds=0,
+        )
+        assert result is False and calls == 0 and owner.snapshot_task is None
+
+    async def retry_and_terminal_error() -> None:
+        owner = SnapshotOwner()
+        outcomes = iter([RuntimeError("temporary"), b"valid-qr"])
+        errors: list[int] = []
+
+        async def take_with_one_error() -> bytes:
+            item = next(outcomes)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        with patch.object(scanner, "decode_qr_frame", return_value="T3A1"):
+            result = await scanner.run_qr_snapshot_polling(
+                owner,
+                take_with_one_error,
+                lambda: True,
+                lambda _code: True,
+                lambda attempt, _error: errors.append(attempt),
+                generation=9,
+                interval_seconds=0,
+            )
+        assert result is True and errors == [1] and owner.snapshot_task is None
+
+        owner = SnapshotOwner()
+        terminal_errors: list[int] = []
+
+        async def always_fails() -> bytes:
+            raise RuntimeError("camera unavailable")
+
+        result = await scanner.run_qr_snapshot_polling(
+            owner,
+            always_fails,
+            lambda: True,
+            lambda _code: True,
+            lambda attempt, _error: terminal_errors.append(attempt),
+            generation=10,
+            interval_seconds=0,
+            max_consecutive_errors=3,
+        )
+        assert result is False and terminal_errors == [1, 2, 3] and owner.snapshot_task is None
+
+    async def cancellation_and_new_task_ownership() -> None:
+        owner = SnapshotOwner()
+        started = asyncio.Event()
+        never_finish = asyncio.Event()
+
+        async def blocking_capture() -> bytes:
+            started.set()
+            await never_finish.wait()
+            return b"unreachable"
+
+        polling_task = asyncio.create_task(
+            scanner.run_qr_snapshot_polling(
+                owner,
+                blocking_capture,
+                lambda: True,
+                lambda _code: True,
+                lambda _attempt, _error: None,
+                generation=11,
+                interval_seconds=0,
+            )
+        )
+        await started.wait()
+        assert owner.snapshot_task is polling_task
+        polling_task.cancel()
+        try:
+            await polling_task
+            raise AssertionError("Se esperaba CancelledError")
+        except asyncio.CancelledError:
+            pass
+        assert owner.snapshot_task is None
+
+        owner = SnapshotOwner()
+        replacement_wait = asyncio.Event()
+        replacement_task = asyncio.create_task(replacement_wait.wait())
+        active = {"value": True}
+
+        async def replace_task_then_invalidate() -> bytes:
+            owner.snapshot_task = replacement_task
+            active["value"] = False
+            return b"late"
+
+        result = await scanner.run_qr_snapshot_polling(
+            owner,
+            replace_task_then_invalidate,
+            lambda: active["value"],
+            lambda _code: True,
+            lambda _attempt, _error: None,
+            generation=12,
+            interval_seconds=0,
+        )
+        assert result is False and owner.snapshot_task is replacement_task
+        replacement_task.cancel()
+        try:
+            await replacement_task
+        except asyncio.CancelledError:
+            pass
+
+    async def _next_snapshot(snapshots: object) -> bytes:
+        return next(snapshots)  # type: ignore[arg-type, return-value]
+
+    with patch.object(scanner, "decode_qr_frame", side_effect=[None, "T3A1"]):
+        asyncio.run(valid_then_detected())
+    asyncio.run(expired_session())
+    asyncio.run(retry_and_terminal_error())
+    asyncio.run(cancellation_and_new_task_ownership())
+
+
 def main() -> int:
     test_decoder()
     test_gate_throttles_and_accepts_once()
@@ -299,6 +465,7 @@ def main() -> int:
     test_snapshot_polling_detects_once_and_stops()
     test_snapshot_polling_ignores_late_result_after_cancel_or_event_change()
     test_snapshot_polling_retries_one_error_and_stops_after_persistent_errors()
+    test_take_qr_snapshot_and_snapshot_runtime_ownership()
     print("OK - QR scanner decoder, stream/snapshot and duplicate/throttle gate tests passed.")
     return 0
 

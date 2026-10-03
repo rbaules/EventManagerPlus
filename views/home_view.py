@@ -70,8 +70,8 @@ from services.qr_scanner_service import (
     QrFrameGate,
     enumerate_cameras_with_retry,
     is_camera_transient,
-    poll_qr_snapshots,
     process_qr_camera_frame,
+    run_qr_snapshot_polling,
     scanner_strategy,
 )
 from services.qr_camera_runtime import QrCameraRuntime
@@ -1897,27 +1897,10 @@ def build_home_view(
                         reason="error",
                     )
 
-            polling_task = asyncio.current_task()
-            qr_runtime.snapshot_task = polling_task
-
-            async def take_snapshot() -> bytes:
-                print(
-                    "[QR-SCAN][LIFECYCLE] take_picture begin",
-                    f"generation={generation}",
-                    f"task_id={id(asyncio.current_task())}",
-                )
-                try:
-                    return await camera.take_picture()
-                finally:
-                    print(
-                        "[QR-SCAN][LIFECYCLE] take_picture end",
-                        f"generation={generation}",
-                        f"task_id={id(asyncio.current_task())}",
-                    )
-
             try:
-                await poll_qr_snapshots(
-                    take_snapshot,
+                await run_qr_snapshot_polling(
+                    qr_runtime,
+                    camera.take_picture,
                     scanner_snapshot_vigente,
                     lambda codigo: qr_runtime.accept_snapshot_code(
                         codigo,
@@ -1930,19 +1913,13 @@ def build_home_view(
                         _on_qr_detected,
                     ),
                     capture_error,
+                    generation=generation,
                     interval_seconds=0.65,
                     max_consecutive_errors=3,
                 )
             finally:
-                if qr_runtime.snapshot_task is polling_task:
-                    qr_runtime.snapshot_task = None
                 if generation == qr_runtime.generation:
                     state["qr_scanner_snapshot_task_active"] = False
-                print(
-                    "[QR-SCAN][LIFECYCLE] polling task finished",
-                    f"generation={generation}",
-                    f"task_id={id(polling_task)}",
-                )
 
         async def inicializar() -> None:
             try:
