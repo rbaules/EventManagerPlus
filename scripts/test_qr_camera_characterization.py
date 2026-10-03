@@ -138,6 +138,38 @@ def main() -> int:
     ):
         assert marker in transient_initialization_error, marker
 
+    # QR-KIOSK-0B4B-6A: initialize y su retry siguen en Home. Las rutas de
+    # discovery normal, recovery sin caché y recovery con caché convergen en
+    # este único bloque protegido por el lifecycle lock.
+    initialize_block = initialization[
+        initialization.index('print("[QR-SCAN][LIFECYCLE] initialize begin")'):initialization.index(
+            'print("[QR-SCAN][LIFECYCLE] initialize lock released")'
+        )
+    ]
+    assert "initialize_attempts = 3" in initialize_block
+    assert "for initialize_attempt in range(1, initialize_attempts + 1):" in initialize_block
+    assert initialize_block.count("await camera.initialize(") == 1
+    assert "fcam.ResolutionPreset.LOW" in initialize_block
+    assert "enable_audio=False" in initialize_block
+    assert "image_format_group=fcam.ImageFormatGroup.JPEG" in initialize_block
+    assert "break" in initialize_block
+    assert "if not is_camera_transient(ex) or initialize_attempt == initialize_attempts:" in initialize_block
+    assert "delay = (0.25, 0.5)[initialize_attempt - 1]" in initialize_block
+    assert 'retry={initialize_attempt}/{initialize_attempts} delay={delay}' in initialize_block
+    assert "await asyncio.sleep(delay)" in initialize_block
+    assert discovery.index("qr_runtime.camera_description = description") < initialization.index(
+        'print("[QR-SCAN][LIFECYCLE] initialize begin")'
+    )
+    assert initialization.index("await lock.acquire()") < initialization.index("await camera.initialize(")
+    assert initialization.index("await camera.initialize(") < initialization.index("lock.release()")
+    assert initialization.index("lock.release()") < initialization.index("qr_runtime.controller_initialized = True")
+    assert initialization.index("qr_runtime.controller_initialized = True") < initialization.index(
+        "await iniciar_captura(scanner_strategy(await camera.supports_image_streaming()))"
+    )
+    assert 'state["qr_scanner_camera_state"] = "initialized"' in initialization
+    assert "buscar_qr_llegadas" not in initialize_block
+    assert "_controller_camera_no_inicializado(ex)" not in initialize_block
+
     # QR-KIOSK-0B4A: la infraestructura entrega el código al puente y el
     # negocio sólo empieza después del cleanup del finalizador externo.
     qr_callback = source[source.index("def _on_qr_detected"):source.index("def _on_scanner_stream_image")]
