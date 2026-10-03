@@ -84,6 +84,37 @@ async def enumerate_cameras_with_retry(
     return None
 
 
+async def initialize_camera_with_retry(
+    initialize_once: Callable[[], Awaitable[object]],
+    is_active: Callable[[], bool],
+    on_transient_error: Callable[[Exception, int, float], None] | None = None,
+    *,
+    max_attempts: int = 3,
+    retry_delays: tuple[float, ...] = (0.25, 0.5),
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> int | None:
+    """Inicializa mediante un callback, con retry sólo ante errores transitorios."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts debe ser mayor o igual a 1")
+    for attempt in range(1, max_attempts + 1):
+        if not is_active():
+            return None
+        try:
+            await initialize_once()
+            return attempt
+        except Exception as ex:
+            if not is_camera_transient(ex) or attempt == max_attempts:
+                raise
+            delay = retry_delays[min(attempt - 1, len(retry_delays) - 1)]
+            if on_transient_error is not None:
+                on_transient_error(ex, attempt, delay)
+            if not is_active():
+                return None
+            await sleep(delay)
+            print("[QR-SCAN][LIFECYCLE] initialize end")
+    return None
+
+
 def select_camera_description(
     cameras: list[T],
     preferred_lens: object,

@@ -165,6 +165,178 @@ def test_camera_description_selection() -> None:
     assert cameras == original_order
 
 
+def test_camera_initialize_retry_policy() -> None:
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    calls = 0
+    sleeps: list[float] = []
+    callbacks: list[tuple[Exception, int, float]] = []
+
+    def record_callback(error: Exception, attempt: int, delay: float) -> None:
+        callbacks.append((error, attempt, delay))
+
+    async def first_success() -> None:
+        nonlocal calls
+        calls += 1
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    assert asyncio.run(scanner.initialize_camera_with_retry(
+        first_success, lambda: True, record_callback, sleep=record_sleep,
+    )) == 1
+    assert calls == 1 and sleeps == [] and callbacks == []
+
+    calls = 0
+    sleeps = []
+    callbacks = []
+    first_error = RuntimeError("cameraNotReadable")
+
+    async def transient_then_success() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise first_error
+
+    assert asyncio.run(scanner.initialize_camera_with_retry(
+        transient_then_success, lambda: True, record_callback, sleep=record_sleep,
+    )) == 2
+    assert calls == 2 and sleeps == [0.25] and callbacks == [(first_error, 1, 0.25)]
+
+    calls = 0
+    sleeps = []
+    callbacks = []
+    first_abort = RuntimeError("cameraAbort")
+    second_abort = RuntimeError("cameraAbort")
+
+    async def two_transients_then_success() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise first_abort
+        if calls == 2:
+            raise second_abort
+
+    assert asyncio.run(scanner.initialize_camera_with_retry(
+        two_transients_then_success, lambda: True, record_callback, sleep=record_sleep,
+    )) == 3
+    assert calls == 3 and sleeps == [0.25, 0.5]
+    assert callbacks == [(first_abort, 1, 0.25), (second_abort, 2, 0.5)]
+
+    calls = 0
+    sleeps = []
+    terminal_error = RuntimeError("cameraNotReadable")
+
+    async def always_transient() -> None:
+        nonlocal calls
+        calls += 1
+        raise terminal_error
+
+    try:
+        asyncio.run(scanner.initialize_camera_with_retry(
+            always_transient, lambda: True, sleep=record_sleep,
+        ))
+        raise AssertionError("Se esperaba el tercer error transitorio")
+    except RuntimeError as ex:
+        assert ex is terminal_error and calls == 3 and sleeps == [0.25, 0.5]
+
+    calls = 0
+    sleeps = []
+    non_transient = RuntimeError("permissionDenied")
+
+    async def fail_without_retry() -> None:
+        nonlocal calls
+        calls += 1
+        raise non_transient
+
+    try:
+        asyncio.run(scanner.initialize_camera_with_retry(
+            fail_without_retry, lambda: True, sleep=record_sleep,
+        ))
+        raise AssertionError("Se esperaba error no transitorio")
+    except RuntimeError as ex:
+        assert ex is non_transient and calls == 1 and sleeps == []
+
+    calls = 0
+    assert asyncio.run(scanner.initialize_camera_with_retry(
+        first_success, lambda: False, sleep=record_sleep,
+    )) is None
+    assert calls == 0
+
+    active = {"value": True}
+    calls = 0
+    sleeps = []
+
+    async def transient_deactivates_in_callback() -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("cameraNotReadable")
+
+    def deactivate(_ex: Exception, _attempt: int, _delay: float) -> None:
+        active["value"] = False
+
+    assert asyncio.run(scanner.initialize_camera_with_retry(
+        transient_deactivates_in_callback, lambda: active["value"], deactivate, sleep=record_sleep,
+    )) is None
+    assert calls == 1 and sleeps == []
+
+    active = {"value": True}
+    calls = 0
+    sleeps = []
+
+    async def deactivate_during_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        active["value"] = False
+
+    assert asyncio.run(scanner.initialize_camera_with_retry(
+        transient_deactivates_in_callback, lambda: active["value"], sleep=deactivate_during_sleep,
+    )) is None
+    assert calls == 1 and sleeps == [0.25]
+
+    cancel_callbacks: list[tuple[Exception, int, float]] = []
+
+    def record_cancel_callback(error: Exception, attempt: int, delay: float) -> None:
+        cancel_callbacks.append((error, attempt, delay))
+
+    async def cancelled_initialize() -> None:
+        raise asyncio.CancelledError()
+
+    try:
+        asyncio.run(scanner.initialize_camera_with_retry(
+            cancelled_initialize, lambda: True, record_cancel_callback, sleep=no_wait,
+        ))
+        raise AssertionError("Se esperaba CancelledError desde initialize_once")
+    except asyncio.CancelledError:
+        assert cancel_callbacks == []
+
+    async def transient_then_cancelled_sleep(_delay: float) -> None:
+        raise asyncio.CancelledError()
+
+    calls = 0
+    try:
+        asyncio.run(scanner.initialize_camera_with_retry(
+            always_transient, lambda: True, record_cancel_callback, sleep=transient_then_cancelled_sleep,
+        ))
+        raise AssertionError("Se esperaba CancelledError durante sleep")
+    except asyncio.CancelledError:
+        assert calls == 1
+
+    calls = 0
+    sleeps = []
+    try:
+        asyncio.run(scanner.initialize_camera_with_retry(
+            always_transient,
+            lambda: True,
+            max_attempts=2,
+            retry_delays=(0.75,),
+            sleep=record_sleep,
+        ))
+        raise AssertionError("Se esperaba error terminal con max_attempts=2")
+    except RuntimeError as ex:
+        assert ex is terminal_error and calls == 2 and sleeps == [0.75]
+
+
 def test_camera_enumeration_retry_policy() -> None:
     async def no_wait(_seconds: float) -> None:
         return None
@@ -490,6 +662,7 @@ def main() -> int:
     test_stream_frame_processing_preserves_gate_and_worker_boundaries()
     test_stream_or_snapshot_strategy()
     test_camera_description_selection()
+    test_camera_initialize_retry_policy()
     test_camera_enumeration_retry_policy()
     test_camera_enumeration_stops_during_backoff()
     test_snapshot_polling_detects_once_and_stops()

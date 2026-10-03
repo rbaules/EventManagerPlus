@@ -69,6 +69,7 @@ from services.invitado_service import (
 from services.qr_scanner_service import (
     QrFrameGate,
     enumerate_cameras_with_retry,
+    initialize_camera_with_retry,
     is_camera_transient,
     process_qr_camera_frame,
     run_qr_snapshot_polling,
@@ -2045,34 +2046,37 @@ def build_home_view(
                         if enumeration.attempts > 1:
                             print("[QR-SCAN][INFO] Cameras available after retry=", enumeration.attempts)
                     print("[QR-SCAN][LIFECYCLE] initialize begin")
-                    initialize_attempts = 3
-                    for initialize_attempt in range(1, initialize_attempts + 1):
-                        if not qr_runtime.is_scanner_session_current(
+                    async def initialize_once() -> None:
+                        await camera.initialize(
+                            description,
+                            fcam.ResolutionPreset.LOW,
+                            enable_audio=False,
+                            image_format_group=fcam.ImageFormatGroup.JPEG,
+                        )
+
+                    def on_initialize_transient_error(
+                        _ex: Exception,
+                        attempt: int,
+                        delay: float,
+                    ) -> None:
+                        print(
+                            "[QR-SCAN][WARN] Initialize transient failure; "
+                            f"retry={attempt}/3 delay={delay}",
+                        )
+
+                    initialize_attempt = await initialize_camera_with_retry(
+                        initialize_once,
+                        lambda: qr_runtime.is_scanner_session_current(
                             generation,
                             bool(state.get("qr_scanner_active")),
                             active_key,
                             state.get("qr_scanner_event_key"),
                             evento_activo_key(),
-                        ):
-                            return
-                        try:
-                            await camera.initialize(
-                                description,
-                                fcam.ResolutionPreset.LOW,
-                                enable_audio=False,
-                                image_format_group=fcam.ImageFormatGroup.JPEG,
-                            )
-                            break
-                        except Exception as ex:
-                            if not is_camera_transient(ex) or initialize_attempt == initialize_attempts:
-                                raise
-                            delay = (0.25, 0.5)[initialize_attempt - 1]
-                            print(
-                                "[QR-SCAN][WARN] Initialize transient failure; "
-                                f"retry={initialize_attempt}/{initialize_attempts} delay={delay}",
-                            )
-                            await asyncio.sleep(delay)
-                        print("[QR-SCAN][LIFECYCLE] initialize end")
+                        ),
+                        on_initialize_transient_error,
+                    )
+                    if initialize_attempt is None:
+                        return
                 finally:
                     if lock_acquired:
                         lock.release()
