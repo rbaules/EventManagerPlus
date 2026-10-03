@@ -127,7 +127,31 @@ El código entregado al finalizador es `str`, no `None`, procedente de decode/ga
 
 Después de separar este handoff, el scanner quedaría suficientemente reutilizable para Kiosk en el plano técnico de lifecycle, captura y finalización. Siguen deliberadamente en Home la construcción Flet de `Camera`, host/overlay y presentación; Kiosk debe aportar sus propios controles visuales, no requiere otra extracción técnica previa.
 
-**Siguiente micro-paso propuesto — QR-KIOSK-0B4B-9B:** sustituir únicamente la llamada directa final por un callback síncrono inyectado desde Home, sin mover finalizador, cleanup, UI ni negocio.
+QR-KIOSK-0B4B-9B ✅: el finalizador usa el callback síncrono inyectado desde Home, sin mover cleanup, UI ni negocio.
+
+## QR-KIOSK-0B4 — Final architecture
+
+### `QrCameraRuntime`
+
+Contiene exclusivamente estado técnico por Home: `generation`, `snapshot_task`, `controller_initialized`, `preview_paused`, `lifecycle_lock`, `camera_description`, `invalidate()`, validación de sesión mediante `is_scanner_session_current(...)` y aceptación técnica de snapshots mediante `accept_snapshot_code(...)`.
+
+### `qr_scanner_service.py`
+
+Contiene infraestructura reusable sin negocio: frame/decode y gate, polling snapshot, discovery y selección de cámara, retry de initialize, clasificación de outcome de resume y `stop_camera_capture(...)`. No conoce Llegadas, QR business, callbacks de integración, runtime de Home, Page ni overlay.
+
+### Home
+
+Permanece como orquestador/adaptador de Camera Flet, host/overlay/UI, apertura, resume/recovery, sequencing de lifecycle/lock/polling, estado visual y callbacks. Estas dependencias son específicas de presentación y de la integración Flet, no negocio embebido en la infraestructura técnica.
+
+### Business handoff
+
+```text
+scanner → on_qr_finalized(codigo) → consumidor
+```
+
+El finalizador llama `on_qr_finalized(codigo_qr)` sólo después de cleanup y render. Home operativo lo configura como `on_qr_finalized: Callable[[str], None] = buscar_qr_llegadas`; un futuro Kiosk puede proveer su propio callback. El callback recibe sólo el código y es síncrono porque el consumidor operativo agenda su propio worker.
+
+QR-KIOSK-0B4 queda terminado: no hay dependencia de negocio en runtime ni servicio, ni una dependencia técnica crítica que impida reutilización con otra Camera/host/overlay y callback final. No hace falta extraer totalmente Home para avanzar; el siguiente paso puede ser QR-KIOSK-1A.
 
 ## Camera discovery / selection — extracted
 

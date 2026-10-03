@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 import traceback
 import threading
-from typing import Any
+from typing import Any, Callable
 
 import flet as ft
 import flet_camera as fcam
@@ -1729,7 +1729,7 @@ def build_home_view(
                 print("[QR-SCAN][LIFECYCLE] qr finalizer camera cleanup completed")
                 render()
                 print("[QR-SCAN][LIFECYCLE] qr processing begin")
-                buscar_qr_llegadas(codigo_qr)
+                on_qr_finalized(codigo_qr)
 
             page.run_task(finalizar_qr)
             print(
@@ -2985,6 +2985,8 @@ def build_home_view(
                 render()
 
         page.run_thread(worker)
+
+    on_qr_finalized: Callable[[str], None] = buscar_qr_llegadas
 
     def seleccionar_invitado_llegadas(invitado: dict[str, Any]) -> None:
         active_key = evento_activo_key()

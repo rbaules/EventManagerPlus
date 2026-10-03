@@ -279,8 +279,8 @@ def main() -> int:
     qr_callback = source[source.index("def _on_qr_detected"):source.index("def _on_scanner_stream_image")]
     assert "buscar_qr_llegadas" not in qr_callback
     finalizer = source[source.index("async def finalizar_qr"):source.index("page.run_task(finalizar_qr)")]
-    assert finalizer.index("await _limpiar_camera_scanner(") < finalizer.index("buscar_qr_llegadas(codigo_qr)")
-    assert finalizer.index("qr finalizer polling completed") < finalizer.index("buscar_qr_llegadas(codigo_qr)")
+    assert finalizer.index("await _limpiar_camera_scanner(") < finalizer.index("on_qr_finalized(codigo_qr)")
+    assert finalizer.index("qr finalizer polling completed") < finalizer.index("on_qr_finalized(codigo_qr)")
     assert "buscar_qr_llegadas" not in snapshot_polling
     assert "is_camera_transient(ex)" in initialization
 
@@ -518,7 +518,7 @@ def main() -> int:
     assert "wait_for_polling=False" in qr_finalizer
     assert qr_finalizer.index("await _limpiar_camera_scanner(") < qr_finalizer.index(
         "_restaurar_estado_interaccion_qr()"
-    ) < qr_finalizer.index("render()") < qr_finalizer.index("buscar_qr_llegadas(codigo_qr)")
+    ) < qr_finalizer.index("render()") < qr_finalizer.index("on_qr_finalized(codigo_qr)")
     assert "buscar_qr_llegadas" not in qr_callback
     assert "buscar_qr_llegadas" not in snapshot_polling
 
@@ -596,17 +596,20 @@ def main() -> int:
     assert "page_overlay.remove(overlay)" in home_teardown
     assert "buscar_qr_llegadas" not in home_teardown
 
-    # QR-KIOSK-0B4B-9A: el único handoff scanner -> negocio vive al final del
-    # finalizador externo, después de polling, cleanup, restauración y render.
-    assert qr_finalizer.count("buscar_qr_llegadas(codigo_qr)") == 1
+    # QR-KIOSK-0B4B-9C: el único handoff scanner -> integración vive al final
+    # del finalizador externo, después de polling, cleanup, restauración y render.
+    assert "from typing import Any, Callable" in source
+    assert "on_qr_finalized: Callable[[str], None] = buscar_qr_llegadas" in source
+    assert qr_finalizer.count("on_qr_finalized(codigo_qr)") == 1
+    assert "buscar_qr_llegadas" not in qr_finalizer
     assert qr_finalizer.index("qr finalizer polling completed") < qr_finalizer.index(
         "await _limpiar_camera_scanner("
     ) < qr_finalizer.index("_restaurar_estado_interaccion_qr()") < qr_finalizer.index(
         "render()"
-    ) < qr_finalizer.index("buscar_qr_llegadas(codigo_qr)")
+    ) < qr_finalizer.index("on_qr_finalized(codigo_qr)")
     assert "async with lock:" not in qr_finalizer
-    assert close.count("buscar_qr_llegadas(") == 1
-    assert "buscar_qr_llegadas" not in manual_close
+    assert close.count("on_qr_finalized(codigo_qr)") == 1
+    assert "on_qr_finalized" not in manual_close
     assert qr_callback.count("cerrar_scanner_qr(") == 1
     assert "buscar_qr_llegadas" not in qr_callback
     assert 'state["arrivals_qr_codigo"] = codigo' in qr_callback
@@ -624,9 +627,10 @@ def main() -> int:
     assert business_handoff.index("state[\"arrivals_loading\"] = True") < business_handoff.index(
         "page.run_thread(worker)"
     )
-    assert "try:" not in qr_finalizer[qr_finalizer.index("buscar_qr_llegadas(codigo_qr)"):]
+    assert "try:" not in qr_finalizer[qr_finalizer.index("on_qr_finalized(codigo_qr)"):]
     for technical_source in (scanner_service, runtime):
         assert "buscar_qr_llegadas" not in technical_source
+        assert "on_qr_finalized" not in technical_source
     print("OK - QR camera characterization contract preserved.")
     return 0
 
