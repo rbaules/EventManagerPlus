@@ -17,3 +17,18 @@ class QrCameraRuntime:
     def invalidate(self) -> int:
         self.generation += 1
         return self.generation
+
+    def is_scanner_session_current(
+        self,
+        generation: int,
+        scanner_active: bool,
+        expected_key: tuple[int, int],
+        session_key: tuple[int, int] | None,
+        current_key: tuple[int, int] | None,
+    ) -> bool:
+        return (
+            generation == self.generation
+            and scanner_active
+            and expected_key == session_key
+            and expected_key == current_key
+        )

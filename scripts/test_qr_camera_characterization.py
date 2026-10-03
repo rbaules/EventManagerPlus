@@ -22,6 +22,7 @@ def main() -> int:
         "lifecycle_lock",
         "camera_description",
         "def invalidate",
+        "def is_scanner_session_current",
     ):
         assert marker in runtime, marker
     for marker in ("qr_runtime.lifecycle_lock", "persistent_camera_host", "qr finalizer", "take_picture end"):
@@ -99,6 +100,31 @@ def main() -> int:
     teardown = source[source.index("def _desmontar_scanner_overlay"):source.index("def _log_identidad_scanner")]
     assert "recovery_from_resume" not in teardown
     assert "buscar_qr_llegadas" not in initialization
+
+    # QR-KIOSK-0B4A: la infraestructura entrega el código al puente y el
+    # negocio sólo empieza después del cleanup del finalizador externo.
+    qr_callback = source[source.index("def _on_qr_detected"):source.index("def _aceptar_codigo_snapshot")]
+    assert "buscar_qr_llegadas" not in qr_callback
+    finalizer = source[source.index("async def finalizar_qr"):source.index("page.run_task(finalizar_qr)")]
+    assert finalizer.index("await _limpiar_camera_scanner(") < finalizer.index("buscar_qr_llegadas(codigo_qr)")
+    assert finalizer.index("qr finalizer polling completed") < finalizer.index("buscar_qr_llegadas(codigo_qr)")
+    assert "buscar_qr_llegadas" not in snapshot_polling
+    assert "is_camera_transient(ex)" in initialization
+
+    # QR-KIOSK-0B4B-1B: vigencia de sesión tiene una única implementación en
+    # runtime; Home aporta solamente los valores técnicos de sesión.
+    session_key = (2, 9)
+    assert runtime_one.is_scanner_session_current(0, True, session_key, session_key, session_key)
+    assert not runtime_one.is_scanner_session_current(1, True, session_key, session_key, session_key)
+    assert not runtime_one.is_scanner_session_current(0, False, session_key, session_key, session_key)
+    assert not runtime_one.is_scanner_session_current(0, True, session_key, None, session_key)
+    assert not runtime_one.is_scanner_session_current(0, True, session_key, session_key, None)
+    assert not runtime_one.is_scanner_session_current(0, True, session_key, (2, 10), session_key)
+    assert not runtime_one.is_scanner_session_current(0, True, session_key, session_key, (2, 10))
+    runtime_one.invalidate()
+    assert not runtime_one.is_scanner_session_current(0, True, session_key, session_key, session_key)
+    assert "_scanner_sigue_vigente" not in source
+    assert source.count("qr_runtime.is_scanner_session_current(") == 8
     print("OK - QR camera characterization contract preserved.")
     return 0
 

@@ -1797,17 +1797,15 @@ def build_home_view(
         print("[QR-SCAN][WARN] Camera state error")
         cerrar_scanner_qr(_mensaje_error_scanner(event.error_description), reason="error")
 
-    def _scanner_sigue_vigente(generation: int, active_key: tuple[int, int]) -> bool:
-        return (
-            generation == qr_runtime.generation
-            and state.get("qr_scanner_active")
-            and active_key == state.get("qr_scanner_event_key")
-            and active_key == evento_activo_key()
-        )
-
     def _on_qr_detected(codigo: str, generation: int, active_key: tuple[int, int]) -> bool:
         """Único puente de cámara al handler QR-3A compartido con la entrada manual."""
-        if not _scanner_sigue_vigente(generation, active_key):
+        if not qr_runtime.is_scanner_session_current(
+            generation,
+            bool(state.get("qr_scanner_active")),
+            active_key,
+            state.get("qr_scanner_event_key"),
+            evento_activo_key(),
+        ):
             return False
         print("[QR-SCAN][INFO] Valid EVENTPLUS QR detected: code_length=", len(codigo))
         try:
@@ -1821,7 +1819,13 @@ def build_home_view(
 
     def _aceptar_codigo_snapshot(codigo: str, generation: int, active_key: tuple[int, int]) -> bool:
         gate: QrFrameGate = state["qr_scanner_gate"]
-        if not _scanner_sigue_vigente(generation, active_key) or not gate.try_begin_decode():
+        if not qr_runtime.is_scanner_session_current(
+            generation,
+            bool(state.get("qr_scanner_active")),
+            active_key,
+            state.get("qr_scanner_event_key"),
+            evento_activo_key(),
+        ) or not gate.try_begin_decode():
             return False
         accepted = gate.finish_decode(codigo)
         return bool(accepted and _on_qr_detected(accepted, generation, active_key))
@@ -1892,7 +1896,13 @@ def build_home_view(
             render()
 
             def scanner_snapshot_vigente() -> bool:
-                return _scanner_sigue_vigente(generation, active_key)
+                return qr_runtime.is_scanner_session_current(
+                    generation,
+                    bool(state.get("qr_scanner_active")),
+                    active_key,
+                    state.get("qr_scanner_event_key"),
+                    evento_activo_key(),
+                )
 
             def capture_error(intentos: int, ex: Exception) -> None:
                 print("[QR-SCAN][WARN] Snapshot capture failed:", type(ex).__name__, "attempt=", intentos)
@@ -1945,7 +1955,13 @@ def build_home_view(
                 recovery_from_resume = False
                 await asyncio.sleep(0)
                 if reuse_initialized_camera:
-                    if not _scanner_sigue_vigente(generation, active_key):
+                    if not qr_runtime.is_scanner_session_current(
+                        generation,
+                        bool(state.get("qr_scanner_active")),
+                        active_key,
+                        state.get("qr_scanner_event_key"),
+                        evento_activo_key(),
+                    ):
                         return
                     _log_identidad_scanner(camera, "before resume_preview")
                     if not _camera_esta_montada(camera):
@@ -1960,7 +1976,13 @@ def build_home_view(
                         try:
                             async with lock:
                                 print("[QR-SCAN][LIFECYCLE] resume_preview lock acquired")
-                                if not _scanner_sigue_vigente(generation, active_key):
+                                if not qr_runtime.is_scanner_session_current(
+                                    generation,
+                                    bool(state.get("qr_scanner_active")),
+                                    active_key,
+                                    state.get("qr_scanner_event_key"),
+                                    evento_activo_key(),
+                                ):
                                     return
                                 print("[QR-SCAN][LIFECYCLE] resume_preview begin")
                                 await camera.resume_preview()
@@ -1988,7 +2010,13 @@ def build_home_view(
                 # camera_web necesita un turno de estabilización adicional una
                 # vez que el overlay ya fue enviado al navegador.
                 await asyncio.sleep(0.3)
-                if not _scanner_sigue_vigente(generation, active_key):
+                if not qr_runtime.is_scanner_session_current(
+                    generation,
+                    bool(state.get("qr_scanner_active")),
+                    active_key,
+                    state.get("qr_scanner_event_key"),
+                    evento_activo_key(),
+                ):
                     return
                 _log_identidad_scanner(camera, "before get_available_cameras")
                 if not _camera_esta_montada(camera):
@@ -2012,7 +2040,13 @@ def build_home_view(
                     else:
                         enumeration = await enumerate_cameras_with_retry(
                             camera.get_available_cameras,
-                            lambda: _scanner_sigue_vigente(generation, active_key),
+                            lambda: qr_runtime.is_scanner_session_current(
+                                generation,
+                                bool(state.get("qr_scanner_active")),
+                                active_key,
+                                state.get("qr_scanner_event_key"),
+                                evento_activo_key(),
+                            ),
                             lambda retry, maximum: print(
                                 "[QR-SCAN][WARN] transient camera error during enumeration; "
                                 f"retry={retry}/{maximum}"
@@ -2041,7 +2075,13 @@ def build_home_view(
                     print("[QR-SCAN][LIFECYCLE] initialize begin")
                     initialize_attempts = 3
                     for initialize_attempt in range(1, initialize_attempts + 1):
-                        if not _scanner_sigue_vigente(generation, active_key):
+                        if not qr_runtime.is_scanner_session_current(
+                            generation,
+                            bool(state.get("qr_scanner_active")),
+                            active_key,
+                            state.get("qr_scanner_event_key"),
+                            evento_activo_key(),
+                        ):
                             return
                         try:
                             await camera.initialize(
