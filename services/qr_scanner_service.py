@@ -28,6 +28,44 @@ class CameraEnumerationResult:
     attempts: int
 
 
+@dataclass(frozen=True)
+class CameraCaptureStopResult:
+    """Resultado técnico de detener stream y pausar preview."""
+
+    stream_attempted: bool
+    stream_error: Exception | None
+    pause_attempted: bool
+    pause_error: Exception | None
+
+
+async def stop_camera_capture(
+    *,
+    stop_stream: Callable[[], Awaitable[object]],
+    pause_preview: Callable[[], Awaitable[object]],
+    stream_active: bool,
+    should_pause: bool,
+) -> CameraCaptureStopResult:
+    """Detiene captura nativa sin conocer lock, runtime ni estado de UI."""
+    stream_error: Exception | None = None
+    pause_error: Exception | None = None
+    if stream_active:
+        try:
+            await stop_stream()
+        except Exception as ex:
+            stream_error = ex
+    if should_pause:
+        try:
+            await pause_preview()
+        except Exception as ex:
+            pause_error = ex
+    return CameraCaptureStopResult(
+        stream_attempted=stream_active,
+        stream_error=stream_error,
+        pause_attempted=should_pause,
+        pause_error=pause_error,
+    )
+
+
 def is_camera_not_readable(error: Exception) -> bool:
     """Reconoce exclusivamente el código estable emitido por camera_web.
 

@@ -75,6 +75,7 @@ from services.qr_scanner_service import (
     process_qr_camera_frame,
     run_qr_snapshot_polling,
     scanner_strategy,
+    stop_camera_capture,
     select_camera_description,
 )
 from services.qr_camera_runtime import QrCameraRuntime
@@ -1653,21 +1654,19 @@ def build_home_view(
                     print("[QR-SCAN][LIFECYCLE] polling cancellation completed")
             if not _camera_esta_montada(camera):
                 return
-            if stream_active:
-                try:
-                    await camera.stop_image_stream()
-                except Exception as ex:
-                    _log_scanner_exception("Camera stream stop failed", ex)
-            if not camera_initialized or not qr_runtime.controller_initialized:
-                return
-            try:
-                print("[QR-SCAN][LIFECYCLE] pause_preview begin")
-                await camera.pause_preview()
-                print("[QR-SCAN][LIFECYCLE] pause_preview end")
+            capture_stop = await stop_camera_capture(
+                stop_stream=camera.stop_image_stream,
+                pause_preview=camera.pause_preview,
+                stream_active=stream_active,
+                should_pause=camera_initialized and qr_runtime.controller_initialized,
+            )
+            if capture_stop.stream_error is not None:
+                _log_scanner_exception("Camera stream stop failed", capture_stop.stream_error)
+            if capture_stop.pause_attempted and capture_stop.pause_error is None:
                 qr_runtime.preview_paused = True
                 state["qr_scanner_camera_state"] = "paused"
-            except Exception as ex:
-                _log_scanner_exception("Camera preview pause failed", ex)
+            elif capture_stop.pause_error is not None:
+                _log_scanner_exception("Camera preview pause failed", capture_stop.pause_error)
                 qr_runtime.controller_initialized = False
                 state["qr_scanner_camera_state"] = "error"
         print("[QR-SCAN][LIFECYCLE] close lock released")

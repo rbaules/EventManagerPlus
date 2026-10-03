@@ -39,7 +39,7 @@ def main() -> int:
         'qr_runtime.preview_paused = bool(event.is_preview_paused)',
         'qr_runtime.preview_paused = True',
         'qr_runtime.preview_paused = False',
-        'if not camera_initialized or not qr_runtime.controller_initialized:',
+        'should_pause=camera_initialized and qr_runtime.controller_initialized',
         'if _controller_camera_no_inicializado(ex):',
         'if classify_camera_resume_outcome(ex) == "error":',
         'print("[QR-SCAN][INFO] Camera controller already uninitialized during Home cleanup")',
@@ -73,7 +73,7 @@ def main() -> int:
     ):
         assert marker in source, marker
     cleanup = source[source.index("async def _limpiar_camera_scanner"):source.index("def cerrar_scanner_qr")]
-    assert cleanup.index("await polling_task") < cleanup.index("await camera.pause_preview()")
+    assert cleanup.index("await polling_task") < cleanup.index("await stop_camera_capture(")
     snapshot_polling = source[source.index("async def iniciar_captura"):source.index("async def inicializar")]
     assert "lifecycle_lock" not in snapshot_polling
     initialization = source[source.index("async def inicializar()"):source.index("def _reintentar_scanner_qr")]
@@ -482,7 +482,7 @@ def main() -> int:
     assert "buscar_qr_llegadas" not in snapshot_runner
     assert "qr_runtime.snapshot_task" not in capture_adapter
     assert "await polling_task" in cleanup
-    assert cleanup.index("await polling_task") < cleanup.index("await camera.pause_preview()")
+    assert cleanup.index("await polling_task") < cleanup.index("await stop_camera_capture(")
     assert finalizer.index("await polling_task") < finalizer.index("await _limpiar_camera_scanner(")
 
     # QR-KIOSK-0B4B-8A: cerrar_scanner_qr separa el cancel manual del QR
@@ -535,18 +535,52 @@ def main() -> int:
     assert "polling_task is not current_task" in close_cleanup
     assert close_cleanup.index("polling_task.cancel()") < close_cleanup.index(
         "await polling_task"
-    ) < close_cleanup.index("await camera.stop_image_stream()") < close_cleanup.index(
-        "await camera.pause_preview()"
-    )
-    assert "if stream_active:" in close_cleanup
-    assert "if not camera_initialized or not qr_runtime.controller_initialized:" in close_cleanup
+    ) < close_cleanup.index("await stop_camera_capture(")
+    assert "await camera.stop_image_stream()" not in close_cleanup
+    assert "await camera.pause_preview()" not in close_cleanup
+    for marker in (
+        "stop_stream=camera.stop_image_stream",
+        "pause_preview=camera.pause_preview",
+        "stream_active=stream_active",
+        "should_pause=camera_initialized and qr_runtime.controller_initialized",
+        "capture_stop.stream_error",
+        "capture_stop.pause_attempted",
+        "capture_stop.pause_error",
+    ):
+        assert marker in close_cleanup, marker
+    close_helper = scanner_service[
+        scanner_service.index("async def stop_camera_capture("):scanner_service.index(
+            "def is_camera_not_readable"
+        )
+    ]
+    for marker in (
+        "stream_attempted",
+        "stream_error",
+        "pause_attempted",
+        "pause_error",
+        "if stream_active:",
+        "if should_pause:",
+        "await stop_stream()",
+        "await pause_preview()",
+    ):
+        assert marker in close_helper, marker
+    assert close_helper.index("await stop_stream()") < close_helper.index("await pause_preview()")
+    for forbidden in (
+        "snapshot_task",
+        "lifecycle_lock",
+        "QrCameraRuntime",
+        "buscar_qr_llegadas",
+        "classify_camera_resume_outcome",
+        "_controller_camera_no_inicializado",
+    ):
+        assert forbidden not in close_helper, forbidden
     assert "qr_runtime.preview_paused = True" in close_cleanup
     assert 'state["qr_scanner_camera_state"] = "paused"' in close_cleanup
     # En close, un fallo de pause se registra, marca controller/error y deja
     # continuar el finally; no activa recovery. El caso benigno con mensaje
     # exacto pertenece exclusivamente al teardown de Home.
-    close_pause_error = close_cleanup[close_cleanup.index("except Exception as ex:", close_cleanup.index("await camera.pause_preview()")):]
-    assert "_log_scanner_exception(\"Camera preview pause failed\", ex)" in close_pause_error
+    close_pause_error = close_cleanup[close_cleanup.index("elif capture_stop.pause_error is not None:"):]
+    assert "_log_scanner_exception(\"Camera preview pause failed\", capture_stop.pause_error)" in close_pause_error
     assert "qr_runtime.controller_initialized = False" in close_pause_error
     assert 'state["qr_scanner_camera_state"] = "error"' in close_pause_error
     assert "recovery_from_resume" not in close_cleanup

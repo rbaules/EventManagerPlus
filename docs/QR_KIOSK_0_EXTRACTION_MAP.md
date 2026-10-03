@@ -107,6 +107,14 @@ Funciones mezcladas actuales: `cerrar_scanner_qr` combina decisión de ruta, est
 
 **Siguiente micro-paso propuesto — QR-KIOSK-0B4B-8B:** extraer sólo el bloque interno de `_limpiar_camera_scanner` que, con polling ya coordinado y lock ya adquirido por Home, ejecuta stop stream/pause y reporta el resultado técnico por callbacks. No mover `cerrar_scanner_qr`, `finalizar_qr`, business handoff, lock, polling ownership ni UI.
 
+### Camera capture stop — extracted
+
+`services.qr_scanner_service.stop_camera_capture(stop_stream, pause_preview, stream_active, should_pause)` recibe únicamente callbacks nativos y flags técnicos. Devuelve `CameraCaptureStopResult` con los intentos y errores originales de stream/pause. No conoce runtime, lock, polling, UI, Camera, códigos QR ni negocio; tampoco captura `CancelledError`, que conserva su propagación natural.
+
+Home sigue cancelando/esperando polling y adquiriendo `qr_runtime.lifecycle_lock` antes de llamar al helper desde `_limpiar_camera_scanner`. El helper intenta stop sólo con stream activo y, incluso si éste falla, intenta pause cuando Home lo solicitó. Home registra errores y conserva los estados: pause exitoso marca preview pausado/estado `paused`; pause fallido deja controller falso/estado `error`, sin recovery. Teardown mantiene sus llamadas directas porque su semántica para controller-lost es distinta.
+
+Estado: QR-KIOSK-0B4B-8A ✅; QR-KIOSK-0B4B-8B ✅; QR-KIOSK-0B4B-8C ✅ si la batería completa pasa.
+
 ## Camera discovery / selection — extracted
 
 `services/qr_scanner_service.py` contiene la infraestructura reutilizable: `enumerate_cameras_with_retry(enumerate_cameras, is_active, on_transient_error, *, max_attempts=3, retry_delays=(0.4, 0.8))` y `select_camera_description(cameras, preferred_lens) -> CameraDescription | None`.

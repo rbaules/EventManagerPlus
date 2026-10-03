@@ -172,6 +172,82 @@ def test_camera_resume_outcome_classification() -> None:
         assert forbidden not in classifier_source, forbidden
 
 
+def test_stop_camera_capture() -> None:
+    async def run_case(
+        *, stream_active: bool, should_pause: bool, stream_error: BaseException | None = None,
+        pause_error: BaseException | None = None,
+    ) -> tuple[scanner.CameraCaptureStopResult, list[str]]:
+        calls: list[str] = []
+
+        async def stop() -> None:
+            calls.append("stop")
+            if stream_error is not None:
+                raise stream_error
+
+        async def pause() -> None:
+            calls.append("pause")
+            if pause_error is not None:
+                raise pause_error
+
+        result = await scanner.stop_camera_capture(
+            stop_stream=stop,
+            pause_preview=pause,
+            stream_active=stream_active,
+            should_pause=should_pause,
+        )
+        return result, calls
+
+    result, calls = asyncio.run(run_case(stream_active=False, should_pause=False))
+    assert calls == [] and not result.stream_attempted and not result.pause_attempted
+    assert result.stream_error is None and result.pause_error is None
+    result, calls = asyncio.run(run_case(stream_active=True, should_pause=False))
+    assert calls == ["stop"] and result.stream_attempted and not result.pause_attempted
+    result, calls = asyncio.run(run_case(stream_active=False, should_pause=True))
+    assert calls == ["pause"] and not result.stream_attempted and result.pause_attempted
+    result, calls = asyncio.run(run_case(stream_active=True, should_pause=True))
+    assert calls == ["stop", "pause"] and result.stream_error is None and result.pause_error is None
+
+    stop_failure = RuntimeError("stop failed")
+    result, calls = asyncio.run(run_case(stream_active=True, should_pause=True, stream_error=stop_failure))
+    assert calls == ["stop", "pause"] and result.stream_error is stop_failure and result.pause_error is None
+    pause_failure = RuntimeError("pause failed")
+    result, calls = asyncio.run(run_case(stream_active=True, should_pause=True, pause_error=pause_failure))
+    assert calls == ["stop", "pause"] and result.stream_error is None and result.pause_error is pause_failure
+    result, calls = asyncio.run(run_case(stream_active=True, should_pause=True, stream_error=stop_failure, pause_error=pause_failure))
+    assert calls == ["stop", "pause"] and result.stream_error is stop_failure and result.pause_error is pause_failure
+
+    async def cancel_from_stop() -> None:
+        await scanner.stop_camera_capture(
+            stop_stream=lambda: (_ for _ in ()).throw(asyncio.CancelledError()),
+            pause_preview=lambda: asyncio.sleep(0),
+            stream_active=True,
+            should_pause=True,
+        )
+
+    try:
+        asyncio.run(cancel_from_stop())
+        raise AssertionError("CancelledError de stop debe propagarse")
+    except asyncio.CancelledError:
+        pass
+
+    async def cancelled_pause() -> None:
+        raise asyncio.CancelledError()
+
+    async def cancel_from_pause() -> None:
+        await scanner.stop_camera_capture(
+            stop_stream=lambda: asyncio.sleep(0),
+            pause_preview=cancelled_pause,
+            stream_active=True,
+            should_pause=True,
+        )
+
+    try:
+        asyncio.run(cancel_from_pause())
+        raise AssertionError("CancelledError de pause debe propagarse")
+    except asyncio.CancelledError:
+        pass
+
+
 def test_camera_description_selection() -> None:
     back = object()
     front = object()
@@ -698,6 +774,7 @@ def main() -> int:
     test_stream_frame_processing_preserves_gate_and_worker_boundaries()
     test_stream_or_snapshot_strategy()
     test_camera_resume_outcome_classification()
+    test_stop_camera_capture()
     test_camera_description_selection()
     test_camera_initialize_retry_policy()
     test_camera_enumeration_retry_policy()
