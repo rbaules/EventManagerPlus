@@ -144,6 +144,31 @@ class QrFrameGate:
             return codigo
 
 
+def _decode_and_accept_qr_frame(
+    image_bytes: bytes | None,
+    gate: QrFrameGate,
+    on_code_accepted: Callable[[str], None],
+) -> None:
+    """Decodifica un frame ya admitido por el gate y entrega sólo un código válido."""
+    codigo = decode_qr_frame(image_bytes)
+    accepted = gate.finish_decode(codigo)
+    if accepted:
+        on_code_accepted(accepted)
+
+
+def process_qr_camera_frame(
+    image_bytes: bytes | None,
+    is_session_current: Callable[[], bool],
+    gate: QrFrameGate,
+    schedule_worker: Callable[[Callable[[], None]], None],
+    on_code_accepted: Callable[[str], None],
+) -> None:
+    """Conserva el flujo stream: validar sesión, abrir gate y programar un worker."""
+    if not is_session_current() or not gate.try_begin_decode():
+        return
+    schedule_worker(lambda: _decode_and_accept_qr_frame(image_bytes, gate, on_code_accepted))
+
+
 def scanner_strategy(streaming_supported: bool) -> str:
     """Selecciona el transporte de cámara sin cambiar el decoder ni el flujo de negocio."""
     return "stream" if streaming_supported else "snapshot"

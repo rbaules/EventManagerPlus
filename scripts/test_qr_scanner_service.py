@@ -48,6 +48,80 @@ def test_gate_throttles_and_accepts_once() -> None:
     assert gate.finish_decode("T3A1") is None
 
 
+def test_stream_frame_processing_preserves_gate_and_worker_boundaries() -> None:
+    def schedule_worker(worker: object) -> None:
+        assert callable(worker)
+        scheduled.append(worker)
+
+    # Una sesión vencida no abre el gate ni programa trabajo.
+    expired_gate = scanner.QrFrameGate()
+    expired_gate.start()
+    scheduled: list[object] = []
+    expired_codes: list[str] = []
+    scanner.process_qr_camera_frame(
+        b"frame", lambda: False, expired_gate, schedule_worker, expired_codes.append
+    )
+    assert scheduled == [] and expired_codes == []
+    assert not expired_gate.decode_busy and not expired_gate.code_already_detected
+
+    # Un gate ocupado también evita programar otro worker concurrente.
+    busy_gate = scanner.QrFrameGate()
+    busy_gate.start()
+    assert busy_gate.try_begin_decode()
+    scheduled = []
+    scanner.process_qr_camera_frame(
+        b"frame", lambda: True, busy_gate, schedule_worker, expired_codes.append
+    )
+    assert scheduled == []
+
+    # Una sesión vigente programa exactamente un worker; finish_decode ocurre
+    # dentro de éste y deja pasar un único código aceptado.
+    gate = scanner.QrFrameGate()
+    gate.start()
+    scheduled = []
+    accepted: list[str] = []
+    with patch.object(scanner, "decode_qr_frame", return_value="T3A1"):
+        scanner.process_qr_camera_frame(
+            b"valid-frame", lambda: True, gate, schedule_worker, accepted.append
+        )
+        assert len(scheduled) == 1
+        assert gate.decode_busy and accepted == []
+        scheduled[0]()
+    assert accepted == ["T3A1"]
+    assert not gate.decode_busy and gate.code_already_detected
+
+    scanner.process_qr_camera_frame(
+        b"duplicate-frame", lambda: True, gate, schedule_worker, accepted.append
+    )
+    assert len(scheduled) == 1 and accepted == ["T3A1"]
+
+    # Bytes vacíos o un decode recuperable sin QR limpian el gate y no llaman
+    # al callback; decode_qr_frame ya contiene el manejo de excepciones OpenCV.
+    no_code_gate = scanner.QrFrameGate()
+    no_code_gate.start()
+    scheduled = []
+    with patch.object(scanner, "decode_qr_frame", return_value=None):
+        scanner.process_qr_camera_frame(
+            b"", lambda: True, no_code_gate, schedule_worker, accepted.append
+        )
+        assert len(scheduled) == 1
+        scheduled[0]()
+    assert accepted == ["T3A1"]
+    assert not no_code_gate.decode_busy and not no_code_gate.code_already_detected
+
+    decode_error_gate = scanner.QrFrameGate()
+    decode_error_gate.start()
+    scheduled = []
+    with patch.object(scanner.cv2, "imdecode", side_effect=RuntimeError("decoder failure")):
+        scanner.process_qr_camera_frame(
+            b"encoded", lambda: True, decode_error_gate, schedule_worker, accepted.append
+        )
+        assert len(scheduled) == 1
+        scheduled[0]()
+    assert accepted == ["T3A1"]
+    assert not decode_error_gate.decode_busy and not decode_error_gate.code_already_detected
+
+
 async def _without_wait(_seconds: float) -> None:
     return None
 
@@ -218,6 +292,7 @@ def test_snapshot_polling_retries_one_error_and_stops_after_persistent_errors() 
 def main() -> int:
     test_decoder()
     test_gate_throttles_and_accepts_once()
+    test_stream_frame_processing_preserves_gate_and_worker_boundaries()
     test_stream_or_snapshot_strategy()
     test_camera_enumeration_retry_policy()
     test_camera_enumeration_stops_during_backoff()

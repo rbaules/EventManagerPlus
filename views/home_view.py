@@ -68,10 +68,10 @@ from services.invitado_service import (
 )
 from services.qr_scanner_service import (
     QrFrameGate,
-    decode_qr_frame,
     enumerate_cameras_with_retry,
     is_camera_transient,
     poll_qr_snapshots,
+    process_qr_camera_frame,
     scanner_strategy,
 )
 from services.qr_camera_runtime import QrCameraRuntime
@@ -1419,7 +1419,7 @@ def build_home_view(
                 margin=32,
             ),
             on_state_change=_scanner_state_change,
-            on_stream_image=_scanner_frame_received,
+            on_stream_image=_on_scanner_stream_image,
             height=280,
             data={"arrivals_qr": "camera"},
         )
@@ -1817,26 +1817,24 @@ def build_home_view(
         cerrar_scanner_qr(reason="qr_detected", codigo_qr=codigo)
         return True
 
-    def _scanner_frame_received(event: fcam.CameraImageEvent) -> None:
+    def _on_scanner_stream_image(event: fcam.CameraImageEvent) -> None:
         active_key = state.get("qr_scanner_event_key")
         generation = qr_runtime.generation
         gate: QrFrameGate = state["qr_scanner_gate"]
-        if (
-            not state.get("qr_scanner_active")
-            or active_key is None
-            or active_key != evento_activo_key()
-            or not gate.try_begin_decode()
-        ):
-            return
-        image_bytes = event.bytes
-
-        def decode_worker() -> None:
-            codigo = decode_qr_frame(image_bytes)
-            accepted = gate.finish_decode(codigo)
-            if accepted:
-                _on_qr_detected(accepted, generation, active_key)
-
-        page.run_thread(decode_worker)
+        process_qr_camera_frame(
+            event.bytes,
+            lambda: active_key is not None
+            and qr_runtime.is_scanner_session_current(
+                generation,
+                bool(state.get("qr_scanner_active")),
+                active_key,
+                state.get("qr_scanner_event_key"),
+                evento_activo_key(),
+            ),
+            gate,
+            page.run_thread,
+            lambda codigo: _on_qr_detected(codigo, generation, active_key),
+        )
 
     def abrir_scanner_qr() -> None:
         active_key = evento_activo_key()

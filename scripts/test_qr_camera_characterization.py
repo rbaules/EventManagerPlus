@@ -104,7 +104,7 @@ def main() -> int:
 
     # QR-KIOSK-0B4A: la infraestructura entrega el código al puente y el
     # negocio sólo empieza después del cleanup del finalizador externo.
-    qr_callback = source[source.index("def _on_qr_detected"):source.index("def _scanner_frame_received")]
+    qr_callback = source[source.index("def _on_qr_detected"):source.index("def _on_scanner_stream_image")]
     assert "buscar_qr_llegadas" not in qr_callback
     finalizer = source[source.index("async def finalizar_qr"):source.index("page.run_task(finalizar_qr)")]
     assert finalizer.index("await _limpiar_camera_scanner(") < finalizer.index("buscar_qr_llegadas(codigo_qr)")
@@ -127,7 +127,7 @@ def main() -> int:
     assert "_scanner_sigue_vigente" not in source
     # Un call site de Home fue absorbido por accept_snapshot_code(); los otros
     # siete continúan validando sus decisiones de lifecycle directamente.
-    assert source.count("qr_runtime.is_scanner_session_current(") == 7
+    assert source.count("qr_runtime.is_scanner_session_current(") == 8
 
     # QR-KIOSK-0B4B-2B: la aceptación de snapshots tiene una única
     # implementación técnica. Primero valida sesión, luego abre/cierra el
@@ -238,6 +238,49 @@ def main() -> int:
     )
     assert false_callback_calls == ["T3A1"]
     assert false_callback_gate.code_already_detected
+
+    # QR-KIOSK-0B4B-3B: el stream conserva un adapter Flet mínimo en Home.
+    # La validación, gate, worker y decode viven una sola vez en el servicio.
+    scanner_service = (ROOT / "services" / "qr_scanner_service.py").read_text(encoding="utf-8")
+    assert "_scanner_frame_received" not in source
+    assert "def decode_worker" not in source
+    assert source.count("process_qr_camera_frame(") == 1
+    assert scanner_service.count("def process_qr_camera_frame(") == 1
+    assert scanner_service.count("def _decode_and_accept_qr_frame(") == 1
+    stream_adapter = source[
+        source.index("def _on_scanner_stream_image"):source.index("def abrir_scanner_qr")
+    ]
+    for marker in (
+        "event.bytes",
+        "process_qr_camera_frame(",
+        "qr_runtime.is_scanner_session_current(",
+        "page.run_thread",
+        "_on_qr_detected",
+    ):
+        assert marker in stream_adapter, marker
+    for forbidden in (
+        "decode_qr_frame",
+        "try_begin_decode",
+        "finish_decode",
+        "buscar_qr_llegadas",
+        "rpc",
+        "invitacion",
+        "lifecycle_lock",
+    ):
+        assert forbidden not in stream_adapter, forbidden
+    stream_processor = scanner_service[
+        scanner_service.index("def process_qr_camera_frame"):scanner_service.index("def scanner_strategy")
+    ]
+    assert stream_processor.index("is_session_current()") < stream_processor.index("gate.try_begin_decode()")
+    assert stream_processor.index("gate.try_begin_decode()") < stream_processor.index("schedule_worker(")
+    stream_worker = scanner_service[
+        scanner_service.index("def _decode_and_accept_qr_frame"):scanner_service.index("def scanner_strategy")
+    ]
+    assert stream_worker.index("decode_qr_frame") < stream_worker.index("gate.finish_decode")
+    for forbidden in ("buscar_qr_llegadas", "arrivals", "rpc", "supabase", "page", "overlay"):
+        assert forbidden not in stream_processor, forbidden
+    assert "on_stream_image=_on_scanner_stream_image" in source
+    assert "poll_qr_snapshots(" in source and "qr_runtime.accept_snapshot_code(" in source
     print("OK - QR camera characterization contract preserved.")
     return 0
 

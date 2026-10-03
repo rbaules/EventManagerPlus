@@ -74,7 +74,7 @@ Ubicación real: las funciones scanner están en `views/home_view.py`, aproximad
 | `QrCameraRuntime.is_scanner_session_current` | generation | — | — | — | claves aportadas por Home | — | E: `evento_activo_key` desde Home | BAJA |
 | `_on_qr_detected` | generation indirecta | — | — | — | código QR | puente | E: stream/poll; L: close | MEDIA |
 | `QrCameraRuntime.accept_snapshot_code` | generation/vigencia | — | — | — | `QrFrameGate` aportado por Home | — | E: callback técnico Home | BAJA |
-| `_scanner_frame_received` / `decode_worker` | generation | `CameraImageEvent` | — | thread | gate | — | E: stream; L: detected | MEDIA |
+| `process_qr_camera_frame` / `_decode_and_accept_qr_frame` | vigencia aportada | bytes | — | scheduler aportado | `QrFrameGate` | — | E: callback técnico Home | MEDIA |
 | `abrir_scanner_qr` | todos los campos | obtiene/inicia | visibilidad/render | update/tarea | opening/scanning | depende de evento activo | L: cámara/visibilidad | ALTA |
 | `abrir_scanner_qr > iniciar_captura` | task/generation | stream/take picture | render | — | strategy/flags | — | E: polling; L: accept/close | ALTA |
 | `abrir_scanner_qr > take_snapshot` | generation indirecta | `take_picture` | — | tarea actual | — | — | E: polling | BAJA |
@@ -92,9 +92,9 @@ Por tanto, `cerrar_scanner_qr` mezcla infraestructura y negocio únicamente por 
 
 1. **0B4B-1 — ✅ `QrCameraRuntime.is_scanner_session_current`**: migrado desde `_scanner_sigue_vigente` sin arrastrar lifecycle grande.
 2. **0B4B-2 — ✅ `QrCameraRuntime.accept_snapshot_code`**: migrado desde `_aceptar_codigo_snapshot`; conserva el gate como frontera de aceptación y recibe el callback técnico de Home.
-3. **0B4B-3 — `_scanner_frame_received` / `decode_worker`**: pareja inseparable de callback stream y decode thread; recibe `on_qr_detected` sin conocer negocio.
-4. **0B4B-4 — `_limpiar_camera_scanner`**: primera operación nativa reutilizable; conserva lock, cancelación/espera de polling y callbacks mínimos de montado/log/UI.
-5. **0B4B-5 — `iniciar_captura` y `take_snapshot`**: pareja inseparable por task/generation/gate/polling.
+3. **0B4B-3 — ✅ `process_qr_camera_frame` / `_decode_and_accept_qr_frame`**: migrados desde `_scanner_frame_received` / `decode_worker`; Home conserva sólo el adaptador Flet y el callback técnico.
+4. **0B4B-4 — `iniciar_captura` y `take_snapshot`**: siguiente pareja; task/generation/gate/polling, sin moverla todavía.
+5. **0B4B-5 — `_limpiar_camera_scanner`**: primera operación nativa reutilizable; conserva lock, cancelación/espera de polling y callbacks mínimos de montado/log/UI.
 6. **0B4B-6 — `inicializar`**: resume, recovery, enumeración y retry; mover después de tener las primitivas anteriores.
 7. **0B4B-7 — `cerrar_scanner_qr`**: separar primero el finalizador técnico de su callback `on_qr_detected(codigo)` antes de mover el coordinador de close.
 8. **0B4B-8 — `_desmontar_scanner_overlay` y luego Camera/overlay**: mantenerlos al final por dependencia directa de Page y composición visual.
@@ -113,4 +113,12 @@ El método reutiliza `is_scanner_session_current(...)`; no duplica la comparaci�
 
 `QrFrameGate` conserva la única responsabilidad de control de concurrencia, throttle y deduplicación. Home aporta el gate, las claves técnicas y el callback `_on_qr_detected`; hay un único call site migrado. El runtime no conoce `state`, UI, arrivals, RPC, invitaciones ni negocio. La frontera se mantiene: frame/decode → aceptación técnica → callback Home → finalizador/lifecycle → cleanup → `buscar_qr_llegadas(codigo_qr)`.
 
-0B4B-1 y 0B4B-2 quedan completados. El siguiente candidato, sin migrarlo todavía, es la pareja `_scanner_frame_received` / `decode_worker` (0B4B-3).
+### Procesamiento stream migrado
+
+`_scanner_frame_received` y su `decode_worker` fueron migrados a `qr_scanner_service.process_qr_camera_frame(...)` y al helper privado `_decode_and_accept_qr_frame(...)`. El servicio conoce únicamente bytes, `decode_qr_frame`, `QrFrameGate` y callbacks técnicos; no conoce UI, arrivals, invitaciones, RPC, navegación ni negocio.
+
+Home conserva `_on_scanner_stream_image(event)` porque Flet entrega un `CameraImageEvent`: el adapter extrae `event.bytes` y aporta la vigencia de sesión, gate de la sesión, `page.run_thread` y el callback `_on_qr_detected`. No decodifica ni manipula el gate. El flujo stream es `CameraImageEvent` → adapter → `process_qr_camera_frame` → gate → worker/decode → callback técnico.
+
+La ruta snapshot permanece independiente: `take_picture` → decode de polling → `QrCameraRuntime.accept_snapshot_code` → gate → callback técnico. Ambas rutas reciben el mismo `QrFrameGate` de la sesión y por eso comparten throttle, exclusión de decode concurrente y deduplicación. Ninguna llama negocio: `_on_qr_detected` solicita el finalizador y `buscar_qr_llegadas(codigo_qr)` ocurre sólo después de polling/captura terminada y cleanup.
+
+0B4B-1, 0B4B-2 y 0B4B-3 quedan completados. El siguiente candidato, sin migrarlo todavía, es `iniciar_captura` + `take_snapshot` (0B4B-4).
