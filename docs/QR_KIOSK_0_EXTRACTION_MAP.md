@@ -115,6 +115,20 @@ Home sigue cancelando/esperando polling y adquiriendo `qr_runtime.lifecycle_lock
 
 Estado: QR-KIOSK-0B4B-8A ✅; QR-KIOSK-0B4B-8B ✅; QR-KIOSK-0B4B-8C ✅ si la batería completa pasa.
 
+## Scanner → business handoff
+
+La ruta actual es QR aceptado → `_on_qr_detected(codigo, generation, active_key)` → `cerrar_scanner_qr(..., codigo_qr=codigo)` → `page.run_task(finalizar_qr)` → espera polling → `_limpiar_camera_scanner` → restauración UI → `buscar_qr_llegadas(codigo_qr)`. La llamada de negocio aparece una sola vez dentro de `finalizar_qr`, después de que `_limpiar_camera_scanner` ha retornado, `qr_scanner_closing=False`, UI restaurada y `render()` ejecutado; el lifecycle lock ya fue liberado por cleanup.
+
+`_on_qr_detected` valida generation, scanner activo y claves de sesión; guarda `arrivals_qr_codigo` y no ejecuta negocio directamente. Stream y snapshot convergen en este puente; el gate acepta un único código y close invalida la sesión/detiene el gate antes de programar finalizer. No existe guard interno adicional para un finalizador repetido, por lo que se caracteriza la protección actual sin ampliarla.
+
+El código entregado al finalizador es `str`, no `None`, procedente de decode/gate ya normalizado para scanner. El finalizador no lo revalida; `buscar_qr_llegadas` normaliza defensivamente con `strip().upper()`, valida vacío y obtiene el evento activo antes de crear su worker. Si el handoff o su worker falla, `finalizar_qr` no captura esa excepción: scanner/overlay ya quedaron cerrados/restaurados; la ruta de Llegadas maneja sus propios estados y errores de resultado, sin retry de scanner.
+
+**Callback futuro propuesto:** `on_qr_finalized: Callable[[str], None]`. Debe ser síncrono porque el handler actual `buscar_qr_llegadas` es síncrono y programa su worker; necesita sólo el código, pues Home resuelve contexto/evento y estado de Llegadas internamente. El cambio mínimo posterior es crear el callback en `home_view` y capturarlo en el finalizador en lugar de la llamada directa. Un futuro controller reutilizable podrá recibirlo al construirse; Kiosk suministraría su propio callback.
+
+Después de separar este handoff, el scanner quedaría suficientemente reutilizable para Kiosk en el plano técnico de lifecycle, captura y finalización. Siguen deliberadamente en Home la construcción Flet de `Camera`, host/overlay y presentación; Kiosk debe aportar sus propios controles visuales, no requiere otra extracción técnica previa.
+
+**Siguiente micro-paso propuesto — QR-KIOSK-0B4B-9B:** sustituir únicamente la llamada directa final por un callback síncrono inyectado desde Home, sin mover finalizador, cleanup, UI ni negocio.
+
 ## Camera discovery / selection — extracted
 
 `services/qr_scanner_service.py` contiene la infraestructura reutilizable: `enumerate_cameras_with_retry(enumerate_cameras, is_active, on_transient_error, *, max_attempts=3, retry_delays=(0.4, 0.8))` y `select_camera_description(cameras, preferred_lens) -> CameraDescription | None`.

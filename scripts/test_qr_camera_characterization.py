@@ -595,6 +595,38 @@ def main() -> int:
     assert "_actualizar_visibilidad_scanner(False)" in interaction_restore
     assert "page_overlay.remove(overlay)" in home_teardown
     assert "buscar_qr_llegadas" not in home_teardown
+
+    # QR-KIOSK-0B4B-9A: el único handoff scanner -> negocio vive al final del
+    # finalizador externo, después de polling, cleanup, restauración y render.
+    assert qr_finalizer.count("buscar_qr_llegadas(codigo_qr)") == 1
+    assert qr_finalizer.index("qr finalizer polling completed") < qr_finalizer.index(
+        "await _limpiar_camera_scanner("
+    ) < qr_finalizer.index("_restaurar_estado_interaccion_qr()") < qr_finalizer.index(
+        "render()"
+    ) < qr_finalizer.index("buscar_qr_llegadas(codigo_qr)")
+    assert "async with lock:" not in qr_finalizer
+    assert close.count("buscar_qr_llegadas(") == 1
+    assert "buscar_qr_llegadas" not in manual_close
+    assert qr_callback.count("cerrar_scanner_qr(") == 1
+    assert "buscar_qr_llegadas" not in qr_callback
+    assert 'state["arrivals_qr_codigo"] = codigo' in qr_callback
+    assert "qr_runtime.is_scanner_session_current(" in qr_callback
+    assert "codigo_qr=codigo" in qr_callback
+    assert "page.run_task(finalizar_qr)" in close
+    assert "polling_task is not asyncio.current_task()" in qr_finalizer
+    assert "state[\"qr_scanner_active\"] = False" in close
+    assert "state[\"qr_scanner_gate\"].stop()" in close
+
+    business_handoff = source[source.index("def buscar_qr_llegadas"):source.index("def seleccionar_invitado_llegadas")]
+    assert "codigo_normalizado = (codigo or \"\").strip().upper()" in business_handoff
+    assert "if not codigo_normalizado:" in business_handoff
+    assert "page.run_thread(worker)" in business_handoff
+    assert business_handoff.index("state[\"arrivals_loading\"] = True") < business_handoff.index(
+        "page.run_thread(worker)"
+    )
+    assert "try:" not in qr_finalizer[qr_finalizer.index("buscar_qr_llegadas(codigo_qr)"):]
+    for technical_source in (scanner_service, runtime):
+        assert "buscar_qr_llegadas" not in technical_source
     print("OK - QR camera characterization contract preserved.")
     return 0
 
