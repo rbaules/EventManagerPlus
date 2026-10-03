@@ -83,6 +83,30 @@ Teardown conserva su helper independiente para tratar el mismo texto durante `pa
 
 Estado: QR-KIOSK-0B4B-7A ✅; QR-KIOSK-0B4B-7B ✅; QR-KIOSK-0B4B-7C ✅.
 
+## Close / QR finalizer
+
+`cerrar_scanner_qr(mensaje="", *, reason="cancel", codigo_qr=None)` captura el estado nativo antes de invalidar generation: Camera, `controller_initialized`, stream activo y la referencia actual de `qr_runtime.snapshot_task`. Después ejecuta `qr_runtime.invalidate()` y marca `closing` sólo si Camera está montada e inicializada. No borra `qr_runtime.camera_description`; la caché sobrevive al cierre normal del Home/runtime.
+
+| Responsabilidad | Ruta manual/cancel/error | Ruta QR aceptado |
+|---|---|---|
+| Scanner técnico | `_restaurar_estado_interaccion_qr()` y `detener()` llaman `_limpiar_camera_scanner(..., wait_for_polling=True)`: cancela/espera polling, luego stop stream y pause. | Invalida gate/sesión y agenda `finalizar_qr()`, que espera polling antes de `_limpiar_camera_scanner(..., wait_for_polling=False)`. |
+| UI | Restaura interacción, oculta chrome/host mediante `_actualizar_visibilidad_scanner(False)`, aplica mensaje y renderiza. | Restaura interacción y renderiza después del cleanup; no entrega un mensaje de error por esta ruta. |
+| Business handoff | Ninguno. | Sólo al final de `finalizar_qr()`: `buscar_qr_llegadas(codigo_qr)`. |
+
+### Orden técnico actual
+
+La ruta manual ejecuta invalidate → restauración inicial de UI/gate → tarea `detener` → acquire `qr_runtime.lifecycle_lock` → (si existe y no es la tarea actual) cancel + await de polling → `stop_image_stream()` si stream estaba activo → `pause_preview()` si el controller previo y el cache actual dicen initialized → release → restauración final/UI. Por tanto, polling termina antes de las operaciones Camera incompatibles. `run_qr_snapshot_polling` es dueño de limpiar `qr_runtime.snapshot_task` en su `finally`, sólo si la referencia sigue siendo su propia tarea; close no la limpia directamente.
+
+En QR aceptado, `_on_qr_detected(codigo, generation, active_key)` valida sesión, guarda el código y llama a close. La rama QR no cancela/espera su propia tarea: `finalizar_qr`, creado con `page.run_task`, comprueba identidad contra `asyncio.current_task()`, espera la tarea de polling si sigue viva, limpia Camera con `wait_for_polling=False`, restaura UI y recién entonces llama negocio. Así scanner termina exactamente en `buscar_qr_llegadas(codigo_qr)`; polling, decode worker, el lock y cleanup no ejecutan negocio.
+
+`_limpiar_camera_scanner` toma el único `qr_runtime.lifecycle_lock`. Dentro de él coordina cancel/await, stop stream y pause. Los errores de stop stream se registran y continúan. Un fallo de `pause_preview()` en el cierre ordinario se registra, deja `controller_initialized=False` y `camera_state="error"`, sin recovery ni propagación fuera de la tarea; el manejo específicamente benigno del mensaje controller-lost durante pause corresponde sólo a `_desmontar_scanner_overlay()` de teardown/logout, que además retira el overlay de Page. Close ordinario conserva el host/overlay persistentes, sólo los oculta y libera sus interacciones.
+
+No hay un guard interno explícito de doble invocación dentro de `cerrar_scanner_qr`; la apertura bloquea cuando `qr_scanner_closing` está activo y cada cierre invalida la generation y reutiliza el cleanup actual. Esto queda caracterizado, no se rediseña en esta fase. Logout llama `_desmontar_scanner_overlay()`: comparte invalidate, gate stop, cancel/await, stream stop y pause bajo el mismo lock, pero no entrega negocio, elimina el overlay de Page y trata controller-lost de pause como benigno.
+
+Funciones mezcladas actuales: `cerrar_scanner_qr` combina decisión de ruta, estado UI y programación de tareas; `finalizar_qr` combina cleanup/UI con el handoff de negocio; `_limpiar_camera_scanner` es la porción más técnica, aunque aún depende de Camera, lock, montado y estado textual de Home.
+
+**Siguiente micro-paso propuesto — QR-KIOSK-0B4B-8B:** extraer sólo el bloque interno de `_limpiar_camera_scanner` que, con polling ya coordinado y lock ya adquirido por Home, ejecuta stop stream/pause y reporta el resultado técnico por callbacks. No mover `cerrar_scanner_qr`, `finalizar_qr`, business handoff, lock, polling ownership ni UI.
+
 ## Camera discovery / selection — extracted
 
 `services/qr_scanner_service.py` contiene la infraestructura reutilizable: `enumerate_cameras_with_retry(enumerate_cameras, is_active, on_transient_error, *, max_attempts=3, retry_delays=(0.4, 0.8))` y `select_camera_description(cameras, preferred_lens) -> CameraDescription | None`.

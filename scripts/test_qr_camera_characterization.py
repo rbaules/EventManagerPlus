@@ -484,6 +484,83 @@ def main() -> int:
     assert "await polling_task" in cleanup
     assert cleanup.index("await polling_task") < cleanup.index("await camera.pause_preview()")
     assert finalizer.index("await polling_task") < finalizer.index("await _limpiar_camera_scanner(")
+
+    # QR-KIOSK-0B4B-8A: cerrar_scanner_qr separa el cancel manual del QR
+    # aceptado. El segundo agenda un finalizador externo para no esperar ni
+    # cancelar la tarea de polling desde ella misma antes del cleanup físico.
+    close = source[source.index("def cerrar_scanner_qr("):source.index("def _scanner_state_change")]
+    close_cleanup = source[
+        source.index("async def _limpiar_camera_scanner"):source.index("def cerrar_scanner_qr")
+    ]
+    for marker in (
+        "mensaje: str = \"\"",
+        "reason: str = \"cancel\"",
+        "codigo_qr: str | None = None",
+        "camera_initialized = qr_runtime.controller_initialized",
+        "stream_active = bool(state.get(\"qr_scanner_image_stream_active\"))",
+        "polling_task = qr_runtime.snapshot_task",
+        "qr_runtime.invalidate()",
+        "if codigo_qr is not None:",
+        "async def finalizar_qr() -> None:",
+        "async def detener() -> None:",
+    ):
+        assert marker in close, marker
+    assert close.index("qr_runtime.invalidate()") < close.index("if codigo_qr is not None:")
+    assert close.index("qr_runtime.invalidate()") < close.index("_restaurar_estado_interaccion_qr()")
+    assert "qr_runtime.camera_description" not in close
+
+    qr_finalizer = close[close.index("async def finalizar_qr() -> None:"):close.index("page.run_task(finalizar_qr)")]
+    assert "polling_task is not asyncio.current_task()" in qr_finalizer
+    assert "not polling_task.done()" in qr_finalizer
+    assert qr_finalizer.index("await polling_task") < qr_finalizer.index(
+        "await _limpiar_camera_scanner("
+    )
+    assert "wait_for_polling=False" in qr_finalizer
+    assert qr_finalizer.index("await _limpiar_camera_scanner(") < qr_finalizer.index(
+        "_restaurar_estado_interaccion_qr()"
+    ) < qr_finalizer.index("render()") < qr_finalizer.index("buscar_qr_llegadas(codigo_qr)")
+    assert "buscar_qr_llegadas" not in qr_callback
+    assert "buscar_qr_llegadas" not in snapshot_polling
+
+    manual_close = close[close.index("_restaurar_estado_interaccion_qr()", close.index("page.run_task(finalizar_qr)")):]
+    assert "buscar_qr_llegadas" not in manual_close
+    assert "wait_for_polling=True" in manual_close
+    assert "if not camera_mounted or not camera_initialized:" in manual_close
+    assert "state[\"qr_scanner_closing\"] = False" in manual_close
+    # No existe un guard interno de doble cierre: abrir sí bloquea mientras
+    # closing está activo, pero cerrar se apoya en invalidación/cleanup actual.
+    assert 'if state.get("qr_scanner_closing")' not in close
+
+    assert "async with lock:" in close_cleanup
+    assert "polling_task is not current_task" in close_cleanup
+    assert close_cleanup.index("polling_task.cancel()") < close_cleanup.index(
+        "await polling_task"
+    ) < close_cleanup.index("await camera.stop_image_stream()") < close_cleanup.index(
+        "await camera.pause_preview()"
+    )
+    assert "if stream_active:" in close_cleanup
+    assert "if not camera_initialized or not qr_runtime.controller_initialized:" in close_cleanup
+    assert "qr_runtime.preview_paused = True" in close_cleanup
+    assert 'state["qr_scanner_camera_state"] = "paused"' in close_cleanup
+    # En close, un fallo de pause se registra, marca controller/error y deja
+    # continuar el finally; no activa recovery. El caso benigno con mensaje
+    # exacto pertenece exclusivamente al teardown de Home.
+    close_pause_error = close_cleanup[close_cleanup.index("except Exception as ex:", close_cleanup.index("await camera.pause_preview()")):]
+    assert "_log_scanner_exception(\"Camera preview pause failed\", ex)" in close_pause_error
+    assert "qr_runtime.controller_initialized = False" in close_pause_error
+    assert 'state["qr_scanner_camera_state"] = "error"' in close_pause_error
+    assert "recovery_from_resume" not in close_cleanup
+    assert "_controller_camera_no_inicializado" not in close_cleanup
+
+    interaction_restore = source[
+        source.index("def _restaurar_estado_interaccion_qr"):source.index(
+            "async def _limpiar_camera_scanner"
+        )
+    ]
+    assert "page_overlay.remove(overlay)" not in close
+    assert "_actualizar_visibilidad_scanner(False)" in interaction_restore
+    assert "page_overlay.remove(overlay)" in home_teardown
+    assert "buscar_qr_llegadas" not in home_teardown
     print("OK - QR camera characterization contract preserved.")
     return 0
 
