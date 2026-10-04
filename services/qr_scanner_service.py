@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import inspect
 import re
 from threading import Lock
 from time import monotonic
@@ -280,6 +281,7 @@ async def poll_qr_snapshots(
     is_active: Callable[[], bool],
     on_code: Callable[[str], bool],
     on_capture_error: Callable[[int, Exception], None],
+    on_snapshot_decoded: Callable[[str | None], None] | None = None,
     *,
     interval_seconds: float = 0.65,
     max_consecutive_errors: int = 3,
@@ -292,31 +294,86 @@ async def poll_qr_snapshots(
     ``is_active``. Sólo hay un ``take_picture`` pendiente por iteración.
     """
     consecutive_errors = 0
-    while is_active():
-        image_bytes: bytes | None = None
-        try:
-            image_bytes = await take_picture()
-        except Exception as ex:
-            if not is_active():
-                return False
-            consecutive_errors += 1
-            on_capture_error(consecutive_errors, ex)
-            if consecutive_errors >= max_consecutive_errors:
-                return False
-            await sleep(interval_seconds)
-            continue
+    exit_reason = "session_not_current"
+    try:
+        while is_active():
+            image_bytes: bytes | None = None
+            try:
+                image_bytes = await take_picture()
+            except Exception as ex:
+                if not is_active():
+                    exit_reason = "session_not_current_after_capture_error"
+                    return False
+                consecutive_errors += 1
+                on_capture_error(consecutive_errors, ex)
+                if consecutive_errors >= max_consecutive_errors:
+                    exit_reason = "max_capture_errors"
+                    return False
+                await sleep(interval_seconds)
+                continue
 
-        if not is_active():
-            return False
-        consecutive_errors = 0
-        codigo = await asyncio.to_thread(decode_qr_frame, image_bytes)
-        image_bytes = None
-        if not is_active():
-            return False
-        if codigo and on_code(codigo):
-            return True
-        await sleep(interval_seconds)
-    return False
+            if not is_active():
+                exit_reason = "session_not_current_after_capture"
+                return False
+            consecutive_errors = 0
+            try:
+                codigo = await asyncio.to_thread(decode_qr_frame, image_bytes)
+            except Exception as ex:
+                print(
+                    "[QR-SCAN][SNAPSHOT] decode_exception",
+                    f"type={type(ex).__name__}",
+                    f"message={str(ex)}",
+                )
+                exit_reason = "decode_exception"
+                raise
+            image_bytes = None
+            if on_snapshot_decoded is not None:
+                try:
+                    on_snapshot_decoded(codigo)
+                except Exception as ex:
+                    print(
+                        "[QR-SCAN][SNAPSHOT] snapshot_decoded_exception",
+                        f"type={type(ex).__name__}",
+                        f"message={str(ex)}",
+                    )
+                    exit_reason = "snapshot_decoded_exception"
+                    raise
+            if not is_active():
+                exit_reason = "session_not_current_after_decode"
+                return False
+            if codigo:
+                print("[QR-SCAN][SNAPSHOT] qr_found")
+                print("[QR-SCAN][SNAPSHOT] before_on_code")
+                try:
+                    accepted = on_code(codigo)
+                except Exception as ex:
+                    print(
+                        "[QR-SCAN][SNAPSHOT] on_code_exception",
+                        f"type={type(ex).__name__}",
+                        f"message={str(ex)}",
+                    )
+                    exit_reason = "on_code_exception"
+                    raise
+                if type(accepted) is not bool:
+                    if inspect.iscoroutine(accepted):
+                        accepted.close()
+                    exit_reason = "on_code_invalid_return"
+                    raise TypeError("Snapshot on_code must return bool synchronously")
+                print("[QR-SCAN][SNAPSHOT] on_code_return", f"value={accepted}")
+                if accepted:
+                    exit_reason = "code_accepted"
+                    return True
+            await sleep(interval_seconds)
+        return False
+    except asyncio.CancelledError:
+        exit_reason = "cancelled"
+        raise
+    finally:
+        print(
+            "[QR-SCAN][SNAPSHOT] polling_exit",
+            f"reason={exit_reason}",
+            f"task_id={id(asyncio.current_task())}",
+        )
 
 
 async def take_qr_snapshot(
@@ -345,6 +402,7 @@ async def run_qr_snapshot_polling(
     is_session_current: Callable[[], bool],
     on_code: Callable[[str], bool],
     on_capture_error: Callable[[int, Exception], None],
+    on_snapshot_decoded: Callable[[str | None], None] | None = None,
     *,
     generation: int,
     interval_seconds: float = 0.65,
@@ -359,6 +417,7 @@ async def run_qr_snapshot_polling(
             is_session_current,
             on_code,
             on_capture_error,
+            on_snapshot_decoded,
             interval_seconds=interval_seconds,
             max_consecutive_errors=max_consecutive_errors,
         )

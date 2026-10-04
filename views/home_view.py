@@ -146,6 +146,7 @@ def build_home_view(
     contexto_usuario: dict[str, Any],
     supabase: Any = None,
     session_controller: PageSessionController | None = None,
+    on_authenticated_route_change: Callable[[], None] | None = None,
 ) -> ft.Control:
     checkin_mode = is_checkin_mode()
     if hasattr(page, "scroll"):
@@ -843,6 +844,9 @@ def build_home_view(
 
     def handle_route_change(e: ft.RouteChangeEvent) -> None:
         section, identifier, action = parse_app_route(getattr(e, "route", None) or page.route)
+        if section == "kiosk" and on_authenticated_route_change is not None:
+            on_authenticated_route_change()
+            return
         state["route_identifier"] = identifier
         state["route_action"] = action
         if section == "guests" and identifier:

@@ -331,22 +331,15 @@ def build_login_view(
             try:
                 fase = "construir_dashboard"
                 print("[HOME] Construyendo vista autenticada")
-                from views.kiosk_view import build_kiosk_view, is_kiosk_route
+                from views.authenticated_router import AuthenticatedViewRouter
 
-                if is_kiosk_route(page.route):
-                    home_control = build_kiosk_view(
-                        page=page,
-                        contexto_usuario=contexto_usuario,
-                    )
-                else:
-                    from views.home_view import build_home_view
-
-                    home_control = build_home_view(
-                        page=page,
-                        contexto_usuario=contexto_usuario,
-                        supabase=supabase,
-                        session_controller=session_controller,
-                    )
+                authenticated_router = AuthenticatedViewRouter(
+                    page=page,
+                    contexto_usuario=contexto_usuario,
+                    supabase=supabase,
+                    session_controller=session_controller,
+                )
+                home_control = authenticated_router.mount_current_route()
                 print("[HOME] Tipo devuelto:", type(home_control))
 
                 if home_control is None:
@@ -354,16 +347,6 @@ def build_login_view(
                         "build_home_view devolvio None; se esperaba un control Flet."
                     )
 
-                print("[HOME] Limpiando login")
-                page.clean()
-                print("[HOME] Agregando Home")
-                page.add(home_control)
-                page.update()
-                start_eventos = None
-                if isinstance(home_control.data, dict):
-                    start_eventos = home_control.data.get("start_eventos")
-                if callable(start_eventos):
-                    start_eventos()
                 session_controller.start_refresh_monitor(session_became_invalid)
                 if attempt is not None:
                     attempt.transition(WEB_OAUTH_ATTEMPT_COMPLETED)

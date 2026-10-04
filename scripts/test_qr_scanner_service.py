@@ -560,6 +560,27 @@ def test_snapshot_polling_detects_once_and_stops() -> None:
     assert result is True and accepted == ["T3A1"]
 
 
+def test_snapshot_polling_rejects_async_on_code_callback() -> None:
+    async def take_picture() -> bytes:
+        return b"valid-qr"
+
+    async def wrong_callback(_code: str) -> bool:
+        return True
+
+    with patch.object(scanner, "decode_qr_frame", return_value="T3A1"):
+        try:
+            asyncio.run(scanner.poll_qr_snapshots(
+                take_picture,
+                lambda: True,
+                wrong_callback,
+                lambda _attempt, _error: None,
+                sleep=_without_wait,
+            ))
+            raise AssertionError("Se esperaba rechazo de callback async")
+        except TypeError as ex:
+            assert str(ex) == "Snapshot on_code must return bool synchronously"
+
+
 def test_snapshot_polling_ignores_late_result_after_cancel_or_event_change() -> None:
     active = {"value": True}
     accepted: list[str] = []
@@ -780,6 +801,7 @@ def main() -> int:
     test_camera_enumeration_retry_policy()
     test_camera_enumeration_stops_during_backoff()
     test_snapshot_polling_detects_once_and_stops()
+    test_snapshot_polling_rejects_async_on_code_callback()
     test_snapshot_polling_ignores_late_result_after_cancel_or_event_change()
     test_snapshot_polling_retries_one_error_and_stops_after_persistent_errors()
     test_take_qr_snapshot_and_snapshot_runtime_ownership()

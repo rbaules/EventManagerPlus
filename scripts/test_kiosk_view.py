@@ -21,11 +21,13 @@ def test_route() -> None:
 def test_simulated_happy_path_and_selection() -> None:
     state = KioskState()
     assert state.phase == KioskPhase.WELCOME_SCAN
-    state.start_simulated_resolution()
+    assert state.accept_scanned_qr("T3A1")
     assert state.phase == KioskPhase.RESOLVING
+    assert state.qr_code == "T3A1"
+    assert not state.accept_scanned_qr("T3A2")
     state.load_demo_invitation()
     assert state.phase == KioskPhase.SELECT_GUESTS
-    assert state.invitation_name == "Familia Gonz\\u00e1lez"
+    assert state.invitation_name == "Familia Gonzalez"
     assert state.table == "12"
     assert state.selected_guest_ids == {1, 2}
     state.set_guest_selected(1, False)

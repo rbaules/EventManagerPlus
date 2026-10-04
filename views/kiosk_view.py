@@ -6,6 +6,7 @@ from typing import Any
 
 import flet as ft
 
+from components.kiosk_qr_scanner import KioskQrScanner
 from services.navigation_service import parse_app_route
 
 
@@ -50,16 +51,24 @@ class KioskState:
         self.error_message = None
         self.phase = KioskPhase.RESOLVING
 
+    def accept_scanned_qr(self, codigo_qr: str) -> bool:
+        if self.phase != KioskPhase.WELCOME_SCAN:
+            return False
+        self.qr_code = codigo_qr
+        self.error_message = None
+        self.phase = KioskPhase.RESOLVING
+        return True
+
     def load_demo_invitation(self) -> None:
         self.qr_code = "KIOSK-DEMO"
         self.invitation_id = 1
-        self.invitation_name = "Familia Gonz\\u00e1lez"
+        self.invitation_name = "Familia Gonzalez"
         self.table = "12"
         self.guests = [
-            KioskGuest(1, "Carlos Gonz\\u00e1lez", True),
-            KioskGuest(2, "Mar\\u00eda Gonz\\u00e1lez", True),
-            KioskGuest(3, "Ana Gonz\\u00e1lez"),
-            KioskGuest(4, "Luis Gonz\\u00e1lez"),
+            KioskGuest(1, "Carlos Gonzalez", True),
+            KioskGuest(2, "Maria Gonzalez", True),
+            KioskGuest(3, "Ana Gonzalez"),
+            KioskGuest(4, "Luis Gonzalez"),
         ]
         self.selected_guest_ids = {guest.guest_id for guest in self.guests if guest.selected}
         self.phase = KioskPhase.SELECT_GUESTS
@@ -90,7 +99,7 @@ class KioskState:
     def finish_simulated_confirmation(self) -> None:
         self.phase = KioskPhase.SUCCESS
 
-    def show_error(self, message: str = "No pudimos leer esta invitaci\\u00f3n.") -> None:
+    def show_error(self, message: str = "No pudimos leer esta invitacion.") -> None:
         self.error_message = message
         self.phase = KioskPhase.ERROR
 
@@ -99,10 +108,37 @@ def is_kiosk_route(route: str | None) -> bool:
     return parse_app_route(route)[0] == "kiosk"
 
 
-def build_kiosk_view(*, page: ft.Page, contexto_usuario: dict[str, Any]) -> ft.Control:
+def build_kiosk_view(
+    *,
+    page: ft.Page,
+    contexto_usuario: dict[str, Any],
+    on_authenticated_route_change: Callable[[], None] | None = None,
+) -> ft.Control:
     """Build the self-contained kiosk shell; camera and backend integration come later."""
     state = KioskState()
-    content = ft.Column(horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=20)
+    screen_content = ft.Column(horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=20)
+
+    def on_kiosk_qr_finalized(codigo_qr: str) -> None:
+        if not state.accept_scanned_qr(codigo_qr):
+            return
+        scanner.set_preview_visible(False)
+        render()
+
+    def on_kiosk_camera_error(message: str) -> None:
+        state.show_error(message)
+        scanner.set_preview_visible(False)
+        render()
+
+    scanner = KioskQrScanner(
+        page=page,
+        on_qr_finalized=on_kiosk_qr_finalized,
+        on_camera_error=on_kiosk_camera_error,
+    )
+    content = ft.Column(
+        [screen_content, scanner.host],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        spacing=20,
+    )
     root = ft.Container(
         expand=True,
         padding=32,
@@ -132,28 +168,21 @@ def build_kiosk_view(*, page: ft.Page, contexto_usuario: dict[str, Any]) -> ft.C
         phase = state.phase
         controls: list[ft.Control] = []
         if phase == KioskPhase.WELCOME_SCAN:
+            scanner.set_preview_visible(True)
             controls = [
                 ft.Text("Bienvenido", size=34, weight=ft.FontWeight.BOLD),
-                ft.Text("Escanea el c\\u00f3digo QR de tu invitaci\\u00f3n", size=22, text_align=ft.TextAlign.CENTER),
-                ft.Container(
-                    height=230,
-                    width=500,
-                    alignment=ft.Alignment.CENTER,
-                    border=ft.border.all(2, ft.Colors.OUTLINE),
-                    border_radius=18,
-                    content=ft.Text("\\u00c1rea reservada para la c\\u00e1mara", size=18, color=ft.Colors.ON_SURFACE_VARIANT),
-                ),
-                button("Simular lectura QR", lambda _event: transition(state.start_simulated_resolution)),
-                button("Simular error", lambda _event: transition(state.show_error), primary=False),
+                ft.Text("Escanea el codigo QR de tu invitacion", size=22, text_align=ft.TextAlign.CENTER),
                 ft.TextButton("Ayuda", on_click=lambda _event: None),
             ]
         elif phase == KioskPhase.RESOLVING:
+            scanner.set_preview_visible(False)
             controls = [
                 ft.ProgressRing(width=48, height=48),
-                ft.Text("Estamos buscando tu invitaci\\u00f3n\\u2026", size=24, text_align=ft.TextAlign.CENTER),
-                button("Continuar simulaci\\u00f3n", lambda _event: transition(state.load_demo_invitation)),
+                ft.Text("Estamos buscando tu invitacion...", size=24, text_align=ft.TextAlign.CENTER),
+                button("Continuar demo (simulacion)", lambda _event: transition(state.load_demo_invitation)),
             ]
         elif phase == KioskPhase.SELECT_GUESTS:
+            scanner.set_preview_visible(False)
             guest_controls = [
                 ft.Checkbox(
                     label=guest.name,
@@ -164,36 +193,39 @@ def build_kiosk_view(*, page: ft.Page, contexto_usuario: dict[str, Any]) -> ft.C
                 for guest in state.guests
             ]
             controls = [
-                ft.Text(state.invitation_name or "Invitaci\\u00f3n", size=30, weight=ft.FontWeight.BOLD),
+                ft.Text(state.invitation_name or "Invitacion", size=30, weight=ft.FontWeight.BOLD),
                 ft.Text(f"Mesa {state.table or '-'}", size=22),
-                ft.Text("\\u00bfQui\\u00e9nes llegaron?", size=20),
+                ft.Text("Quienes llegaron?", size=20),
                 *guest_controls,
                 ft.Text(state.error_message or "", color=ft.Colors.ERROR, visible=bool(state.error_message)),
                 button("Todos llegaron", lambda _event: transition(state.select_all_guests), primary=False),
                 button("Continuar", lambda _event: continue_confirmation()),
             ]
         elif phase == KioskPhase.CONFIRMING:
+            scanner.set_preview_visible(False)
             controls = [
                 ft.ProgressRing(width=48, height=48),
-                ft.Text("Confirmando llegada\\u2026", size=24),
-                button("Completar simulaci\\u00f3n", lambda _event: transition(state.finish_simulated_confirmation)),
+                ft.Text("Confirmando llegada...", size=24),
+                button("Completar simulacion", lambda _event: transition(state.finish_simulated_confirmation)),
             ]
         elif phase == KioskPhase.SUCCESS:
+            scanner.set_preview_visible(False)
             controls = [
                 ft.Icon(ft.Icons.CHECK_CIRCLE_OUTLINE, size=72, color=ft.Colors.GREEN),
-                ft.Text("\\u00a1Bienvenidos!", size=34, weight=ft.FontWeight.BOLD),
+                ft.Text("Bienvenidos!", size=34, weight=ft.FontWeight.BOLD),
                 ft.Text(f"Mesa {state.table or '-'}", size=26),
                 ft.Text("Que disfruten el evento.", size=20),
-                button("Finalizar / Volver al inicio", lambda _event: transition(state.reset_kiosk)),
+                button("Finalizar / Volver al inicio", lambda _event: reset_kiosk()),
             ]
         else:
+            scanner.set_preview_visible(False)
             controls = [
                 ft.Icon(ft.Icons.ERROR_OUTLINE, size=64, color=ft.Colors.ERROR),
-                ft.Text("No pudimos leer esta invitaci\\u00f3n.", size=26, text_align=ft.TextAlign.CENTER),
+                ft.Text("No pudimos leer esta invitacion.", size=26, text_align=ft.TextAlign.CENTER),
                 ft.Text(state.error_message or "Intenta nuevamente.", size=18, text_align=ft.TextAlign.CENTER),
-                button("Intentar nuevamente", lambda _event: transition(state.reset_kiosk)),
+                button("Intentar nuevamente", lambda _event: reset_kiosk()),
             ]
-        content.controls = controls
+        screen_content.controls = controls
         if has_rendered:
             page.update()
         has_rendered = True
@@ -210,6 +242,30 @@ def build_kiosk_view(*, page: ft.Page, contexto_usuario: dict[str, Any]) -> ft.C
         state.continue_to_confirmation()
         render()
 
-    root.data = {"kiosk_state": state, "reset_kiosk": state.reset_kiosk, "contexto_usuario": contexto_usuario}
+    def reset_kiosk() -> None:
+        state.reset_kiosk()
+        scanner.set_preview_visible(True)
+        render()
+        scanner.restart()
+
+    def on_route_change(event: ft.RouteChangeEvent) -> None:
+        if not is_kiosk_route(getattr(event, "route", None) or page.route):
+            async def leave_kiosk() -> None:
+                await scanner.stop_scan()
+                if on_authenticated_route_change is not None:
+                    on_authenticated_route_change()
+
+            page.run_task(leave_kiosk)
+
+    page.on_route_change = on_route_change
+    root.data = {
+        "kiosk_state": state,
+        "kiosk_scanner": scanner,
+        "reset_kiosk": reset_kiosk,
+        "retry_camera": reset_kiosk,
+        "pause_dashboard": scanner.close,
+        "contexto_usuario": contexto_usuario,
+    }
     render()
+    scanner.start()
     return root
