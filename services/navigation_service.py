@@ -4,6 +4,7 @@ from urllib.parse import quote, unquote
 
 
 ROUTES = {
+    "kiosk": "/app/kiosk",
     "dashboard": "/app/dashboard",
     "guests": "/app/invitados",
     "arrivals": "/app/llegadas",

@@ -1,0 +1,215 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+import flet as ft
+
+from services.navigation_service import parse_app_route
+
+
+class KioskPhase(str, Enum):
+    WELCOME_SCAN = "WELCOME_SCAN"
+    RESOLVING = "RESOLVING"
+    SELECT_GUESTS = "SELECT_GUESTS"
+    CONFIRMING = "CONFIRMING"
+    SUCCESS = "SUCCESS"
+    ERROR = "ERROR"
+
+
+@dataclass
+class KioskGuest:
+    guest_id: int
+    name: str
+    selected: bool = False
+
+
+@dataclass
+class KioskState:
+    phase: KioskPhase = KioskPhase.WELCOME_SCAN
+    qr_code: str | None = None
+    invitation_id: int | None = None
+    invitation_name: str | None = None
+    table: str | None = None
+    guests: list[KioskGuest] = field(default_factory=list)
+    selected_guest_ids: set[int] = field(default_factory=set)
+    error_message: str | None = None
+
+    def reset_kiosk(self) -> None:
+        self.phase = KioskPhase.WELCOME_SCAN
+        self.qr_code = None
+        self.invitation_id = None
+        self.invitation_name = None
+        self.table = None
+        self.guests.clear()
+        self.selected_guest_ids.clear()
+        self.error_message = None
+
+    def start_simulated_resolution(self) -> None:
+        self.error_message = None
+        self.phase = KioskPhase.RESOLVING
+
+    def load_demo_invitation(self) -> None:
+        self.qr_code = "KIOSK-DEMO"
+        self.invitation_id = 1
+        self.invitation_name = "Familia Gonz\\u00e1lez"
+        self.table = "12"
+        self.guests = [
+            KioskGuest(1, "Carlos Gonz\\u00e1lez", True),
+            KioskGuest(2, "Mar\\u00eda Gonz\\u00e1lez", True),
+            KioskGuest(3, "Ana Gonz\\u00e1lez"),
+            KioskGuest(4, "Luis Gonz\\u00e1lez"),
+        ]
+        self.selected_guest_ids = {guest.guest_id for guest in self.guests if guest.selected}
+        self.phase = KioskPhase.SELECT_GUESTS
+
+    def set_guest_selected(self, guest_id: int, selected: bool) -> None:
+        for guest in self.guests:
+            if guest.guest_id == guest_id:
+                guest.selected = selected
+                if selected:
+                    self.selected_guest_ids.add(guest_id)
+                else:
+                    self.selected_guest_ids.discard(guest_id)
+                break
+
+    def select_all_guests(self) -> None:
+        for guest in self.guests:
+            guest.selected = True
+            self.selected_guest_ids.add(guest.guest_id)
+
+    def continue_to_confirmation(self) -> bool:
+        if not self.selected_guest_ids:
+            self.error_message = "Selecciona al menos una persona para continuar."
+            return False
+        self.error_message = None
+        self.phase = KioskPhase.CONFIRMING
+        return True
+
+    def finish_simulated_confirmation(self) -> None:
+        self.phase = KioskPhase.SUCCESS
+
+    def show_error(self, message: str = "No pudimos leer esta invitaci\\u00f3n.") -> None:
+        self.error_message = message
+        self.phase = KioskPhase.ERROR
+
+
+def is_kiosk_route(route: str | None) -> bool:
+    return parse_app_route(route)[0] == "kiosk"
+
+
+def build_kiosk_view(*, page: ft.Page, contexto_usuario: dict[str, Any]) -> ft.Control:
+    """Build the self-contained kiosk shell; camera and backend integration come later."""
+    state = KioskState()
+    content = ft.Column(horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=20)
+    root = ft.Container(
+        expand=True,
+        padding=32,
+        bgcolor=ft.Colors.SURFACE,
+        alignment=ft.Alignment.CENTER,
+        content=ft.Container(
+            width=720,
+            padding=32,
+            border_radius=24,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            content=content,
+        ),
+    )
+    has_rendered = False
+
+    def button(label: str, handler: Any, *, primary: bool = True) -> ft.Control:
+        control_type = ft.ElevatedButton if primary else ft.OutlinedButton
+        return control_type(
+            label,
+            on_click=handler,
+            height=56,
+            style=ft.ButtonStyle(text_style=ft.TextStyle(size=18)),
+        )
+
+    def render() -> None:
+        nonlocal has_rendered
+        phase = state.phase
+        controls: list[ft.Control] = []
+        if phase == KioskPhase.WELCOME_SCAN:
+            controls = [
+                ft.Text("Bienvenido", size=34, weight=ft.FontWeight.BOLD),
+                ft.Text("Escanea el c\\u00f3digo QR de tu invitaci\\u00f3n", size=22, text_align=ft.TextAlign.CENTER),
+                ft.Container(
+                    height=230,
+                    width=500,
+                    alignment=ft.Alignment.CENTER,
+                    border=ft.border.all(2, ft.Colors.OUTLINE),
+                    border_radius=18,
+                    content=ft.Text("\\u00c1rea reservada para la c\\u00e1mara", size=18, color=ft.Colors.ON_SURFACE_VARIANT),
+                ),
+                button("Simular lectura QR", lambda _event: transition(state.start_simulated_resolution)),
+                button("Simular error", lambda _event: transition(state.show_error), primary=False),
+                ft.TextButton("Ayuda", on_click=lambda _event: None),
+            ]
+        elif phase == KioskPhase.RESOLVING:
+            controls = [
+                ft.ProgressRing(width=48, height=48),
+                ft.Text("Estamos buscando tu invitaci\\u00f3n\\u2026", size=24, text_align=ft.TextAlign.CENTER),
+                button("Continuar simulaci\\u00f3n", lambda _event: transition(state.load_demo_invitation)),
+            ]
+        elif phase == KioskPhase.SELECT_GUESTS:
+            guest_controls = [
+                ft.Checkbox(
+                    label=guest.name,
+                    value=guest.selected,
+                    label_style=ft.TextStyle(size=20),
+                    on_change=lambda event, guest_id=guest.guest_id: toggle_guest(guest_id, bool(event.control.value)),
+                )
+                for guest in state.guests
+            ]
+            controls = [
+                ft.Text(state.invitation_name or "Invitaci\\u00f3n", size=30, weight=ft.FontWeight.BOLD),
+                ft.Text(f"Mesa {state.table or '-'}", size=22),
+                ft.Text("\\u00bfQui\\u00e9nes llegaron?", size=20),
+                *guest_controls,
+                ft.Text(state.error_message or "", color=ft.Colors.ERROR, visible=bool(state.error_message)),
+                button("Todos llegaron", lambda _event: transition(state.select_all_guests), primary=False),
+                button("Continuar", lambda _event: continue_confirmation()),
+            ]
+        elif phase == KioskPhase.CONFIRMING:
+            controls = [
+                ft.ProgressRing(width=48, height=48),
+                ft.Text("Confirmando llegada\\u2026", size=24),
+                button("Completar simulaci\\u00f3n", lambda _event: transition(state.finish_simulated_confirmation)),
+            ]
+        elif phase == KioskPhase.SUCCESS:
+            controls = [
+                ft.Icon(ft.Icons.CHECK_CIRCLE_OUTLINE, size=72, color=ft.Colors.GREEN),
+                ft.Text("\\u00a1Bienvenidos!", size=34, weight=ft.FontWeight.BOLD),
+                ft.Text(f"Mesa {state.table or '-'}", size=26),
+                ft.Text("Que disfruten el evento.", size=20),
+                button("Finalizar / Volver al inicio", lambda _event: transition(state.reset_kiosk)),
+            ]
+        else:
+            controls = [
+                ft.Icon(ft.Icons.ERROR_OUTLINE, size=64, color=ft.Colors.ERROR),
+                ft.Text("No pudimos leer esta invitaci\\u00f3n.", size=26, text_align=ft.TextAlign.CENTER),
+                ft.Text(state.error_message or "Intenta nuevamente.", size=18, text_align=ft.TextAlign.CENTER),
+                button("Intentar nuevamente", lambda _event: transition(state.reset_kiosk)),
+            ]
+        content.controls = controls
+        if has_rendered:
+            page.update()
+        has_rendered = True
+
+    def transition(action: Any) -> None:
+        action()
+        render()
+
+    def toggle_guest(guest_id: int, selected: bool) -> None:
+        state.set_guest_selected(guest_id, selected)
+        render()
+
+    def continue_confirmation() -> None:
+        state.continue_to_confirmation()
+        render()
+
+    root.data = {"kiosk_state": state, "reset_kiosk": state.reset_kiosk, "contexto_usuario": contexto_usuario}
+    render()
+    return root

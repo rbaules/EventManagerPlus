@@ -7,6 +7,7 @@ from db import create_supabase_client
 from services.session_service import PageSessionController
 from services.web_reliability import PageWebTelemetry
 from views.login_view import build_login_view
+from views.kiosk_view import build_kiosk_view, is_kiosk_route
 
 
 def main(
@@ -96,18 +97,21 @@ def main(
 
     if validation is not None:
         if validation.ok and validation.should_build_home and validation.context:
-            from views.home_view import build_home_view
+            if is_kiosk_route(page.route):
+                active_control = build_kiosk_view(page=page, contexto_usuario=validation.context)
+            else:
+                from views.home_view import build_home_view
 
-            home_control = build_home_view(
-                page=page,
-                contexto_usuario=validation.context,
-                supabase=supabase,
-                session_controller=session_controller,
-            )
-            page.add(home_control)
+                active_control = build_home_view(
+                    page=page,
+                    contexto_usuario=validation.context,
+                    supabase=supabase,
+                    session_controller=session_controller,
+                )
+            page.add(active_control)
             start_eventos = None
-            if isinstance(home_control.data, dict):
-                start_eventos = home_control.data.get("start_eventos")
+            if isinstance(active_control.data, dict):
+                start_eventos = active_control.data.get("start_eventos")
             if callable(start_eventos):
                 start_eventos()
             session_controller.start_refresh_monitor(

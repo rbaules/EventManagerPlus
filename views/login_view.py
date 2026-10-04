@@ -330,15 +330,23 @@ def build_login_view(
             set_status("Acceso concedido. Abriendo Dashboard...")
             try:
                 fase = "construir_dashboard"
-                print("[HOME] Construyendo Home")
-                from views.home_view import build_home_view
+                print("[HOME] Construyendo vista autenticada")
+                from views.kiosk_view import build_kiosk_view, is_kiosk_route
 
-                home_control = build_home_view(
-                    page=page,
-                    contexto_usuario=contexto_usuario,
-                    supabase=supabase,
-                    session_controller=session_controller,
-                )
+                if is_kiosk_route(page.route):
+                    home_control = build_kiosk_view(
+                        page=page,
+                        contexto_usuario=contexto_usuario,
+                    )
+                else:
+                    from views.home_view import build_home_view
+
+                    home_control = build_home_view(
+                        page=page,
+                        contexto_usuario=contexto_usuario,
+                        supabase=supabase,
+                        session_controller=session_controller,
+                    )
                 print("[HOME] Tipo devuelto:", type(home_control))
 
                 if home_control is None:
