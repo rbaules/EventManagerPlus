@@ -262,6 +262,15 @@ def build_home_view(
     qr_runtime = QrCameraRuntime()
     ui: dict[str, ft.Control | None] = {"root": None, "navigation": None}
 
+    def _persistir_contexto_sesion(contexto: dict[str, Any]) -> None:
+        if session_controller is not None:
+            actualizar = getattr(session_controller, "update_context", None)
+            if callable(actualizar):
+                if not actualizar(contexto):
+                    raise RuntimeError("No fue posible persistir el contexto de sesión.")
+                return
+        guardar_contexto_sesion(page.session.store, contexto)
+
     def _puede_editar_datos_usuario(detalle: Any) -> bool:
         if detalle is None or detalle.estado not in {"Activo", "Preregistrado"}:
             return False
@@ -845,7 +854,9 @@ def build_home_view(
     def handle_route_change(e: ft.RouteChangeEvent) -> None:
         section, identifier, action = parse_app_route(getattr(e, "route", None) or page.route)
         if section == "kiosk" and on_authenticated_route_change is not None:
-            on_authenticated_route_change()
+            # Page.clean() sólo elimina controles raíz; el scanner de Home vive
+            # en Page.overlay. Libéralo antes de montar otra Camera en Kiosk.
+            _desmontar_scanner_overlay(on_complete=on_authenticated_route_change)
             return
         state["route_identifier"] = identifier
         state["route_action"] = action
@@ -1041,7 +1052,7 @@ def build_home_view(
                 if result.ok:
                     contexto_usuario["usr_cuenta_id_default"] = request.cuenta_id
                     contexto_usuario["usr_evento_id_default"] = request.evento_id
-                    guardar_contexto_sesion(page.session.store, contexto_usuario)
+                    _persistir_contexto_sesion(contexto_usuario)
                     mensaje.value = ""
                     page.show_dialog(ft.SnackBar(content=ft.Text("Preferencias actualizadas correctamente.")))
                 else:
@@ -1534,11 +1545,16 @@ def build_home_view(
             overlay.visible = True
             overlay.ignore_interactions = not visible
 
-    def _desmontar_scanner_overlay() -> None:
+    def _desmontar_scanner_overlay(
+        *,
+        on_complete: Callable[[], None] | None = None,
+    ) -> None:
         """Libera el preview antes de retirar el overlay al cerrar Home."""
         camera = state.get("qr_scanner_camera")
         overlay = state.get("qr_scanner_overlay")
         if not isinstance(camera, fcam.Camera) or not isinstance(overlay, ft.Container):
+            if on_complete is not None:
+                on_complete()
             return
         qr_runtime.invalidate()
         state["qr_scanner_active"] = False
@@ -1585,7 +1601,11 @@ def build_home_view(
                 qr_runtime.snapshot_task = None
                 state["qr_scanner_overlay"] = None
                 print("[QR-SCAN][LIFECYCLE] Home cleanup lock released")
-                page.update()
+                try:
+                    page.update()
+                finally:
+                    if on_complete is not None:
+                        on_complete()
 
         page.run_task(desmontar)
 
@@ -3324,7 +3344,7 @@ def build_home_view(
             establecer_evento_activo(contexto_usuario, evento)
             reset_invitados()
             reset_llegadas()
-        guardar_contexto_sesion(page.session.store, contexto_usuario)
+        _persistir_contexto_sesion(contexto_usuario)
 
     def guardar_form_evento(payload: dict[str, Any]) -> None:
         form = state.get("eventos_admin_form")
@@ -3428,7 +3448,7 @@ def build_home_view(
                             result.evento.get("evento_id"),
                         ):
                             limpiar_evento_activo(contexto_usuario)
-                            guardar_contexto_sesion(page.session.store, contexto_usuario)
+                            _persistir_contexto_sesion(contexto_usuario)
             finally:
                 state["eventos_admin_saving"] = False
                 render()
@@ -3490,7 +3510,7 @@ def build_home_view(
                         print("[EVENTOS][INFO] Varios eventos disponibles; se requiere seleccion explicita.")
                     else:
                         evento_activo = sincronizar_evento_activo(contexto_usuario, resultado.eventos)
-                    guardar_contexto_sesion(page.session.store, contexto_usuario)
+                    _persistir_contexto_sesion(contexto_usuario)
                     guardar_eventos_disponibles(page.session.store, resultado.eventos)
                     if evento_activo:
                         if checkin_mode:
@@ -3552,7 +3572,7 @@ def build_home_view(
         if checkin_mode:
             evento_activo = establecer_evento_activo(contexto_usuario, evento)
             contexto_usuario["evento_activo_seleccionado"] = True
-            guardar_contexto_sesion(page.session.store, contexto_usuario)
+            _persistir_contexto_sesion(contexto_usuario)
             reset_invitados()
             reset_llegadas()
             invalidar_dashboard()
@@ -3619,9 +3639,9 @@ def build_home_view(
             if not resultado_dashboard.ok:
                 raise RuntimeError("No fue posible preparar el Dashboard del evento seleccionado.")
             phase = "aplicar_contexto"
-            guardar_contexto_sesion(page.session.store, contexto_nuevo)
             contexto_usuario.clear()
             contexto_usuario.update(contexto_nuevo)
+            _persistir_contexto_sesion(contexto_usuario)
             applied = True
             state["eventos"] = resultado.eventos
             reset_invitados()
@@ -3661,7 +3681,7 @@ def build_home_view(
                 for key, value in estado_anterior.items():
                     state[key] = value
                 try:
-                    guardar_contexto_sesion(page.session.store, contexto_anterior)
+                    _persistir_contexto_sesion(contexto_anterior)
                 except Exception:
                     pass
             state["eventos_estado"] = "error"
@@ -3750,7 +3770,7 @@ def build_home_view(
         print("[CHECKIN][INFO] Cambio de evento solicitado desde menu de usuario.")
         limpiar_evento_activo(contexto_usuario)
         contexto_usuario["evento_activo_seleccionado"] = False
-        guardar_contexto_sesion(page.session.store, contexto_usuario)
+        _persistir_contexto_sesion(contexto_usuario)
         reset_invitados()
         reset_llegadas()
         state["selected"] = "event_selection"

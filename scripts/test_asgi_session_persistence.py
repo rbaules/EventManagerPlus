@@ -42,6 +42,11 @@ from services.server_session_service import (  # noqa: E402
     current_request_session_context,
 )
 from services.session_service import PageSessionController  # noqa: E402
+from services.evento_context_service import (  # noqa: E402
+    construir_contexto_evento_activo,
+    establecer_evento_activo,
+    evento_key,
+)
 from views import home_view  # noqa: E402
 
 
@@ -507,6 +512,113 @@ def assert_controller_logout_is_terminal_local_and_idempotent() -> None:
     assert client.auth.sign_out_calls == [{"scope": "local"}]
 
 
+def assert_selected_event_restores_across_authenticated_pages() -> None:
+    repository = InMemorySessionRepository()
+    record = repository.create(
+        access_token="context-access",
+        refresh_token="context-refresh",
+        auth_user_id="context",
+        ttl_seconds=300,
+    )
+
+    def fresh_context(_client: Any, _auth_user_id: str) -> dict[str, Any]:
+        account = {"cuenta_id": 2, "nombre_cuenta": "Cuenta 2", "rol": "Operador"}
+        account_three = {"cuenta_id": 3, "nombre_cuenta": "Cuenta 3", "rol": "Consulta"}
+        event_eight = {
+            "cuenta_id": 2,
+            "evento_id": 8,
+            "nombre_evento": "Evento 8",
+            "fase_evento": "En_proceso",
+            "estado": "Activo",
+            "rol": "Operador",
+        }
+        event_nine = {**event_eight, "evento_id": 9, "nombre_evento": "Evento 9"}
+        event_twenty = {
+            **event_eight,
+            "cuenta_id": 3,
+            "evento_id": 20,
+            "nombre_evento": "Evento 20",
+            "rol": "Consulta",
+        }
+        context = {
+            "usr_usuario_auth_uuid": "context",
+            "usr_estado": "Activo",
+            "cuentas_permitidas": [account, account_three],
+            "eventos_permitidos": [event_eight, event_nine, event_twenty],
+            "cuenta_actual": None,
+            "evento_actual": None,
+        }
+        establecer_evento_activo(context, event_eight)
+        return context
+
+    page_a = ControllerPage()
+    controller_a = PageSessionController(
+        page_a,
+        FakeClient(),
+        context_loader=fresh_context,
+        server_session_binding=ServerSessionBinding(repository, page_a, record.opaque_id),
+    )
+    restored_a = controller_a.validate_current_session(load_context=True)
+    assert restored_a.ok and evento_key(restored_a.context["evento_actual"]) == (2, 8)
+    selected_nine = construir_contexto_evento_activo(
+        restored_a.context,
+        restored_a.context["eventos_permitidos"],
+        (2, 9),
+    )
+    assert controller_a.update_context(selected_nine)
+    persisted = repository.get(record.opaque_id)
+    assert persisted is not None
+    assert (persisted.active_account_id, persisted.active_event_id) == (2, 9)
+
+    for _route in ("/app/kiosk", "refresh", "new-tab"):
+        page_b = ControllerPage()
+        controller_b = PageSessionController(
+            page_b,
+            FakeClient(),
+            context_loader=fresh_context,
+            server_session_binding=ServerSessionBinding(repository, page_b, record.opaque_id),
+        )
+        restored_b = controller_b.validate_current_session(load_context=True)
+        assert restored_b.ok
+        assert evento_key(restored_b.context["evento_actual"]) == (2, 9)
+
+    selected_twenty = construir_contexto_evento_activo(
+        selected_nine,
+        selected_nine["eventos_permitidos"],
+        (3, 20),
+    )
+    assert controller_a.update_context(selected_twenty)
+    page_account_change = ControllerPage()
+    restored_account_change = PageSessionController(
+        page_account_change,
+        FakeClient(),
+        context_loader=fresh_context,
+        server_session_binding=ServerSessionBinding(
+            repository,
+            page_account_change,
+            record.opaque_id,
+        ),
+    ).validate_current_session(load_context=True)
+    assert restored_account_change.ok
+    assert evento_key(restored_account_change.context["evento_actual"]) == (3, 20)
+
+    invalid = {**selected_twenty, "evento_actual": {"cuenta_id": 3, "evento_id": 9}}
+    assert not controller_a.update_context(invalid)
+    unchanged = repository.get(record.opaque_id)
+    assert unchanged is not None
+    assert (unchanged.active_account_id, unchanged.active_event_id) == (3, 20)
+
+    other = repository.create(
+        access_token="other-access",
+        refresh_token="other-refresh",
+        auth_user_id="other",
+        ttl_seconds=300,
+    )
+    assert repository.get(other.opaque_id).active_event_id is None  # type: ignore[union-attr]
+    no_cookie = PageSessionController(ControllerPage(), FakeClient(), context_loader=fresh_context)
+    assert not no_cookie.validate_current_session(load_context=True).ok
+
+
 async def assert_same_page_home_unmounted_and_self_navigation() -> None:
     source = inspect.getsource(home_view.build_home_view)
     assert "page.launch_url" not in source
@@ -671,6 +783,7 @@ async def main_async() -> None:
     assert_distinct_sessions_and_safe_logs()
     assert_logout_endpoint()
     assert_controller_logout_is_terminal_local_and_idempotent()
+    assert_selected_event_restores_across_authenticated_pages()
     await assert_same_page_home_unmounted_and_self_navigation()
     await assert_logout_wins_shared_cookie_races()
 

@@ -94,10 +94,15 @@ def test_home_remains_default_and_route_callback_switches_views() -> None:
 
 def test_route_cleanup_and_login_use_the_shared_router() -> None:
     kiosk_source = (ROOT / "views" / "kiosk_view.py").read_text(encoding="utf-8")
+    home_source = (ROOT / "views" / "home_view.py").read_text(encoding="utf-8")
     login_source = (ROOT / "views" / "login_view.py").read_text(encoding="utf-8")
     app_source = (ROOT / "app.py").read_text(encoding="utf-8")
     assert "await scanner.stop_scan()" in kiosk_source
     assert "on_authenticated_route_change()" in kiosk_source
+    # Page.clean() no limpia Page.overlay: Home debe terminar su Camera antes
+    # de entregar la ruta al builder de Kiosk.
+    assert "_desmontar_scanner_overlay(on_complete=on_authenticated_route_change)" in home_source
+    assert "if on_complete is not None:\n                        on_complete()" in home_source
     assert "AuthenticatedViewRouter" in login_source
     assert "AuthenticatedViewRouter" in app_source
 

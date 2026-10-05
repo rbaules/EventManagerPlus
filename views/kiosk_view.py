@@ -248,6 +248,12 @@ def build_kiosk_view(
         render()
         scanner.restart()
 
+    def resume_kiosk_after_reconnect() -> None:
+        if state.phase != KioskPhase.WELCOME_SCAN:
+            print(f"[KIOSK-QR][RECONNECT] skipped phase={state.phase.value}")
+            return
+        scanner.recover_after_reconnect()
+
     def on_route_change(event: ft.RouteChangeEvent) -> None:
         if not is_kiosk_route(getattr(event, "route", None) or page.route):
             async def leave_kiosk() -> None:
@@ -263,7 +269,8 @@ def build_kiosk_view(
         "kiosk_scanner": scanner,
         "reset_kiosk": reset_kiosk,
         "retry_camera": reset_kiosk,
-        "pause_dashboard": scanner.close,
+        "pause_dashboard": lambda: scanner.close(disconnected=True),
+        "resume_dashboard": resume_kiosk_after_reconnect,
         "contexto_usuario": contexto_usuario,
     }
     render()

@@ -32,6 +32,8 @@ class ServerSession:
     version: int = 1
     revoked: bool = False
     bound_pages: frozenset[str] = field(default_factory=frozenset)
+    active_account_id: int | None = None
+    active_event_id: int | None = None
 
 
 class SessionRepository(Protocol):
@@ -55,6 +57,15 @@ class SessionRepository(Protocol):
         auth_user_id: str,
         expected_version: int | None = None,
         ttl_seconds: int | None = None,
+    ) -> ServerSession | None: ...
+
+    def update_context(
+        self,
+        opaque_id: str,
+        *,
+        auth_user_id: str,
+        account_id: int | None,
+        event_id: int | None,
     ) -> ServerSession | None: ...
 
     def rotate(self, opaque_id: str) -> ServerSession | None: ...
@@ -151,6 +162,30 @@ class InMemorySessionRepository:
                     if ttl_seconds is not None
                     else current.expires_at
                 ),
+                version=current.version + 1,
+            )
+            self._sessions[opaque_id] = updated
+            return updated
+
+    def update_context(
+        self,
+        opaque_id: str,
+        *,
+        auth_user_id: str,
+        account_id: int | None,
+        event_id: int | None,
+    ) -> ServerSession | None:
+        if event_id is not None and account_id is None:
+            return None
+        with self._lock:
+            current = self._valid_locked(opaque_id)
+            if current is None or current.auth_user_id != auth_user_id:
+                return None
+            updated = replace(
+                current,
+                active_account_id=account_id,
+                active_event_id=event_id,
+                updated_at=self._clock(),
                 version=current.version + 1,
             )
             self._sessions[opaque_id] = updated
@@ -362,8 +397,14 @@ class ServerSessionBinding:
         self.repository = repository
         self.page_id = hex(id(page))
         self.opaque_id = opaque_id
+        self.active_account_id: int | None = None
+        self.active_event_id: int | None = None
         if opaque_id:
             self.repository.bind_page(opaque_id, self.page_id)
+
+    @property
+    def active_context_key(self) -> tuple[int | None, int | None]:
+        return self.active_account_id, self.active_event_id
 
     @staticmethod
     def _session_values(client: Any) -> tuple[str, str, str] | None:
@@ -396,6 +437,37 @@ class ServerSessionBinding:
         request_cookie_update(record.opaque_id)
         return True
 
+    def persist_context(self, contexto: dict[str, Any], auth_user_id: str) -> bool:
+        """Persiste sólo la selección técnica cuenta/evento de esta sesión opaca."""
+        account = contexto.get("cuenta_actual") or {}
+        event = contexto.get("evento_actual") or {}
+        try:
+            account_id = int(account["cuenta_id"]) if account else None
+            event_id = int(event["evento_id"]) if event else None
+            event_account_id = int(event["cuenta_id"]) if event else None
+        except (KeyError, TypeError, ValueError):
+            return False
+        if event_id is not None and event_account_id != account_id:
+            return False
+        if not self.opaque_id:
+            return False
+        updated = self.repository.update_context(
+            self.opaque_id,
+            auth_user_id=auth_user_id,
+            account_id=account_id,
+            event_id=event_id,
+        )
+        if updated is None:
+            return False
+        self.active_account_id = updated.active_account_id
+        self.active_event_id = updated.active_event_id
+        print(
+            "[SESSION][CONTEXT_UPDATE]",
+            f"account_id={account_id}",
+            f"event_id={event_id}",
+        )
+        return True
+
     def restore_and_run(
         self,
         client: Any,
@@ -407,6 +479,8 @@ class ServerSessionBinding:
 
         def serialized(record: ServerSession) -> Any:
             try:
+                self.active_account_id = record.active_account_id
+                self.active_event_id = record.active_event_id
                 response = client.auth.set_session(
                     record.access_token,
                     record.refresh_token,

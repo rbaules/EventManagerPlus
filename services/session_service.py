@@ -11,6 +11,8 @@ from services.auth_service import (
     sign_out_local_session,
 )
 from services.evento_context_service import (
+    construir_contexto_cuenta_activa,
+    construir_contexto_evento_activo,
     guardar_contexto_sesion,
     limpiar_contexto_sesion,
 )
@@ -218,6 +220,31 @@ class PageSessionController:
                     "No fue posible validar tu acceso a EventPlus."
                 )
 
+        if load_context and self._server_session_binding is not None:
+            account_id, event_id = getattr(
+                self._server_session_binding,
+                "active_context_key",
+                (None, None),
+            )
+            if account_id is not None:
+                try:
+                    if event_id is None:
+                        context = construir_contexto_cuenta_activa(context, account_id)
+                    else:
+                        context = construir_contexto_evento_activo(
+                            context,
+                            context.get("eventos_permitidos", []) or [],
+                            (account_id, event_id),
+                        )
+                except LookupError:
+                    # La autorización recién cargada tiene autoridad sobre una
+                    # selección vieja que ya no es válida para la sesión.
+                    if not self._server_session_binding.persist_context(
+                        context,
+                        auth_user_id,
+                    ):
+                        return self._invalidate(SESSION_INVALID_MESSAGE)
+
         if not context or not self._context_is_valid(context, auth_user_id):
             return self._invalidate(
                 "Tu sesion es valida, pero el contexto de EventPlus no es valido."
@@ -247,9 +274,30 @@ class PageSessionController:
     def persist_server_session(self) -> bool:
         if self._server_session_binding is None:
             return True
-        return bool(
-            self._server_session_binding.persist_login(self.supabase)
-        )
+        if not self._server_session_binding.persist_login(self.supabase):
+            return False
+        if self.context is None:
+            return True
+        return self.update_context(self.context)
+
+    def update_context(self, context: dict[str, Any]) -> bool:
+        """Mantiene alineados contexto de Page y selección del registro server-side."""
+        auth_user_id = str(safe_get(self.user, "id", "") or "")
+        if not auth_user_id:
+            auth_user_id = str(context.get("usr_usuario_auth_uuid") or "")
+        if not auth_user_id or not self._context_is_valid(context, auth_user_id):
+            return False
+        if self._server_session_binding is not None and not self._server_session_binding.persist_context(
+            context,
+            auth_user_id,
+        ):
+            return False
+        with self._state_lock:
+            if self._closed:
+                return False
+            self.context = context
+        guardar_contexto_sesion(self.page.session.store, context)
+        return True
 
     @property
     def has_server_session(self) -> bool:

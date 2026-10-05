@@ -44,10 +44,27 @@ def test_kiosk_controls_build_with_installed_flet() -> None:
     assert isinstance(scanner.camera.content.border, ft.Border)
     assert scanner.camera.content.border.top.width == 2
     assert scanner.camera.content.border.top.color == ft.Colors.PRIMARY
+    host = scanner.host
+    camera = scanner.camera
+    scanner.set_preview_visible(False)
+    assert scanner.host is host
+    assert scanner.host.content is camera
+    assert scanner.host.visible is True
+    assert scanner.host.opacity == 0
+    assert scanner.host.width == 1 and scanner.host.height == 1
+    scanner.set_preview_visible(True)
+    assert scanner.host is host
+    assert scanner.host.content is camera
+    assert scanner.host.visible is True
+    assert scanner.host.opacity == 1
 
     root = build_kiosk_view(page=page, contexto_usuario={})
     assert isinstance(root, ft.Container)
     assert isinstance(root.data["kiosk_scanner"], KioskQrScanner)
+    kiosk_scanner = root.data["kiosk_scanner"]
+    content = root.content.content
+    assert content.controls[-1] is kiosk_scanner.host
+    assert kiosk_scanner.host.content is kiosk_scanner.camera
     assert len(page.tasks) == 1
 
 

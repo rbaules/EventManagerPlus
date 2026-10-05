@@ -8,7 +8,42 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.navigation_service import parse_app_route
+import views.kiosk_view as kiosk_view
 from views.kiosk_view import KioskPhase, KioskState, is_kiosk_route
+
+
+class FakePage:
+    def __init__(self) -> None:
+        self.route = "/app/kiosk"
+        self.on_route_change = None
+        self.update_calls = 0
+
+    def update(self) -> None:
+        self.update_calls += 1
+
+
+class FakeKioskScanner:
+    def __init__(self, **_kwargs) -> None:
+        self.host = None
+        self.start_calls = 0
+        self.restart_calls = 0
+        self.recover_calls = 0
+        self.preview_visible: list[bool] = []
+
+    def set_preview_visible(self, visible: bool) -> None:
+        self.preview_visible.append(visible)
+
+    def start(self) -> None:
+        self.start_calls += 1
+
+    def restart(self) -> None:
+        self.restart_calls += 1
+
+    def recover_after_reconnect(self) -> None:
+        self.recover_calls += 1
+
+    def close(self) -> None:
+        pass
 
 
 def test_route() -> None:
@@ -70,11 +105,31 @@ def test_error_and_reset() -> None:
     assert state.error_message is None
 
 
+def test_reconnect_is_limited_to_welcome_scan() -> None:
+    original_scanner = kiosk_view.KioskQrScanner
+    kiosk_view.KioskQrScanner = FakeKioskScanner
+    try:
+        root = kiosk_view.build_kiosk_view(page=FakePage(), contexto_usuario={})
+        state = root.data["kiosk_state"]
+        scanner = root.data["kiosk_scanner"]
+        resume = root.data["resume_dashboard"]
+
+        resume()
+        assert scanner.recover_calls == 1
+        assert state.accept_scanned_qr("T3A1")
+        assert state.phase == KioskPhase.RESOLVING
+        resume()
+        assert scanner.recover_calls == 1
+    finally:
+        kiosk_view.KioskQrScanner = original_scanner
+
+
 def main() -> None:
     test_route()
     test_simulated_happy_path_and_selection()
     test_cannot_continue_without_guests()
     test_error_and_reset()
+    test_reconnect_is_limited_to_welcome_scan()
     print("Kiosk view tests passed.")
 
 

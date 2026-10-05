@@ -94,6 +94,21 @@ def construir_contexto_evento_activo(
     return nuevo
 
 
+def construir_contexto_cuenta_activa(
+    contexto: dict[str, Any],
+    cuenta_id: int,
+) -> dict[str, Any]:
+    """Construye un contexto de selector para una cuenta autorizada, sin evento."""
+    nuevo = deepcopy(contexto)
+    for cuenta in nuevo.get("cuentas_permitidas", []) or []:
+        if cuenta.get("cuenta_id") == cuenta_id:
+            nuevo["cuenta_actual"] = cuenta
+            limpiar_evento_activo(nuevo)
+            nuevo["evento_activo_seleccionado"] = False
+            return nuevo
+    raise LookupError("La cuenta seleccionada no está disponible.")
+
+
 def limpiar_evento_activo(contexto: dict[str, Any]) -> None:
     contexto["evento_actual"] = None
     contexto["puede_registrar_llegadas"] = False
