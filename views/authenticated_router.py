@@ -40,6 +40,7 @@ class AuthenticatedViewRouter:
             control = self._kiosk_builder(
                 page=self.page,
                 contexto_usuario=self.contexto_usuario,
+                supabase=self.supabase,
                 on_authenticated_route_change=self.mount_current_route,
             )
         else:

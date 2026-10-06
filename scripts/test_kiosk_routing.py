@@ -64,6 +64,7 @@ def test_direct_entry_and_refresh_mount_kiosk() -> None:
         )
         router.mount_current_route()
         assert calls[0][0] == "kiosk"
+        assert calls[0][1]["supabase"] is router.supabase
         assert page.clean_calls == 1 and page.update_calls == 1
 
 
