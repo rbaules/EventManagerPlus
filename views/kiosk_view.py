@@ -18,6 +18,18 @@ from services.kiosk_background_service import resolve_kiosk_background_url
 from services.navigation_service import parse_app_route
 
 
+KIOSK_WINE = "#971B1F"
+KIOSK_WINE_DARK = "#731116"
+KIOSK_IVORY = "#F8F1E8"
+KIOSK_BLUSH = "#F3D9D0"
+KIOSK_TEXT = "#4B241C"
+KIOSK_BORDER = "#D9C7BC"
+
+# This path is relative to Flet's configured ``assets_dir="assets"``. Keep the
+# panel decoration independent from the signed, event-level background image.
+KIOSK_PANEL_FLORAL_ASSET = "kiosk_panel_floral.png"
+
+
 class KioskPhase(str, Enum):
     WELCOME_SCAN = "WELCOME_SCAN"
     RESOLVING = "RESOLVING"
@@ -57,6 +69,7 @@ class KioskState:
     resolution_id: int = 0
     confirmation_id: int = 0
     confirmed_count: int = 0
+    success_name: str | None = None
 
     def _clear_invitation(self) -> None:
         self.cuenta_id = None
@@ -80,6 +93,7 @@ class KioskState:
         self._clear_invitation()
         self.error_message = None
         self.confirmed_count = 0
+        self.success_name = None
 
     def accept_scanned_qr(self, codigo_qr: str) -> int | None:
         if self.phase != KioskPhase.WELCOME_SCAN:
@@ -90,6 +104,7 @@ class KioskState:
         self._clear_invitation()
         self.error_message = None
         self.confirmed_count = 0
+        self.success_name = None
         self.phase = KioskPhase.RESOLVING
         return self.resolution_id
 
@@ -118,11 +133,21 @@ class KioskState:
         self.error_message = None
         self.phase = KioskPhase.SELECT_GUESTS
 
-    def apply_confirmation_result(self, invitados: list[dict[str, Any]], confirmed_count: int) -> None:
+    def apply_confirmation_result(
+        self,
+        invitados: list[dict[str, Any]],
+        confirmed_count: int,
+        confirmed_guest_ids: set[int],
+    ) -> None:
         self._apply_guests(invitados)
         self.selected_guest_ids.clear()
         self.error_message = None
         self.confirmed_count = confirmed_count
+        self.success_name = format_kiosk_success_name(
+            self.destinatario,
+            self.guests,
+            confirmed_guest_ids,
+        )
         self.phase = KioskPhase.SUCCESS
 
     def set_guest_selected(self, guest_id: int, selected: bool) -> None:
@@ -160,6 +185,50 @@ class KioskState:
                 return f"Mesa: {self.guests[0].mesa_texto}"
             return "Mesa: Sin asignar"
         return "Mesa: Asignada por integrante"
+
+
+def _kiosk_first_name(value: Any) -> str | None:
+    words = str(value or "").strip().split()
+    return words[0] if words else None
+
+
+def format_kiosk_success_name(
+    destinatario: str | None,
+    guests: list[KioskGuest],
+    confirmed_guest_ids: set[int],
+) -> str | None:
+    """Choose the approved SUCCESS greeting without changing arrival state."""
+    if guests and not any(not guest.llegada_confirmada for guest in guests):
+        resolved_destinatario = str(destinatario or "").strip()
+        if resolved_destinatario:
+            return resolved_destinatario
+
+    names = [
+        first_name
+        for guest in guests
+        if guest.guest_id in confirmed_guest_ids
+        if (first_name := _kiosk_first_name(guest.name)) is not None
+    ]
+    if not names:
+        return None
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} y {names[1]}"
+    return f"{', '.join(names[:-1])} y {names[-1]}"
+
+
+def kiosk_success_copy(confirmed_count: int) -> tuple[str, str]:
+    """Return the SUCCESS wording for the guests confirmed in this operation."""
+    if confirmed_count == 1:
+        return (
+            "Esperamos que disfrutes lo que hemos preparado para ti.",
+            "¡Bienvenido(a)!",
+        )
+    return (
+        "Esperamos que disfruten lo que hemos preparado para ustedes.",
+        "¡Bienvenidos!",
+    )
 
 
 def is_kiosk_route(route: str | None) -> bool:
@@ -256,12 +325,19 @@ def build_kiosk_view(
 
     def button(label: str, handler: Any, *, primary: bool = True, disabled: bool = False) -> ft.Control:
         control_type = ft.ElevatedButton if primary else ft.OutlinedButton
+        style = ft.ButtonStyle(
+            text_style=ft.TextStyle(size=18),
+            color=ft.Colors.WHITE if primary else KIOSK_WINE,
+            bgcolor=KIOSK_WINE if primary else KIOSK_IVORY,
+            side=None if primary else ft.BorderSide(width=1, color=KIOSK_WINE),
+            shape=ft.RoundedRectangleBorder(radius=16),
+        )
         return control_type(
             label,
             on_click=handler,
             disabled=disabled,
             height=56,
-            style=ft.ButtonStyle(text_style=ft.TextStyle(size=18)),
+            style=style,
         )
 
     def render() -> None:
@@ -272,51 +348,116 @@ def build_kiosk_view(
             scanner.set_preview_visible(True)
             qr_guide.visible = True
             controls = [
-                ft.Text("Bienvenido", size=34, weight=ft.FontWeight.BOLD),
-                ft.Text("Escanea el codigo QR de tu invitacion", size=22, text_align=ft.TextAlign.CENTER),
+                ft.Text("¡Bienvenidos!", size=34, weight=ft.FontWeight.BOLD, color=KIOSK_WINE),
+                ft.Text(
+                    "Escanea el código QR de tu invitación",
+                    size=22,
+                    color=KIOSK_TEXT,
+                    text_align=ft.TextAlign.CENTER,
+                ),
             ]
         elif phase == KioskPhase.RESOLVING:
             scanner.set_preview_visible(False)
             qr_guide.visible = False
             controls = [
                 ft.ProgressRing(width=48, height=48),
-                ft.Text("Estamos buscando tu invitacion...", size=24, text_align=ft.TextAlign.CENTER),
+                ft.Text("Estamos buscando tu invitación...", size=24, color=KIOSK_TEXT, text_align=ft.TextAlign.CENTER),
             ]
         elif phase == KioskPhase.SELECT_GUESTS:
             scanner.set_preview_visible(False)
             qr_guide.visible = False
+            guest_cards_available_width = content_width - 64
+            guest_card_width = (
+                guest_cards_available_width
+                if guest_cards_available_width <= 420
+                else round(guest_cards_available_width * 2 / 3)
+            )
             guest_controls = []
             for guest in state.guests:
                 label = guest.name
                 if guest.llegada_confirmada:
                     label = f"{label} — Ya llegó"
+                selected = guest.selected
+                selectable = guest.selectable
                 guest_controls.append(
-                    ft.Checkbox(
-                        label=label,
-                        value=guest.selected,
-                        disabled=not guest.selectable,
-                        label_style=ft.TextStyle(size=20),
-                        on_change=lambda event, guest_id=guest.guest_id: toggle_guest(
-                            guest_id, bool(event.control.value)
+                    ft.Container(
+                        width=guest_card_width,
+                        padding=ft.Padding(left=12, top=4, right=12, bottom=4),
+                        bgcolor=(KIOSK_BLUSH if selected else KIOSK_IVORY),
+                        border=ft.Border.all(
+                            width=1,
+                            color=(KIOSK_WINE if selected else KIOSK_BORDER),
                         ),
+                        border_radius=12,
+                        ink=selectable,
+                        ink_color=KIOSK_BLUSH,
+                        on_click=(
+                            (
+                                lambda _event, guest_id=guest.guest_id, target_selected=not selected: toggle_guest(
+                                    guest_id, target_selected
+                                )
+                            )
+                            if selectable
+                            else None
+                        ),
+                        content=ft.Checkbox(
+                            label=label,
+                            value=selected,
+                            disabled=not selectable,
+                            label_style=ft.TextStyle(
+                                size=20,
+                                color=(KIOSK_WINE if selected else KIOSK_TEXT),
+                            ),
+                            active_color=KIOSK_WINE,
+                            check_color=ft.Colors.WHITE,
+                            border_side=ft.BorderSide(width=1, color=KIOSK_BORDER),
+                            semantics_label=label,
+                            on_change=lambda event, guest_id=guest.guest_id: toggle_guest(
+                                guest_id, bool(event.control.value)
+                            ),
+                        ),
+                        data={
+                            "kiosk": "guest_card",
+                            "guest_id": guest.guest_id,
+                            "selectable": selectable,
+                        },
                     )
                 )
+            guest_actions = ft.Row(
+                [
+                    button("Seleccionar a todos", lambda _event: transition(state.select_all_guests), primary=False),
+                    button(
+                        "Confirmar llegada",
+                        lambda _event: start_confirmation(),
+                        disabled=not can_confirm_selection(),
+                    ),
+                    button("Volver a escanear", lambda _event: reset_kiosk(), primary=False),
+                ],
+                width=content_width - 64,
+                alignment=ft.MainAxisAlignment.CENTER,
+                wrap=True,
+                spacing=12,
+                run_spacing=12,
+                run_alignment=ft.MainAxisAlignment.CENTER,
+                data={"kiosk": "guest_actions"},
+            )
             controls = [
-                ft.Text(state.destinatario or "Invitacion", size=30, weight=ft.FontWeight.BOLD),
-                ft.Text(state.table_heading(), size=22),
+                ft.Text(state.destinatario or "Invitación", size=30, weight=ft.FontWeight.BOLD, color=KIOSK_WINE),
+                ft.Text(state.table_heading(), size=22, color=KIOSK_TEXT),
                 ft.Text(
                     "Selecciona los invitados que te acompañan y confirma su llegada",
                     size=20,
+                    color=KIOSK_TEXT,
                     text_align=ft.TextAlign.CENTER,
                 ),
-                *guest_controls,
-                button("Seleccionar a todos", lambda _event: transition(state.select_all_guests), primary=False),
-                button(
-                    "Confirmar llegada",
-                    lambda _event: start_confirmation(),
-                    disabled=not can_confirm_selection(),
+                ft.Column(
+                    guest_controls,
+                    width=guest_cards_available_width,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=8,
+                    data={"kiosk": "guest_cards"},
                 ),
-                button("Volver a escanear", lambda _event: reset_kiosk(), primary=False),
+                guest_actions,
             ]
             if state.error_message:
                 controls.insert(3, ft.Text(state.error_message, size=18, color=ft.Colors.ERROR, text_align=ft.TextAlign.CENTER))
@@ -328,18 +469,41 @@ def build_kiosk_view(
                 ft.Text(
                     f"Confirmando {len(state.selected_guest_ids)} invitados...",
                     size=24,
+                    color=KIOSK_TEXT,
                     text_align=ft.TextAlign.CENTER,
                 ),
             ]
         elif phase == KioskPhase.SUCCESS:
             scanner.set_preview_visible(False)
             qr_guide.visible = False
-            invitados = "invitado" if state.confirmed_count == 1 else "invitados"
-            controls = [
-                ft.Text("Llegada confirmada", size=30, weight=ft.FontWeight.BOLD),
-                ft.Text(f"{state.confirmed_count} {invitados} registrados", size=22),
-                ft.Text(state.table_heading(), size=22),
+            success_detail, success_welcome = kiosk_success_copy(state.confirmed_count)
+            success_controls = [
+                *(
+                    [ft.Text(f"{state.success_name}:", size=30, weight=ft.FontWeight.BOLD, color=KIOSK_WINE)]
+                    if state.success_name
+                    else []
+                ),
+                ft.Text("¡Gracias por acompañarnos!", size=28, weight=ft.FontWeight.BOLD, color=KIOSK_WINE),
+                ft.Text(
+                    success_detail,
+                    size=20,
+                    color=KIOSK_TEXT,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Text(success_welcome, size=32, weight=ft.FontWeight.BOLD, color=KIOSK_WINE),
+                ft.Text(state.table_heading(), size=18, color=KIOSK_TEXT),
                 button("Volver a escanear", lambda _event: reset_kiosk(), primary=False),
+            ]
+            controls = [
+                ft.Container(
+                    padding=ft.Padding(left=0, top=96, right=0, bottom=0),
+                    content=ft.Column(
+                        success_controls,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=20,
+                    ),
+                    data={"kiosk": "success_content"},
+                )
             ]
         else:
             scanner.set_preview_visible(False)
@@ -463,7 +627,11 @@ def build_kiosk_view(
                     print(f"[KIOSK][CONFIRM] confirmation_id={confirmation_id} stale_result_discarded")
                     return
                 if resultado.ok:
-                    state.apply_confirmation_result(resultado.invitados, resultado.confirmados)
+                    state.apply_confirmation_result(
+                        resultado.invitados,
+                        resultado.confirmados,
+                        {int(item["invitado_id"]) for item in invitados},
+                    )
                     print(
                         f"[KIOSK][CONFIRM] confirmation_id={confirmation_id} completed "
                         f"confirmed_count={resultado.confirmados}"
@@ -609,7 +777,7 @@ def build_kiosk_view(
         content=ft.Container(
             width=200,
             height=200,
-            border=ft.Border.all(width=3, color=ft.Colors.PRIMARY),
+            border=ft.Border.all(width=3, color=KIOSK_WINE),
             border_radius=16,
             ignore_interactions=True,
             data={"kiosk": "qr_distance_guide"},
@@ -635,9 +803,23 @@ def build_kiosk_view(
     content_width = min(680, max(280, page_width - 32)) if page_width else 680
     content_box = ft.Container(
         width=content_width,
-        padding=32,
+        # Keep every screen's functional column clear of the floral art in the
+        # panel's upper-right corner without changing individual controls.
+        padding=ft.Padding(left=32, top=64, right=32, bottom=32),
         border_radius=24,
-        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+        bgcolor=KIOSK_IVORY,
+        image=ft.DecorationImage(
+            src=KIOSK_PANEL_FLORAL_ASSET,
+            fit=ft.BoxFit.COVER,
+            alignment=ft.Alignment.CENTER,
+        ),
+        border=ft.Border.all(width=1, color=KIOSK_BORDER),
+        shadow=ft.BoxShadow(
+            blur_radius=16,
+            spread_radius=0,
+            color="#24000000",
+            offset=ft.Offset(0, 4),
+        ),
         content=content,
         data={"kiosk": "content_box", "width": content_width},
     )

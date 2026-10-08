@@ -259,6 +259,40 @@ def test_route() -> None:
     assert not is_kiosk_route("/app/dashboard")
 
 
+def test_success_greeting_names_follow_updated_group_state() -> None:
+    guest = kiosk_view.KioskGuest
+    all_arrived = [
+        guest(1, "Karla López", 1, "Mesa 1", True, "Llegó", None),
+        guest(2, "Aaron Pérez", 1, "Mesa 1", True, "Llegó", None),
+    ]
+    assert kiosk_view.format_kiosk_success_name("Karla y Aaron", all_arrived, {1, 2}) == "Karla y Aaron"
+
+    partial = [
+        guest(1, "Karla López", 1, "Mesa 1", True, "Llegó", None),
+        guest(2, "Aaron Pérez", 1, "Mesa 1", True, "Llegó", None),
+        guest(3, "José Díaz", 1, "Mesa 1", False, "Pendiente", None),
+    ]
+    assert kiosk_view.format_kiosk_success_name("Familia", partial, {1}) == "Karla"
+    assert kiosk_view.format_kiosk_success_name("Familia", partial, {1, 2}) == "Karla y Aaron"
+    assert kiosk_view.format_kiosk_success_name("Familia", partial, {1, 2, 3}) == "Karla, Aaron y José"
+    assert kiosk_view.format_kiosk_success_name(None, partial, set()) is None
+    assert kiosk_view.kiosk_success_copy(1) == (
+        "Esperamos que disfrutes lo que hemos preparado para ti.",
+        "¡Bienvenido(a)!",
+    )
+    assert kiosk_view.kiosk_success_copy(2) == (
+        "Esperamos que disfruten lo que hemos preparado para ustedes.",
+        "¡Bienvenidos!",
+    )
+
+    all_arrived_single = [guest(1, "Karla López", 1, "Mesa 1", True, "Llegó", None)]
+    assert kiosk_view.format_kiosk_success_name("Familia Karla", all_arrived_single, {1}) == "Familia Karla"
+    assert kiosk_view.kiosk_success_copy(1) == (
+        "Esperamos que disfrutes lo que hemos preparado para ti.",
+        "¡Bienvenido(a)!",
+    )
+
+
 async def test_real_resolution_loads_active_group_and_preserves_arrival_state() -> None:
     page = FakePage()
     db = FakeSupabase()
@@ -430,7 +464,21 @@ async def test_select_guests_visual_contract_and_select_all_pending_only() -> No
     assert (guide.content.width, guide.content.height, guide.content.ignore_interactions) == (200, 200, True)
     assert guide.content.width < stage.width and guide.content.height < stage.height
     assert content_box.width == 680
+    assert content_box.bgcolor == kiosk_view.KIOSK_IVORY
+    assert (content_box.padding.left, content_box.padding.top, content_box.padding.right, content_box.padding.bottom) == (
+        32,
+        64,
+        32,
+        32,
+    )
+    assert isinstance(content_box.image, kiosk_view.ft.DecorationImage)
+    assert content_box.image.src == "kiosk_panel_floral.png"
+    assert content_box.image.fit == kiosk_view.ft.BoxFit.COVER
+    assert guide.content.border.top.color == kiosk_view.KIOSK_WINE
     assert guide.visible
+
+    welcome_text = [node.value for node in walk(root) if isinstance(node, kiosk_view.ft.Text)]
+    assert "¡Bienvenidos!" in welcome_text
 
     root.data["kiosk_scanner"].on_qr_finalized("AB12")
     await drain(page)
@@ -438,10 +486,157 @@ async def test_select_guests_visual_contract_and_select_all_pending_only() -> No
     text_values = [node.value for node in walk(root) if isinstance(node, kiosk_view.ft.Text)]
     assert "Selecciona los invitados que te acompa\u00f1an y confirma su llegada" in text_values
     assert "Selecciona los integrantes pendientes" not in text_values
+    cards = [
+        node
+        for node in walk(root)
+        if isinstance(node, kiosk_view.ft.Container)
+        and isinstance(getattr(node, "data", None), dict)
+        and node.data.get("kiosk") == "guest_card"
+    ]
+    assert len(cards) == 3
+    cards_by_id = {card.data["guest_id"]: card for card in cards}
+    pending_card = cards_by_id[7]
+    arrived_card = cards_by_id[8]
+    assert pending_card.bgcolor == kiosk_view.KIOSK_IVORY
+    assert pending_card.border.top.color == kiosk_view.KIOSK_BORDER
+    assert isinstance(pending_card.content, kiosk_view.ft.Checkbox)
+    assert pending_card.content.value is False
+    assert pending_card.content.check_color == kiosk_view.ft.Colors.WHITE
+    assert arrived_card.on_click is None
+    assert arrived_card.ink is False
+    assert arrived_card.content.disabled is True
+    assert "Ya llegó" in arrived_card.content.label
+
+    # Checkbox and its containing card target the same selected value, so a
+    # bubbled tap cannot invert the guest twice.
+    pending_card.content.on_change(SimpleNamespace(control=SimpleNamespace(value=True)))
+    pending_card.on_click(SimpleNamespace())
+    assert root.data["kiosk_state"].selected_guest_ids == {7}
+    selected_card = next(
+        node
+        for node in walk(root)
+        if isinstance(node, kiosk_view.ft.Container)
+        and isinstance(getattr(node, "data", None), dict)
+        and node.data.get("kiosk") == "guest_card"
+        and node.data.get("guest_id") == 7
+    )
+    assert selected_card.bgcolor == kiosk_view.KIOSK_BLUSH
+    assert selected_card.border.top.color == kiosk_view.KIOSK_WINE
+    assert selected_card.content.value is True
+    assert selected_card.content.label_style.color == kiosk_view.KIOSK_WINE
+    selected_card.on_click(SimpleNamespace())
+    assert root.data["kiosk_state"].selected_guest_ids == set()
     select_all = button_with_label(root, "Seleccionar a todos")
+    confirm = button_with_label(root, "Confirmar llegada")
+    assert confirm.style.bgcolor == kiosk_view.KIOSK_WINE
+    assert confirm.style.color == kiosk_view.ft.Colors.WHITE
+    assert select_all.style.color == kiosk_view.KIOSK_WINE
+    assert select_all.style.side.color == kiosk_view.KIOSK_WINE
     select_all.on_click(SimpleNamespace())
     assert root.data["kiosk_state"].selected_guest_ids == {7, 9}
     assert 8 not in root.data["kiosk_state"].selected_guest_ids
+    cards_after_select_all = {
+        node.data["guest_id"]: node
+        for node in walk(root)
+        if isinstance(node, kiosk_view.ft.Container)
+        and isinstance(getattr(node, "data", None), dict)
+        and node.data.get("kiosk") == "guest_card"
+    }
+    assert cards_after_select_all[7].bgcolor == kiosk_view.KIOSK_BLUSH
+    assert cards_after_select_all[9].bgcolor == kiosk_view.KIOSK_BLUSH
+    assert cards_after_select_all[8].content.disabled is True
+
+
+async def test_select_guests_five_guest_actions_wrap_without_touching_camera() -> None:
+    page = FakePage(width=1440)
+    long_name = "Invitado con un nombre particularmente largo para verificar el ancho disponible"
+    invitados = [
+        {
+            "invitado_id": guest_id,
+            "nombre": long_name if guest_id == 5 else f"Invitado {guest_id}",
+            "mesa_id": 4,
+            "mesa_nombre": "Mesa 4",
+            "llegada_confirmada": False,
+        }
+        for guest_id in range(1, 6)
+    ]
+    root = build(page, FakeSupabase(group_payload={
+        "ok": True,
+        "codigo_resultado": "ARRIVAL_GROUP_LOADED",
+        "destinatario": "Familia Cinco",
+        "invitados": invitados,
+    }))
+    scanner = root.data["kiosk_scanner"]
+    camera_host = scanner.host
+    camera_stage = root.data["kiosk_camera_stage"]
+
+    scanner.on_qr_finalized("AB12")
+    await drain(page)
+
+    checkboxes = [node for node in walk(root) if isinstance(node, kiosk_view.ft.Checkbox)]
+    assert [checkbox.label for checkbox in checkboxes] == [
+        f"Invitado {guest_id}" if guest_id != 5 else long_name
+        for guest_id in range(1, 6)
+    ]
+    cards_column = next(node for node in walk(root) if getattr(node, "data", None) == {"kiosk": "guest_cards"})
+    assert isinstance(cards_column, kiosk_view.ft.Column)
+    assert cards_column.spacing == 8
+    assert cards_column.width == root.data["kiosk_content_box"].width - 64
+    assert cards_column.horizontal_alignment == kiosk_view.ft.CrossAxisAlignment.CENTER
+    cards = [
+        node
+        for node in walk(root)
+        if isinstance(node, kiosk_view.ft.Container)
+        and isinstance(getattr(node, "data", None), dict)
+        and node.data.get("kiosk") == "guest_card"
+    ]
+    assert len(cards) == 5
+    assert all(card.width == round(cards_column.width * 2 / 3) for card in cards)
+    assert all(card.width <= cards_column.width for card in cards)
+    actions = next(node for node in walk(root) if getattr(node, "data", None) == {"kiosk": "guest_actions"})
+    assert isinstance(actions, kiosk_view.ft.Row)
+    assert actions.wrap is True
+    assert actions.width == root.data["kiosk_content_box"].width - 64
+    assert [action.content for action in actions.controls] == [
+        "Seleccionar a todos",
+        "Confirmar llegada",
+        "Volver a escanear",
+    ]
+    assert camera_stage.controls[0] is camera_host
+    assert scanner.host is camera_host
+
+
+async def test_guest_cards_use_available_width_on_narrow_layout() -> None:
+    page = FakePage(width=320)
+    long_name = "Invitado con un nombre largo que conserva el ancho disponible en pantalla estrecha"
+    root = build(page, FakeSupabase(group_payload={
+        "ok": True,
+        "codigo_resultado": "ARRIVAL_GROUP_LOADED",
+        "destinatario": "Familia Estrecha",
+        "invitados": [
+            {
+                "invitado_id": 71,
+                "nombre": long_name,
+                "mesa_id": 4,
+                "mesa_nombre": "Mesa 4",
+                "llegada_confirmada": False,
+            }
+        ],
+    }))
+    root.data["kiosk_scanner"].on_qr_finalized("AB12")
+    await drain(page)
+
+    cards_column = next(node for node in walk(root) if getattr(node, "data", None) == {"kiosk": "guest_cards"})
+    card = next(
+        node
+        for node in walk(root)
+        if isinstance(node, kiosk_view.ft.Container)
+        and isinstance(getattr(node, "data", None), dict)
+        and node.data.get("guest_id") == 71
+    )
+    assert cards_column.width == root.data["kiosk_content_box"].width - 64
+    assert card.width == cards_column.width
+    assert card.content.label == long_name
 
 
 async def test_kiosk_background_is_event_scoped_and_non_blocking() -> None:
@@ -566,8 +761,21 @@ async def test_confirmation_batch_success_and_double_click_guard() -> None:
     assert writes == [{"p_cuenta_id": 2, "p_evento_id": 9, "p_invitacion_id": 31, "p_invitado_ids": [7, 9]}]
     assert state.phase == KioskPhase.SUCCESS
     assert state.confirmed_count == 2
+    assert state.success_name == "Familia Real"
     assert state.selected_guest_ids == set()
     assert all(guest.llegada_confirmada for guest in state.guests)
+    success_content = next(node for node in walk(root) if getattr(node, "data", None) == {"kiosk": "success_content"})
+    assert (success_content.padding.left, success_content.padding.top, success_content.padding.right, success_content.padding.bottom) == (
+        0,
+        96,
+        0,
+        0,
+    )
+    text_values = [node.value for node in walk(root) if isinstance(node, kiosk_view.ft.Text)]
+    assert "Familia Real:" in text_values
+    assert "¡Gracias por acompañarnos!" in text_values
+    assert "Esperamos que disfruten lo que hemos preparado para ustedes." in text_values
+    assert "¡Bienvenidos!" in text_values
 
 
 async def test_confirmation_rejects_arrived_guest_and_backend_error_without_retry() -> None:
@@ -728,6 +936,8 @@ async def main_async() -> None:
     await test_selected_invitation_can_return_to_scan_and_load_a_new_qr()
     await test_table_presentation_is_invitation_only()
     await test_select_guests_visual_contract_and_select_all_pending_only()
+    await test_select_guests_five_guest_actions_wrap_without_touching_camera()
+    await test_guest_cards_use_available_width_on_narrow_layout()
     await test_kiosk_background_is_event_scoped_and_non_blocking()
     await test_kiosk_background_failure_keeps_fallback_and_scanner_running()
     await test_stale_kiosk_background_result_is_discarded_after_route_exit()
@@ -746,6 +956,7 @@ async def main_async() -> None:
 
 def main() -> None:
     test_route()
+    test_success_greeting_names_follow_updated_group_state()
     asyncio.run(main_async())
     print("Kiosk view tests passed.")
 
