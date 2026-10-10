@@ -3,18 +3,27 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
+from time import perf_counter
 from typing import Any, Callable
 from urllib.parse import urlparse
 
 import flet as ft
 
 from components.kiosk_qr_scanner import KioskQrScanner
+from components.kiosk_route_map import build_kiosk_route_map, build_route_overlay_data_url
+from components.kiosk_route_map_viewer import MAX_ZOOM, MIN_ZOOM, build_kiosk_route_map_viewer
 from services.invitado_service import (
     cargar_grupo_invitacion,
     confirmar_llegadas_invitados,
     resolver_invitacion_qr,
 )
 from services.kiosk_background_service import resolve_kiosk_background_url
+from services.kiosk_map_service import ResultadoRuta, calcular_ruta
+from services.kiosk_route_map_service import (
+    MapAssetCache,
+    load_kiosk_route_map_data_url,
+    resolve_kiosk_route_map_url,
+)
 from services.navigation_service import parse_app_route
 
 
@@ -70,6 +79,22 @@ class KioskState:
     confirmation_id: int = 0
     confirmed_count: int = 0
     success_name: str | None = None
+    route_map_generation: int = 0
+    route_result: ResultadoRuta | None = None
+    map_signed_url: str | None = None
+    map_preview_src: str | None = None
+    map_preview_overlay_src: str | None = None
+    map_preview_ready: bool = False
+    map_loading: bool = False
+
+    def clear_route_map(self) -> None:
+        self.route_map_generation += 1
+        self.route_result = None
+        self.map_signed_url = None
+        self.map_preview_src = None
+        self.map_preview_overlay_src = None
+        self.map_preview_ready = False
+        self.map_loading = False
 
     def _clear_invitation(self) -> None:
         self.cuenta_id = None
@@ -94,6 +119,7 @@ class KioskState:
         self.error_message = None
         self.confirmed_count = 0
         self.success_name = None
+        self.clear_route_map()
 
     def accept_scanned_qr(self, codigo_qr: str) -> int | None:
         if self.phase != KioskPhase.WELCOME_SCAN:
@@ -105,6 +131,7 @@ class KioskState:
         self.error_message = None
         self.confirmed_count = 0
         self.success_name = None
+        self.clear_route_map()
         self.phase = KioskPhase.RESOLVING
         return self.resolution_id
 
@@ -150,6 +177,19 @@ class KioskState:
         )
         self.phase = KioskPhase.SUCCESS
 
+    def success_mesa_id(self) -> int | None:
+        mesa_ids = {guest.mesa_id for guest in self.guests}
+        if len(mesa_ids) != 1:
+            return None
+        mesa_id = next(iter(mesa_ids))
+        if isinstance(mesa_id, bool):
+            return None
+        try:
+            normalized_mesa_id = int(mesa_id)
+        except (TypeError, ValueError):
+            return None
+        return normalized_mesa_id if normalized_mesa_id > 0 else None
+
     def set_guest_selected(self, guest_id: int, selected: bool) -> None:
         for guest in self.guests:
             if guest.guest_id != guest_id:
@@ -172,6 +212,7 @@ class KioskState:
                 self.selected_guest_ids.add(guest.guest_id)
 
     def show_error(self, message: str = "No pudimos leer esta invitacion.") -> None:
+        self.clear_route_map()
         self.qr_code = None
         self._clear_invitation()
         self.error_message = message
@@ -265,7 +306,19 @@ def build_kiosk_view(
     confirmation_owner: object | None = None
     background_task: Any = None
     background_owner: object | None = None
+    route_map_task: Any = None
+    route_map_owner: object | None = None
+    map_asset_cache = MapAssetCache()
+    viewer_timeout_task: Any = None
+    viewer_owner: object | None = None
+    viewer_overlay: ft.Control | None = None
+    viewer_zoom = MIN_ZOOM
     has_rendered = False
+
+    # The real Flet Page exposes this list.  The small test Page deliberately
+    # mirrors it so the viewer is verified without any browser or camera.
+    if not hasattr(page, "overlay"):
+        page.overlay = []
 
     def active_event() -> tuple[dict[str, Any], tuple[int, int]] | None:
         evento = contexto_usuario.get("evento_actual")
@@ -322,6 +375,140 @@ def build_kiosk_view(
         confirmation_task = None
         if task is not None and not task.done():
             task.cancel()
+
+    def route_map_is_current(
+        owner: object,
+        route_map_generation: int,
+        event_key: tuple[int, int],
+        invitation_id: int,
+    ) -> bool:
+        current = active_event()
+        return (
+            route_map_owner is owner
+            and state.route_map_generation == route_map_generation
+            and state.phase in {KioskPhase.SELECT_GUESTS, KioskPhase.CONFIRMING, KioskPhase.SUCCESS}
+            and state.cuenta_id == event_key[0]
+            and state.evento_id == event_key[1]
+            and state.invitation_id == invitation_id
+            and current is not None
+            and current[1] == event_key
+        )
+
+    def cancel_route_map() -> None:
+        nonlocal route_map_owner, route_map_task
+        route_map_owner = None
+        task = route_map_task
+        route_map_task = None
+        state.clear_route_map()
+        close_route_map_viewer(reason="cleanup", update=False)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def viewer_dimensions() -> int:
+        try:
+            page_width = float(getattr(page, "width", 0) or 0)
+        except (TypeError, ValueError, RuntimeError):
+            page_width = 0
+        return min(1000, max(320, round(page_width - 32))) if page_width else 900
+
+    def viewer_is_current(owner: object) -> bool:
+        return (
+            viewer_owner is owner
+            and state.phase == KioskPhase.SUCCESS
+            and state.route_result is not None
+            and state.map_preview_ready
+            and state.map_preview_src is not None
+        )
+
+    def replace_viewer_overlay() -> None:
+        nonlocal viewer_overlay
+        if viewer_owner is None or state.route_result is None or not state.map_preview_ready or not state.map_preview_src:
+            return
+        overlay = getattr(page, "overlay", None)
+        if not isinstance(overlay, list):
+            return
+        if viewer_overlay is not None and viewer_overlay in overlay:
+            overlay.remove(viewer_overlay)
+        viewer_overlay = build_kiosk_route_map_viewer(
+            image_url=state.map_preview_src,
+            points=state.route_result.points,
+            width=viewer_dimensions(),
+            zoom=viewer_zoom,
+            on_close=lambda _event: close_route_map_viewer(reason="manual"),
+            on_zoom_out=lambda _event: set_route_map_viewer_zoom(viewer_zoom - 0.5),
+            on_zoom_reset=lambda _event: set_route_map_viewer_zoom(MIN_ZOOM),
+            on_zoom_in=lambda _event: set_route_map_viewer_zoom(viewer_zoom + 0.5),
+        )
+        overlay.append(viewer_overlay)
+
+    def set_route_map_viewer_zoom(target_zoom: float) -> None:
+        nonlocal viewer_zoom
+        if viewer_owner is None:
+            return
+        viewer_zoom = max(MIN_ZOOM, min(MAX_ZOOM, round(target_zoom * 2) / 2))
+        try:
+            replace_viewer_overlay()
+        except (TypeError, ValueError) as ex:
+            print(f"[KIOSK-MAP] viewer unavailable type={type(ex).__name__}")
+            close_route_map_viewer(reason="cleanup", update=False)
+            return
+        page.update()
+
+    def close_route_map_viewer(*, reason: str, update: bool = True) -> None:
+        nonlocal viewer_owner, viewer_timeout_task, viewer_overlay, viewer_zoom
+        owner = viewer_owner
+        viewer_owner = None
+        viewer_zoom = MIN_ZOOM
+        timeout_task = viewer_timeout_task
+        viewer_timeout_task = None
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        if timeout_task is not None and not timeout_task.done() and timeout_task is not current_task:
+            timeout_task.cancel()
+        overlay = getattr(page, "overlay", None)
+        if isinstance(overlay, list) and viewer_overlay is not None and viewer_overlay in overlay:
+            overlay.remove(viewer_overlay)
+        viewer_overlay = None
+        if owner is not None and reason in {"manual", "timeout"}:
+            print(f"[KIOSK-MAP] viewer closed {reason}")
+        if update:
+            page.update()
+
+    def open_route_map_viewer() -> None:
+        nonlocal viewer_owner, viewer_timeout_task, viewer_zoom
+        if viewer_owner is not None or state.phase != KioskPhase.SUCCESS:
+            return
+        if state.route_result is None or not state.map_preview_ready or not state.map_preview_src:
+            return
+        viewer_owner = object()
+        viewer_zoom = MIN_ZOOM
+        owner = viewer_owner
+        try:
+            replace_viewer_overlay()
+        except (TypeError, ValueError) as ex:
+            print(f"[KIOSK-MAP] viewer unavailable type={type(ex).__name__}")
+            close_route_map_viewer(reason="cleanup", update=False)
+            return
+        print("[KIOSK-MAP] viewer opened")
+        page.update()
+
+        async def auto_close_viewer() -> None:
+            nonlocal viewer_timeout_task
+            try:
+                await asyncio.sleep(15)
+                if not viewer_is_current(owner):
+                    print("[KIOSK-MAP] viewer stale timeout ignored")
+                    return
+                close_route_map_viewer(reason="timeout")
+            except asyncio.CancelledError:
+                raise
+            finally:
+                if viewer_timeout_task is asyncio.current_task():
+                    viewer_timeout_task = None
+
+        viewer_timeout_task = page.run_task(auto_close_viewer)
 
     def button(label: str, handler: Any, *, primary: bool = True, disabled: bool = False) -> ft.Control:
         control_type = ft.ElevatedButton if primary else ft.OutlinedButton
@@ -492,15 +679,46 @@ def build_kiosk_view(
                 ),
                 ft.Text(success_welcome, size=32, weight=ft.FontWeight.BOLD, color=KIOSK_WINE),
                 ft.Text(state.table_heading(), size=18, color=KIOSK_TEXT),
-                button("Volver a escanear", lambda _event: reset_kiosk(), primary=False),
             ]
+            if state.map_preview_ready and state.route_result is not None and state.map_preview_src:
+                try:
+                    thumbnail_width = min(340, max(200, content_width - 64))
+                    success_controls.append(
+                        ft.Text(
+                            spans=[
+                                ft.TextSpan(
+                                    "Para conocer cómo llegar a su mesa",
+                                    style=ft.TextStyle(weight=ft.FontWeight.BOLD),
+                                ),
+                                ft.TextSpan(", seleccione el mapa"),
+                            ],
+                            size=16,
+                            color=KIOSK_TEXT,
+                            text_align=ft.TextAlign.CENTER,
+                            semantics_label="Para conocer cómo llegar a su mesa, seleccione el mapa",
+                            data={"kiosk": "route_map_instruction"},
+                        )
+                    )
+                    success_controls.append(
+                        build_kiosk_route_map(
+                            image_url=state.map_preview_src,
+                            points=state.route_result.points,
+                            width=thumbnail_width,
+                            overlay_url=state.map_preview_overlay_src,
+                            on_click=lambda _event: open_route_map_viewer(),
+                            data={"kiosk": "route_map_thumbnail", "width": thumbnail_width},
+                        )
+                    )
+                except (TypeError, ValueError) as ex:
+                    print(f"[KIOSK-MAP] unavailable code=MAP_RENDER_ERROR type={type(ex).__name__}")
+            success_controls.append(button("Volver a escanear", lambda _event: reset_kiosk(), primary=False))
             controls = [
                 ft.Container(
-                    padding=ft.Padding(left=0, top=96, right=0, bottom=0),
+                    padding=ft.Padding(left=0, top=48, right=0, bottom=0),
                     content=ft.Column(
                         success_controls,
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=20,
+                        spacing=12,
                     ),
                     data={"kiosk": "success_content"},
                 )
@@ -648,6 +866,8 @@ def build_kiosk_view(
                         state.phase = KioskPhase.SELECT_GUESTS
                     print(f"[KIOSK][CONFIRM] confirmation_id={confirmation_id} failed code={resultado.estado}")
                 render()
+                if state.phase == KioskPhase.SUCCESS:
+                    start_success_route_map()
             except asyncio.CancelledError:
                 raise
             except Exception as ex:
@@ -730,6 +950,7 @@ def build_kiosk_view(
                 state.apply_group(group.invitacion, group.invitados)
                 print(f"[KIOSK][RESOLVE] resolution_id={resolution_id} completed")
                 render()
+                start_route_map_prefetch()
             except asyncio.CancelledError:
                 raise
             except Exception as ex:
@@ -760,6 +981,7 @@ def build_kiosk_view(
     def on_kiosk_camera_error(message: str) -> None:
         cancel_resolution()
         cancel_confirmation()
+        cancel_route_map()
         state.show_error(message)
         scanner.set_preview_visible(False)
         render()
@@ -907,11 +1129,136 @@ def build_kiosk_view(
         if background_owner is owner:
             background_task = task
 
+    def start_route_map_prefetch() -> None:
+        """Prepare an invitation route while SELECT_GUESTS remains interactive."""
+        nonlocal route_map_owner, route_map_task
+        if route_map_owner is not None or route_map_task is not None or state.map_preview_ready:
+            return
+        mesa_id = state.success_mesa_id()
+        captured = active_event()
+        if mesa_id is None:
+            print("[KIOSK-MAP] unavailable code=MAP_MESA_UNAVAILABLE")
+            return
+        if captured is None or supabase is None:
+            print("[KIOSK-MAP] unavailable code=MAP_CONTEXT_UNAVAILABLE")
+            return
+        _evento, event_key = captured
+        if event_key != (state.cuenta_id, state.evento_id):
+            print("[KIOSK-MAP] unavailable code=MAP_CONTEXT_MISMATCH")
+            return
+        if state.invitation_id is None:
+            print("[KIOSK-MAP] unavailable code=MAP_INVITATION_UNAVAILABLE")
+            return
+        owner = object()
+        route_map_owner = owner
+        route_map_generation = state.route_map_generation
+        invitation_id = state.invitation_id
+        state.map_loading = True
+
+        async def prefetch_route_map() -> None:
+            nonlocal route_map_owner, route_map_task
+            try:
+                route_started = perf_counter()
+                route_result = await asyncio.to_thread(
+                    calcular_ruta,
+                    account_id=event_key[0],
+                    event_id=event_key[1],
+                    mesa_id=mesa_id,
+                )
+                print(
+                    "[KIOSK-MAP][PERF] stage=calcular_ruta "
+                    f"duration_ms={(perf_counter() - route_started) * 1000:.1f}"
+                )
+                if not route_map_is_current(owner, route_map_generation, event_key, invitation_id):
+                    print("[KIOSK-MAP] stale task ignored")
+                    return
+                if not route_result.ok:
+                    state.map_loading = False
+                    print(f"[KIOSK-MAP] unavailable code={route_result.codigo}")
+                    render()
+                    return
+                if not route_result.storage_bucket or not route_result.storage_path:
+                    state.map_loading = False
+                    print("[KIOSK-MAP] unavailable code=MAP_STORAGE_PATH_UNAVAILABLE")
+                    render()
+                    return
+                asset = await asyncio.to_thread(
+                    map_asset_cache.get_or_load,
+                    supabase,
+                    route_result.storage_bucket,
+                    route_result.storage_path,
+                    resolve_url=resolve_kiosk_route_map_url,
+                    load_data_url=load_kiosk_route_map_data_url,
+                )
+                if not route_map_is_current(owner, route_map_generation, event_key, invitation_id):
+                    print("[KIOSK-MAP] stale task ignored")
+                    return
+                if asset is None:
+                    state.map_loading = False
+                    print("[KIOSK-MAP] unavailable code=MAP_IMAGE_UNAVAILABLE")
+                    render()
+                    return
+                thumbnail_width = min(340, max(200, content_width - 64))
+                svg_started = perf_counter()
+                overlay_src = build_route_overlay_data_url(
+                    route_result.points,
+                    width=thumbnail_width,
+                    height=round(thumbnail_width * 1535 / 2750),
+                )
+                print(
+                    "[KIOSK-MAP][PERF] stage=generate_svg "
+                    f"duration_ms={(perf_counter() - svg_started) * 1000:.1f}"
+                )
+                if not route_map_is_current(owner, route_map_generation, event_key, invitation_id):
+                    print("[KIOSK-MAP] stale task ignored")
+                    return
+                state.map_loading = False
+                publish_started = perf_counter()
+                state.route_result = route_result
+                state.map_signed_url = asset.signed_url
+                state.map_preview_src = asset.data_url
+                state.map_preview_overlay_src = overlay_src
+                state.map_preview_ready = True
+                print(
+                    "[KIOSK-MAP][PERF] stage=publish_preview "
+                    f"duration_ms={(perf_counter() - publish_started) * 1000:.1f}"
+                )
+                print(f"[KIOSK-MAP] prefetch ready mesa_id={mesa_id}")
+                render()
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                if route_map_is_current(owner, route_map_generation, event_key, invitation_id):
+                    state.map_loading = False
+                    print(f"[KIOSK-MAP] unavailable code=MAP_LOOKUP_ERROR type={type(ex).__name__}")
+                    render()
+            finally:
+                if route_map_owner is owner:
+                    route_map_owner = None
+                    route_map_task = None
+
+        task = page.run_task(prefetch_route_map)
+        if route_map_owner is owner:
+            route_map_task = task
+
+    def start_success_route_map() -> None:
+        """Consume SELECT_GUESTS prefetch, or keep its single in-flight task."""
+        if state.phase != KioskPhase.SUCCESS:
+            return
+        if state.map_preview_ready:
+            print("[KIOSK-MAP] success using prefetched map")
+            return
+        if route_map_task is not None or route_map_owner is not None:
+            print("[KIOSK-MAP] success awaiting existing prefetch")
+            return
+        start_route_map_prefetch()
+
     def reset_kiosk() -> None:
         if confirmation_owner is not None:
             return
         cancel_resolution()
         cancel_confirmation()
+        cancel_route_map()
         state.reset_kiosk()
         scanner.set_preview_visible(True)
         render()
@@ -926,6 +1273,7 @@ def build_kiosk_view(
     def pause_kiosk() -> None:
         cancel_resolution()
         cancel_confirmation()
+        cancel_route_map()
         scanner.close(disconnected=True)
 
     def on_route_change(event: ft.RouteChangeEvent) -> None:
@@ -934,6 +1282,8 @@ def build_kiosk_view(
             restore_page_scroll()
             cancel_resolution()
             cancel_confirmation()
+            cancel_route_map()
+            map_asset_cache.clear()
             background_owner = None
             task = background_task
             background_task = None
@@ -957,6 +1307,11 @@ def build_kiosk_view(
         "resume_dashboard": resume_kiosk_after_reconnect,
         "cancel_resolution": cancel_resolution,
         "cancel_confirmation": cancel_confirmation,
+        "cancel_route_map": cancel_route_map,
+        "map_asset_cache": map_asset_cache,
+        "open_route_map_viewer": open_route_map_viewer,
+        "close_route_map_viewer": close_route_map_viewer,
+        "set_route_map_viewer_zoom": set_route_map_viewer_zoom,
         "start_confirmation": start_confirmation,
         "contexto_usuario": contexto_usuario,
         "kiosk_root": root,

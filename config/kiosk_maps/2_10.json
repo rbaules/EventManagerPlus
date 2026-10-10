@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "account_id": 2,
+  "event_id": 10,
+  "map": {
+    "storage_bucket": "event-maps",
+    "storage_path": "2/10/floorplan.jpg"
+  },
+  "origin": {"id": "KIOSK", "kind": "KIOSK", "x": 0.5695606688878919, "y": 0.8231041136873262},
+  "tables": {
+    "1": {"label": "Amor", "destination_node": "MESA_1"},
+    "2": {"label": "Compromiso", "destination_node": "MESA_2"},
+    "3": {"label": "Comprensión", "destination_node": "MESA_3"},
+    "4": {"label": "Unidad", "destination_node": "MESA_4"}
+  },
+  "nodes": [
+    {"id": "ENTRADA_SALON", "kind": "ENTRADA", "x": 0.4908353360488203, "y": 0.7527685281290288},
+    {"id": "CENTRAL_INFERIOR", "kind": "WAYPOINT", "x": 0.4880970636022439, "y": 0.6542496816565199},
+    {"id": "DERECHA_INFERIOR", "kind": "WAYPOINT", "x": 0.6845681116441008, "y": 0.6444468115467926},
+    {"id": "DERECHA_CENTRO_1", "kind": "WAYPOINT", "x": 0.7365952881290524, "y": 0.47926844645838856},
+    {"id": "DERECHA_CENTRO_2", "kind": "WAYPOINT", "x": 0.8296965513126501, "y": 0.49274739285926367},
+    {"id": "DERECHA_CENTRO_3", "kind": "WAYPOINT", "x": 0.8618712525599229, "y": 0.5613674836273551},
+    {"id": "IZQUIERDA_INFERIOR", "kind": "WAYPOINT", "x": 0.3730896208460349, "y": 0.6268016528282797},
+    {"id": "IZQUIERDA_CENTRO_1", "kind": "WAYPOINT", "x": 0.30189453723504844, "y": 0.4265780196186041},
+    {"id": "IZQUIERDA_CENTRO_2", "kind": "WAYPOINT", "x": 0.18894079881377185, "y": 0.2587038689895233},
+    {"id": "IZQUIERDA_CENTRO_3", "kind": "WAYPOINT", "x": 0.1855179582555513, "y": 0.5772971475556621},
+    {"id": "MESA_1", "kind": "MESA", "x": 0.28204206199736953, "y": 0.35060577626821715},
+    {"id": "MESA_2", "kind": "MESA", "x": 0.7365952881290524, "y": 0.4351555309646155},
+    {"id": "MESA_3", "kind": "MESA", "x": 0.6654002045180659, "y": 0.5883253764291053},
+    {"id": "MESA_4", "kind": "MESA", "x": 0.3415994877104063, "y": 0.5944521702476849}
+  ],
+  "edges": [
+    {"from": "KIOSK", "to": "ENTRADA_SALON", "bidirectional": true},
+    {"from": "ENTRADA_SALON", "to": "CENTRAL_INFERIOR", "bidirectional": true},
+    {"from": "CENTRAL_INFERIOR", "to": "IZQUIERDA_INFERIOR", "bidirectional": true},
+    {"from": "CENTRAL_INFERIOR", "to": "DERECHA_INFERIOR", "bidirectional": true},
+    {"from": "IZQUIERDA_INFERIOR", "to": "IZQUIERDA_CENTRO_1", "bidirectional": true},
+    {"from": "IZQUIERDA_INFERIOR", "to": "IZQUIERDA_CENTRO_3", "bidirectional": true},
+    {"from": "IZQUIERDA_CENTRO_1", "to": "IZQUIERDA_CENTRO_2", "bidirectional": true},
+    {"from": "DERECHA_INFERIOR", "to": "DERECHA_CENTRO_1", "bidirectional": true},
+    {"from": "DERECHA_CENTRO_1", "to": "DERECHA_CENTRO_2", "bidirectional": true},
+    {"from": "DERECHA_CENTRO_2", "to": "DERECHA_CENTRO_3", "bidirectional": true},
+    {"from": "MESA_1", "to": "IZQUIERDA_CENTRO_1", "bidirectional": true},
+    {"from": "MESA_2", "to": "DERECHA_CENTRO_1", "bidirectional": true},
+    {"from": "MESA_3", "to": "DERECHA_INFERIOR", "bidirectional": true},
+    {"from": "MESA_4", "to": "IZQUIERDA_INFERIOR", "bidirectional": true}
+  ]
+}

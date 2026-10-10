@@ -161,6 +161,7 @@ class FakePage:
         self.width = width
         self.scroll = kiosk_view.ft.ScrollMode.AUTO
         self.on_route_change = None
+        self.overlay: list[Any] = []
         self.update_calls = 0
         self.tasks: list[asyncio.Task[Any]] = []
 
@@ -767,7 +768,7 @@ async def test_confirmation_batch_success_and_double_click_guard() -> None:
     success_content = next(node for node in walk(root) if getattr(node, "data", None) == {"kiosk": "success_content"})
     assert (success_content.padding.left, success_content.padding.top, success_content.padding.right, success_content.padding.bottom) == (
         0,
-        96,
+        48,
         0,
         0,
     )
@@ -898,6 +899,277 @@ async def test_success_can_reset_and_resolve_a_new_qr() -> None:
     assert state.invitation_id == 32 and state.destinatario == "Familia Nueva" and state.selected_guest_ids == set()
 
 
+def event_ten_context() -> dict[str, Any]:
+    user_context = contexto()
+    event = {**user_context["evento_actual"], "evento_id": 10}
+    user_context["evento_actual"] = event
+    user_context["eventos_permitidos"] = [event]
+    return user_context
+
+
+async def reach_success_for_event_ten(page: FakePage, database: FakeSupabase, user_context: dict[str, Any]) -> Any:
+    root = build(page, database, user_context)
+    root.data["kiosk_scanner"].on_qr_finalized("MAP10")
+    await drain(page)
+    state = root.data["kiosk_state"]
+    state.set_guest_selected(state.guests[0].guest_id, True)
+    root.data["start_confirmation"]()
+    await drain(page)
+    assert state.phase == KioskPhase.SUCCESS
+    return root
+
+
+async def test_success_loads_route_map_without_changing_success_copy() -> None:
+    database = FakeSupabase(
+        qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31},
+        group_payload={
+            "ok": True,
+            "codigo_resultado": "ARRIVAL_GROUP_LOADED",
+            "destinatario": "Familia Mapa",
+            "invitados": [{"invitado_id": 7, "nombre": "Ana", "mesa_id": 4, "mesa_nombre": "Unidad", "llegada_confirmada": False}],
+        },
+    )
+    requested: list[tuple[str, str]] = []
+    original = kiosk_view.resolve_kiosk_route_map_url
+    original_preview = kiosk_view.load_kiosk_route_map_data_url
+    kiosk_view.resolve_kiosk_route_map_url = lambda _client, bucket, path: (
+        requested.append((bucket, path)) or "https://example.invalid/signed-floorplan.jpg"
+    )
+    kiosk_view.load_kiosk_route_map_data_url = lambda _url: "data:image/jpeg;base64,ZmFrZQ=="
+    try:
+        page = FakePage()
+        root = await reach_success_for_event_ten(page, database, event_ten_context())
+    finally:
+        kiosk_view.resolve_kiosk_route_map_url = original
+        kiosk_view.load_kiosk_route_map_data_url = original_preview
+    state = root.data["kiosk_state"]
+    assert state.route_result is not None and state.route_result.mesa_id == 4
+    assert state.route_result.node_ids[0] == "KIOSK" and state.route_result.node_ids[-1] == "MESA_4"
+    assert state.map_signed_url == "https://example.invalid/signed-floorplan.jpg"
+    assert requested == [("event-maps", "2/10/floorplan.jpg")]
+    thumbnail = next(
+        node for node in walk(root) if getattr(node, "data", None) == {"kiosk": "route_map_thumbnail", "width": 340}
+    )
+    assert thumbnail.on_click is not None
+    instruction = next(node for node in walk(root) if getattr(node, "data", None) == {"kiosk": "route_map_instruction"})
+    assert "".join(span.text or "" for span in instruction.spans) == "Para conocer cómo llegar a su mesa, seleccione el mapa"
+    assert instruction.spans[0].style.weight == kiosk_view.ft.FontWeight.BOLD
+    assert instruction.spans[1].style is None
+    assert "Esperamos que disfrutes lo que hemos preparado para ti." in [
+        node.value for node in walk(root) if isinstance(node, kiosk_view.ft.Text)
+    ]
+    thumbnail.on_click(SimpleNamespace())
+    assert len(page.overlay) == 1
+    viewer = page.overlay[0]
+    assert getattr(viewer, "data", None) == {"kiosk": "route_map_viewer", "zoom": 1.0}
+    assert state.phase == KioskPhase.SUCCESS and root.data["kiosk_scanner"].restart_calls == 0
+    close = next(node for node in walk(viewer) if getattr(node, "data", None) == {"kiosk": "route_map_viewer_close"})
+    close.on_click(SimpleNamespace())
+    assert page.overlay == [] and state.phase == KioskPhase.SUCCESS
+    await drain(page)
+
+
+async def test_map_prefetch_starts_in_selection_and_reuses_event_asset() -> None:
+    database = FakeSupabase(
+        qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31},
+        group_payload={
+            "ok": True,
+            "codigo_resultado": "ARRIVAL_GROUP_LOADED",
+            "destinatario": "Familia Mapa",
+            "invitados": [{"invitado_id": 7, "nombre": "Ana", "mesa_id": 4, "mesa_nombre": "Unidad", "llegada_confirmada": False}],
+        },
+    )
+    signed_calls: list[tuple[str, str]] = []
+    image_calls: list[str] = []
+    route_calls: list[int] = []
+    original_url = kiosk_view.resolve_kiosk_route_map_url
+    original_preview = kiosk_view.load_kiosk_route_map_data_url
+    original_route = kiosk_view.calcular_ruta
+    kiosk_view.resolve_kiosk_route_map_url = lambda _client, bucket, path: signed_calls.append((bucket, path)) or "https://example.invalid/signed-floorplan.jpg"
+    kiosk_view.load_kiosk_route_map_data_url = lambda url: image_calls.append(url) or "data:image/jpeg;base64,ZmFrZQ=="
+    kiosk_view.calcular_ruta = lambda **kwargs: route_calls.append(kwargs["mesa_id"]) or original_route(**kwargs)
+    try:
+        page = FakePage()
+        root = build(page, database, event_ten_context())
+        root.data["kiosk_scanner"].on_qr_finalized("MAP10")
+        await drain(page)
+        state = root.data["kiosk_state"]
+        assert state.phase == KioskPhase.SELECT_GUESTS and state.map_preview_ready
+        assert route_calls == [4] and signed_calls == [("event-maps", "2/10/floorplan.jpg")] and len(image_calls) == 1
+        state.set_guest_selected(7, True)
+        root.data["start_confirmation"]()
+        await drain(page)
+        assert state.phase == KioskPhase.SUCCESS and route_calls == [4]
+        root.data["reset_kiosk"]()
+        root.data["kiosk_scanner"].on_qr_finalized("MAP10-SECOND")
+        await drain(page)
+        assert state.phase == KioskPhase.SELECT_GUESTS and state.map_preview_ready
+        assert route_calls == [4, 4]
+        assert signed_calls == [("event-maps", "2/10/floorplan.jpg")] and len(image_calls) == 1
+    finally:
+        kiosk_view.resolve_kiosk_route_map_url = original_url
+        kiosk_view.load_kiosk_route_map_data_url = original_preview
+        kiosk_view.calcular_ruta = original_route
+
+
+async def test_route_map_viewer_timeout_zoom_and_reset_are_ui_only() -> None:
+    original = kiosk_view.resolve_kiosk_route_map_url
+    original_preview = kiosk_view.load_kiosk_route_map_data_url
+    kiosk_view.resolve_kiosk_route_map_url = lambda *_args: "https://example.invalid/signed-floorplan.jpg"
+    kiosk_view.load_kiosk_route_map_data_url = lambda _url: "data:image/jpeg;base64,ZmFrZQ=="
+    try:
+        page = FakePage()
+        root = await reach_success_for_event_ten(
+            page,
+            FakeSupabase(qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31}),
+            event_ten_context(),
+        )
+    finally:
+        kiosk_view.resolve_kiosk_route_map_url = original
+        kiosk_view.load_kiosk_route_map_data_url = original_preview
+    root.data["open_route_map_viewer"]()
+    root.data["set_route_map_viewer_zoom"](2.0)
+    assert page.overlay[0].data == {"kiosk": "route_map_viewer", "zoom": 2.0}
+    root.data["set_route_map_viewer_zoom"](99.0)
+    assert page.overlay[0].data == {"kiosk": "route_map_viewer", "zoom": 2.5}
+    root.data["set_route_map_viewer_zoom"](1.0)
+    assert page.overlay[0].data == {"kiosk": "route_map_viewer", "zoom": 1.0}
+    root.data["reset_kiosk"]()
+    assert page.overlay == [] and root.data["kiosk_state"].phase == KioskPhase.WELCOME_SCAN
+    await drain(page)
+
+    original_sleep = kiosk_view.asyncio.sleep
+    original_url = kiosk_view.resolve_kiosk_route_map_url
+    original_preview = kiosk_view.load_kiosk_route_map_data_url
+
+    async def immediate_sleep(_seconds: float) -> None:
+        return None
+
+    kiosk_view.asyncio.sleep = immediate_sleep
+    kiosk_view.resolve_kiosk_route_map_url = lambda *_args: "https://example.invalid/signed-floorplan.jpg"
+    kiosk_view.load_kiosk_route_map_data_url = lambda _url: "data:image/jpeg;base64,ZmFrZQ=="
+    try:
+        page = FakePage()
+        root = await reach_success_for_event_ten(
+            page,
+            FakeSupabase(qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31}),
+            event_ten_context(),
+        )
+        root.data["open_route_map_viewer"]()
+        await drain(page)
+        assert page.overlay == [] and root.data["kiosk_state"].phase == KioskPhase.SUCCESS
+    finally:
+        kiosk_view.asyncio.sleep = original_sleep
+        kiosk_view.resolve_kiosk_route_map_url = original_url
+        kiosk_view.load_kiosk_route_map_data_url = original_preview
+
+
+async def test_reset_discards_map_preview_that_finishes_late() -> None:
+    original_url = kiosk_view.resolve_kiosk_route_map_url
+    original_preview = kiosk_view.load_kiosk_route_map_data_url
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_preview(_url: str) -> str:
+        started.set()
+        assert release.wait(1)
+        return "data:image/jpeg;base64,ZmFrZQ=="
+
+    kiosk_view.resolve_kiosk_route_map_url = lambda *_args: "https://example.invalid/signed-floorplan.jpg"
+    kiosk_view.load_kiosk_route_map_data_url = blocking_preview
+    try:
+        page = FakePage()
+        root = build(
+            page,
+            FakeSupabase(qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31}),
+            event_ten_context(),
+        )
+        state = root.data["kiosk_state"]
+        root.data["kiosk_scanner"].on_qr_finalized("MAP10")
+        assert await asyncio.to_thread(started.wait, 1)
+        root.data["reset_kiosk"]()
+        release.set()
+        await drain(page)
+        assert state.phase == KioskPhase.WELCOME_SCAN
+        assert not state.map_preview_ready and state.map_preview_src is None and state.route_result is None
+    finally:
+        release.set()
+        kiosk_view.resolve_kiosk_route_map_url = original_url
+        kiosk_view.load_kiosk_route_map_data_url = original_preview
+
+
+async def test_success_map_failures_and_missing_mesa_keep_welcome_visible() -> None:
+    original_route = kiosk_view.calcular_ruta
+    original_url = kiosk_view.resolve_kiosk_route_map_url
+
+    def unavailable_route(code: str) -> Any:
+        return lambda **_kwargs: kiosk_view.ResultadoRuta(
+            ok=False, codigo=code, mensaje="No disponible", account_id=2, event_id=10, mesa_id=4
+        )
+
+    try:
+        for code in ("MAP_CONFIG_NOT_FOUND", "MAP_TABLE_NOT_FOUND", "MAP_ROUTE_NOT_FOUND"):
+            kiosk_view.calcular_ruta = unavailable_route(code)
+            root = await reach_success_for_event_ten(
+                FakePage(),
+                FakeSupabase(
+                    qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31}
+                ),
+                event_ten_context(),
+            )
+            state = root.data["kiosk_state"]
+            assert state.route_result is None and state.map_signed_url is None and state.phase == KioskPhase.SUCCESS
+
+        kiosk_view.calcular_ruta = original_route
+        kiosk_view.resolve_kiosk_route_map_url = lambda *_args: None
+        root = await reach_success_for_event_ten(
+            FakePage(),
+            FakeSupabase(qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31}),
+            event_ten_context(),
+        )
+        state = root.data["kiosk_state"]
+        assert state.route_result is None and state.map_signed_url is None and state.phase == KioskPhase.SUCCESS
+
+        calls: list[object] = []
+        kiosk_view.calcular_ruta = lambda **_kwargs: calls.append(True) or original_route(**_kwargs)
+        missing_mesa = FakeSupabase(
+            qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31},
+            group_payload={
+                "ok": True,
+                "codigo_resultado": "ARRIVAL_GROUP_LOADED",
+                "destinatario": "Sin mesa",
+                "invitados": [{"invitado_id": 7, "nombre": "Ana", "mesa_id": None, "mesa_nombre": None, "llegada_confirmada": False}],
+            },
+        )
+        root = await reach_success_for_event_ten(FakePage(), missing_mesa, event_ten_context())
+        assert not calls
+        assert root.data["kiosk_state"].route_result is None
+    finally:
+        kiosk_view.calcular_ruta = original_route
+        kiosk_view.resolve_kiosk_route_map_url = original_url
+
+
+async def test_success_map_is_cleared_before_a_new_invitation() -> None:
+    original = kiosk_view.resolve_kiosk_route_map_url
+    original_preview = kiosk_view.load_kiosk_route_map_data_url
+    kiosk_view.resolve_kiosk_route_map_url = lambda *_args: "https://example.invalid/signed-floorplan.jpg"
+    kiosk_view.load_kiosk_route_map_data_url = lambda _url: "data:image/jpeg;base64,ZmFrZQ=="
+    try:
+        root = await reach_success_for_event_ten(
+            FakePage(),
+            FakeSupabase(qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31}),
+            event_ten_context(),
+        )
+    finally:
+        kiosk_view.resolve_kiosk_route_map_url = original
+        kiosk_view.load_kiosk_route_map_data_url = original_preview
+    state = root.data["kiosk_state"]
+    assert state.route_result is not None and state.map_signed_url is not None and state.map_preview_ready
+    root.data["reset_kiosk"]()
+    assert state.phase == KioskPhase.WELCOME_SCAN
+    assert state.route_result is None and state.map_signed_url is None and not state.map_loading and not state.map_preview_ready
+
+
 async def test_route_exit_cancels_resolution_before_scanner_shutdown() -> None:
     page = FakePage()
     db = BlockingFirstResolverSupabase()
@@ -950,6 +1222,12 @@ async def main_async() -> None:
     await test_confirmation_event_change_discards_late_result()
     await test_consulta_and_invalid_phase_do_not_start_confirmation()
     await test_success_can_reset_and_resolve_a_new_qr()
+    await test_success_loads_route_map_without_changing_success_copy()
+    await test_map_prefetch_starts_in_selection_and_reuses_event_asset()
+    await test_route_map_viewer_timeout_zoom_and_reset_are_ui_only()
+    await test_reset_discards_map_preview_that_finishes_late()
+    await test_success_map_failures_and_missing_mesa_keep_welcome_visible()
+    await test_success_map_is_cleared_before_a_new_invitation()
     await test_route_exit_cancels_resolution_before_scanner_shutdown()
     await test_reconnect_is_limited_to_welcome_scan()
 
