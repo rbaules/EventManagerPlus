@@ -5,9 +5,11 @@ import flet as ft
 from config import APP_MODE, APP_VERSION
 from db import create_supabase_client
 from services.session_service import PageSessionController
+from services.kiosk_e2e_service import KioskE2EProfiler
 from services.web_reliability import PageWebTelemetry
 from views.login_view import build_login_view
 from views.authenticated_router import AuthenticatedViewRouter
+from views.kiosk_router import KioskStandaloneRouter, is_kiosk_standalone_route
 
 
 def main(
@@ -17,9 +19,15 @@ def main(
 ) -> None:
     web_telemetry = PageWebTelemetry(page)
     web_telemetry.page_created()
+    standalone_kiosk_requested = is_kiosk_standalone_route(
+        getattr(page, "route", None)
+    )
+    kiosk_e2e_profiler = KioskE2EProfiler() if standalone_kiosk_requested else None
+    if kiosk_e2e_profiler is not None:
+        setattr(page, "_kiosk_e2e_profiler", kiosk_e2e_profiler)
     supabase = create_supabase_client()
     print("[APP][INFO] Modo de aplicacion:", APP_MODE)
-    page.title = f"EventPlus - {APP_MODE} {APP_VERSION}"
+    page.title = f"EVKOR - {APP_MODE} {APP_VERSION}"
     page.window.width = 950
     page.window.height = 760
     page.scroll = ft.ScrollMode.AUTO
@@ -29,6 +37,7 @@ def main(
         page,
         supabase,
         server_session_binding=server_session_binding,
+        kiosk_e2e_profiler=kiosk_e2e_profiler,
     )
     web_telemetry.bind_session(
         lambda: session_controller.authenticated,
@@ -96,6 +105,18 @@ def main(
         validation = None
 
     if validation is not None:
+        if validation.ok and validation.context and standalone_kiosk_requested:
+            kiosk_router = KioskStandaloneRouter(
+                page=page,
+                contexto_usuario=validation.context,
+                supabase=supabase,
+                session_controller=session_controller,
+                e2e_profiler=kiosk_e2e_profiler,
+            )
+            kiosk_router.mount_current_route()
+            session_controller.start_refresh_monitor(kiosk_router.on_session_invalid)
+            web_telemetry.ready(restored_session=True)
+            return
         if validation.ok and validation.should_build_home and validation.context:
             authenticated_router = AuthenticatedViewRouter(
                 page=page,
@@ -115,6 +136,15 @@ def main(
             web_telemetry.ready(restored_session=True)
             return
 
+    if standalone_kiosk_requested:
+        KioskStandaloneRouter(
+            page=page,
+            supabase=supabase,
+            session_controller=session_controller,
+        ).mount_current_route()
+        web_telemetry.ready(restored_session=False)
+        return
+
     build_login_view(page, supabase, session_controller=session_controller)
     web_telemetry.ready(restored_session=False)
 
@@ -128,6 +158,14 @@ async def _show_login_after_invalid_session(
     session_controller.logout()
     page.navigation_bar = None
     page.clean()
+    if is_kiosk_standalone_route(getattr(page, "route", None)):
+        KioskStandaloneRouter(
+            page=page,
+            supabase=supabase,
+            session_controller=session_controller,
+        ).mount_current_route()
+        page.update()
+        return
     build_login_view(
         page,
         supabase,

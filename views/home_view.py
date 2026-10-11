@@ -594,7 +594,7 @@ def build_home_view(
         root = ui["root"]
         navigation = ui["navigation"]
         if not isinstance(root, ft.SafeArea) or not isinstance(root.content, ft.Column):
-            raise RuntimeError("El root persistente de EventPlus no esta disponible durante resize.")
+            raise RuntimeError("El root persistente de EVKOR no esta disponible durante resize.")
         preserve_module = bool(
             state["selected"] in {"guests", "arrivals"}
             and not uses_operational_cards(old_mode)
@@ -748,7 +748,7 @@ def build_home_view(
 
     async def _guardar_descarga(nombre: str, contenido: bytes, extension: str) -> None:
         selected_path = await excel_file_picker.save_file(
-            dialog_title="Guardar archivo de EventPlus", file_name=nombre,
+            dialog_title="Guardar archivo de EVKOR", file_name=nombre,
             file_type=ft.FilePickerFileType.CUSTOM, allowed_extensions=[extension], src_bytes=contenido,
         )
         if selected_path and not page.web:
@@ -802,7 +802,7 @@ def build_home_view(
         preview = state.get("excel_import_preview")
         if not preview: return
         async def worker() -> None:
-            await _guardar_descarga("EventPlus_Errores_Importacion.csv", generar_archivo_errores(preview), "csv")
+            await _guardar_descarga("EVKOR_Errores_Importacion.csv", generar_archivo_errores(preview), "csv")
         page.run_task(worker)
 
     def confirmar_importacion_excel() -> None:

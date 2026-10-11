@@ -16,7 +16,10 @@ if str(ROOT) not in sys.path:
 
 import flet_camera as fcam
 
-from components.kiosk_qr_scanner import KioskQrScanner
+from components.kiosk_qr_scanner import (
+    KIOSK_CAMERA_DESCRIPTION_CACHE_KEY,
+    KioskQrScanner,
+)
 from views.kiosk_view import KioskPhase, KioskState
 
 
@@ -33,6 +36,7 @@ class FakePage:
     def __init__(self) -> None:
         self.tasks: list[asyncio.Task[object]] = []
         self.on_route_change = None
+        self.web = False
 
     def run_task(self, task_factory):
         if not inspect.iscoroutinefunction(task_factory):
@@ -57,7 +61,31 @@ class DisconnectedPage(FakePage):
 
 
 class FakeDescription:
+    name = "rear-camera"
     lens_direction = fcam.CameraLensDirection.BACK
+    sensor_orientation = 90
+    lens_type = fcam.CameraLensType.WIDE
+
+
+class FakePreferences:
+    def __init__(self, initial: dict[str, str] | None = None) -> None:
+        self.values = dict(initial or {})
+        self.get_calls = 0
+        self.set_calls = 0
+        self.remove_calls = 0
+
+    async def get(self, key: str) -> str | None:
+        self.get_calls += 1
+        return self.values.get(key)
+
+    async def set(self, key: str, value: str) -> bool:
+        self.set_calls += 1
+        self.values[key] = value
+        return True
+
+    async def remove(self, key: str) -> bool:
+        self.remove_calls += 1
+        return self.values.pop(key, None) is not None
 
 
 class FakeCamera:
@@ -65,6 +93,8 @@ class FakeCamera:
         self.page = page
         self.description = FakeDescription()
         self.fail_discovery: Exception | None = None
+        self.fail_cached_initialize = False
+        self.fail_runtime_initialize = False
         self.resume_error: Exception | None = None
         self.discovery_calls = 0
         self.initialize_calls = 0
@@ -78,16 +108,28 @@ class FakeCamera:
         self.on_state_change = None
         self.emit_ready = True
         self.supports_calls = 0
+        self.initialize_descriptions: list[object] = []
 
     async def get_available_cameras(self):
         self.discovery_calls += 1
         if self.fail_discovery is not None:
             raise self.fail_discovery
-        return [self.description]
+        return list(getattr(self, "available_descriptions", [self.description]))
 
     async def initialize(self, *_args, **_kwargs) -> None:
         self.initialize_calls += 1
+        self.initialize_descriptions.append(_args[0])
         self.order.append("initialize")
+        if self.fail_runtime_initialize:
+            self.fail_runtime_initialize = False
+            raise RuntimeError(
+                "cameraMissingMetadata: Make sure to call availableCameras before creating a camera"
+            )
+        if self.fail_cached_initialize and isinstance(_args[0], fcam.CameraDescription):
+            self.fail_cached_initialize = False
+            raise RuntimeError(
+                "cameraMissingMetadata: Make sure to call availableCameras before creating a camera"
+            )
         if self.emit_ready and callable(self.on_state_change):
             self.on_state_change(
                 SimpleNamespace(is_preview_paused=False, has_error=False, is_initialized=True)
@@ -332,6 +374,9 @@ async def test_startup_perf_instrumentation_distinguishes_sources_without_new_ta
     )
     for marker in required_initial:
         assert marker in trace, marker
+    assert "[KIOSK-STARTUP][PERF] stage=T5_camera_control_mounted" in trace
+    assert "[KIOSK-STARTUP][PERF] stage=polling_started" in trace
+    assert "[KIOSK-STARTUP][READY] total_ms=" in trace
     assert "startup_id=2 source=reset stage=startup_begin" in trace
     assert "startup_id=2 source=reset stage=polling_started" in trace
     assert "startup_id=2 source=reset stage=first_take_picture_end" in trace
@@ -367,6 +412,7 @@ async def test_startup_perf_instrumentation_records_discovery_retry_backoff() ->
     assert "stage=camera_discovery_retry attempt=1/3 backoff_ms=400.0" in trace
     assert "stage=camera_discovery_attempt_2" in trace
     assert "stage=camera_discovery_end" in trace
+    assert "message=cameraNotReadable" in trace
 
 
 async def test_initial_startup_keeps_mounted_discovery_then_initialize_after_mount_wait() -> None:
@@ -409,6 +455,194 @@ async def test_initial_startup_keeps_mounted_discovery_then_initialize_after_mou
     assert "camera_in_overlay=False" in trace
     assert trace.index("phase=call_enter") < trace.index("phase=call_return")
     assert trace.index("phase=call_return") < trace.index("stage=initialize_begin")
+
+
+async def test_first_web_start_discovers_then_persists_camera_description() -> None:
+    page = FakePage()
+    page.web = True
+    preferences = FakePreferences()
+    camera = FakeCamera(page)
+    scanner = KioskQrScanner(
+        page=page,
+        on_qr_finalized=lambda _code: None,
+        on_camera_error=lambda _message: None,
+        camera=camera,
+        sleep=_no_delay,
+        create_host=False,
+        camera_description_preferences=preferences,
+    )
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        scanner.start()
+        await _wait_page_tasks(page)
+
+    assert camera.discovery_calls == 1
+    assert camera.initialize_calls == 1
+    assert preferences.set_calls == 1
+    assert KIOSK_CAMERA_DESCRIPTION_CACHE_KEY in preferences.values
+    assert "[KIOSK-QR] camera cache miss" in output.getvalue()
+    await scanner.stop_scan()
+
+
+async def test_persisted_preference_on_new_runtime_uses_discovery_then_selects_it() -> None:
+    page = FakePage()
+    page.web = True
+    preferences = FakePreferences()
+    first_camera = FakeCamera(page)
+    first = KioskQrScanner(
+        page=page,
+        on_qr_finalized=lambda _code: None,
+        on_camera_error=lambda _message: None,
+        camera=first_camera,
+        sleep=_no_delay,
+        create_host=False,
+        camera_description_preferences=preferences,
+    )
+    first.start()
+    await _wait_page_tasks(page)
+    await first.stop_scan()
+
+    second_camera = FakeCamera(page)
+    sleep_calls: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    second = KioskQrScanner(
+        page=page,
+        on_qr_finalized=lambda _code: None,
+        on_camera_error=lambda _message: None,
+        camera=second_camera,
+        sleep=record_sleep,
+        create_host=False,
+        camera_description_preferences=preferences,
+    )
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        second.start()
+        await _wait_page_tasks(page)
+
+    trace = output.getvalue()
+    assert sleep_calls == [0.3]
+    assert second_camera.discovery_calls == 1
+    assert second_camera.initialize_calls == 1
+    assert second_camera.initialize_descriptions[0] is second_camera.description
+    assert "[KIOSK-QR] runtime_metadata_ready=false" in trace
+    assert "stage=camera_discovery_begin" in trace
+    await second.stop_scan()
+
+
+async def test_runtime_metadata_fast_path_skips_discovery_after_mount_wait() -> None:
+    page = FakePage()
+    page.web = True
+    preferences = FakePreferences()
+    camera = FakeCamera(page)
+    scanner = KioskQrScanner(
+        page=page,
+        on_qr_finalized=lambda _code: None,
+        on_camera_error=lambda _message: None,
+        camera=camera,
+        sleep=_no_delay,
+        create_host=False,
+        camera_description_preferences=preferences,
+    )
+    scanner.start()
+    await _wait_page_tasks(page)
+    await scanner.stop_scan()
+    discovery_calls = camera.discovery_calls
+    initialize_calls = camera.initialize_calls
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        scanner.start()
+        await _wait_page_tasks(page)
+
+    trace = output.getvalue()
+    assert camera.initialize_calls == initialize_calls + 1
+    assert camera.discovery_calls == discovery_calls
+    assert "[KIOSK-QR] camera cache hit" in trace
+    assert "[KIOSK-QR] runtime_metadata_ready=true" in trace
+    assert "[KIOSK-QR] cached initialize success" in trace
+    assert "stage=camera_discovery_begin" not in trace
+    await scanner.stop_scan()
+
+
+async def test_missing_runtime_metadata_recovers_without_ui_error_or_preference_removal() -> None:
+    page = FakePage()
+    page.web = True
+    preferences = FakePreferences()
+    camera = FakeCamera(page)
+    errors: list[str] = []
+    scanner = KioskQrScanner(
+        page=page,
+        on_qr_finalized=lambda _code: None,
+        on_camera_error=errors.append,
+        camera=camera,
+        sleep=_no_delay,
+        create_host=False,
+        camera_description_preferences=preferences,
+    )
+    scanner.start()
+    await _wait_page_tasks(page)
+    await scanner.stop_scan()
+    discovery_calls = camera.discovery_calls
+    camera.fail_runtime_initialize = True
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        scanner.start()
+        await _wait_page_tasks(page)
+
+    trace = output.getvalue()
+    assert errors == [], (errors, trace)
+    assert camera.discovery_calls == discovery_calls + 1
+    assert camera.initialize_calls == 3
+    assert preferences.remove_calls == 0
+    assert "[KIOSK-QR] cached metadata unavailable; falling back to discovery" in trace
+    assert "stage=camera_discovery_begin" in trace
+    await scanner.stop_scan()
+
+
+async def test_missing_persisted_preference_uses_normal_selection_and_updates_it() -> None:
+    page = FakePage()
+    page.web = True
+    preferences = FakePreferences()
+    seed_camera = FakeCamera(page)
+    seed = KioskQrScanner(
+        page=page,
+        on_qr_finalized=lambda _code: None,
+        on_camera_error=lambda _message: None,
+        camera=seed_camera,
+        sleep=_no_delay,
+        create_host=False,
+        camera_description_preferences=preferences,
+    )
+    seed.start()
+    await _wait_page_tasks(page)
+    await seed.stop_scan()
+
+    alternate = SimpleNamespace(
+        name="alternate-camera",
+        lens_direction=fcam.CameraLensDirection.FRONT,
+        sensor_orientation=0,
+        lens_type=fcam.CameraLensType.UNKNOWN,
+    )
+    camera = FakeCamera(page)
+    camera.available_descriptions = [alternate]
+    scanner = KioskQrScanner(
+        page=page,
+        on_qr_finalized=lambda _code: None,
+        on_camera_error=lambda _message: None,
+        camera=camera,
+        sleep=_no_delay,
+        create_host=False,
+        camera_description_preferences=preferences,
+    )
+    scanner.start()
+    await _wait_page_tasks(page)
+
+    assert camera.initialize_descriptions[-1] is alternate
+    assert "alternate-camera" in preferences.values[KIOSK_CAMERA_DESCRIPTION_CACHE_KEY]
+    await scanner.stop_scan()
 
 
 async def test_startup_perf_preview_ready_waits_for_native_state_callback() -> None:
@@ -535,6 +769,40 @@ async def test_phase_suspend_keeps_camera_warm_and_shutdown_pauses() -> None:
 
     assert camera.pause_calls == 1
     assert scanner.runtime.preview_paused
+
+
+async def test_admin_suspend_resumes_same_camera_without_discovery() -> None:
+    page = FakePage()
+    camera = FakeCamera(page)
+    camera.streaming_supported = True
+    scanner = KioskQrScanner(
+        page=page,
+        on_qr_finalized=lambda _code: None,
+        on_camera_error=lambda _message: None,
+        camera=camera,
+        sleep=_no_delay,
+        create_host=False,
+    )
+
+    await scanner.start_scan()
+    generation = scanner.runtime.generation
+    description = scanner.runtime.camera_description
+    discovery_calls = camera.discovery_calls
+    initialize_calls = camera.initialize_calls
+    assert scanner.active and scanner.stream_active
+
+    await scanner.suspend_for_admin()
+    assert not scanner.active and not scanner.stream_active
+    assert scanner.runtime.generation == generation
+    assert scanner.runtime.camera_description is description
+    assert scanner.runtime.controller_initialized and not scanner.runtime.preview_paused
+
+    await scanner.resume_after_admin()
+    assert scanner.active and scanner.stream_active
+    assert scanner.runtime.generation == generation
+    assert scanner.runtime.camera_description is description
+    assert camera.discovery_calls == discovery_calls
+    assert camera.initialize_calls == initialize_calls
 
 
 async def test_disconnect_while_warm_invalidates_without_automatic_reconnect() -> None:
@@ -1033,10 +1301,16 @@ async def _main_async() -> None:
     await test_startup_perf_instrumentation_distinguishes_sources_without_new_tasks()
     await test_startup_perf_instrumentation_records_discovery_retry_backoff()
     await test_initial_startup_keeps_mounted_discovery_then_initialize_after_mount_wait()
+    await test_first_web_start_discovers_then_persists_camera_description()
+    await test_persisted_preference_on_new_runtime_uses_discovery_then_selects_it()
+    await test_runtime_metadata_fast_path_skips_discovery_after_mount_wait()
+    await test_missing_runtime_metadata_recovers_without_ui_error_or_preference_removal()
+    await test_missing_persisted_preference_uses_normal_selection_and_updates_it()
     await test_startup_perf_preview_ready_waits_for_native_state_callback()
     await test_reset_uses_full_initialization_after_qr_finalization()
     await test_five_guest_cycles_use_full_recovery_without_error()
     await test_phase_suspend_keeps_camera_warm_and_shutdown_pauses()
+    await test_admin_suspend_resumes_same_camera_without_discovery()
     await test_disconnect_while_warm_invalidates_without_automatic_reconnect()
     await test_reset_with_lost_warm_camera_uses_full_initialization_once()
     await test_initialize_return_without_native_readiness_fails_before_strategy()

@@ -9,7 +9,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 IMPORT_SHEET = "Importación"
 INSTRUCTIONS_SHEET = "Instrucciones"
-TEMPLATE_FILENAME = "EventPlus_Plantilla_Importacion.xlsx"
+TEMPLATE_FILENAME = "EVKOR_Plantilla_Importacion.xlsx"
 CANONICAL_HEADERS = (
     "Código de invitación",
     "Destinatario de la invitación",
@@ -59,7 +59,7 @@ def generar_plantilla_excel() -> bytes:
 
     instructions = workbook.create_sheet(INSTRUCTIONS_SHEET)
     lines = (
-        ("Plantilla de importación EventPlus", "Complete una fila por invitado. No agregue, elimine ni renombre columnas."),
+        ("Plantilla de importación EVKOR", "Complete una fila por invitado. No agregue, elimine ni renombre columnas."),
         ("Uso permitido", "Solo evento Activo en fase Pre_evento, inicialmente vacío, en modo FULL."),
         ("Obligatorias", "Código, Destinatario, Orden, Nombre y Es invitado principal?."),
         ("Opcionales", "Teléfono, Email, Mesa ID y Nombre de mesa (el nombre es obligatorio si existe Mesa ID)."),

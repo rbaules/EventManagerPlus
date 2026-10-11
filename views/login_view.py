@@ -4,10 +4,12 @@ import asyncio
 import threading
 import traceback
 import webbrowser
+from collections.abc import Callable
 from typing import Any
 
 import flet as ft
 
+from components.evkor_brand import build_evkor_brand
 from config import (
     ANDROID_OAUTH_REDIRECT_URL,
     APP_VERSION,
@@ -113,6 +115,12 @@ def build_login_view(
     supabase: Any,
     initial_message: str | None = None,
     session_controller: PageSessionController | None = None,
+    on_authenticated: Callable[[dict[str, Any]], None] | None = None,
+    on_session_invalid: Callable[[str], Any] | None = None,
+    on_post_authentication_error: Callable[[Exception], None] | None = None,
+    title: str = "EVKOR",
+    subtitle: str = "Control de acceso y consulta de invitados",
+    login_label: str = "Continuar con Google",
 ) -> None:
     session_controller = session_controller or PageSessionController(page, supabase)
     page.navigation_bar = None
@@ -134,7 +142,7 @@ def build_login_view(
     )
 
     login_button = ft.Button(
-        "Continuar con Google",
+        login_label,
         icon=ft.Icons.LOGIN,
         height=48,
     )
@@ -177,7 +185,7 @@ def build_login_view(
         progress.visible = True
         cancel_login_button.visible = False
         status.value = (
-            "Autenticacion recibida. EventPlus esta preparando tu sesion..."
+            "Autenticacion recibida. EVKOR esta preparando tu sesion..."
         )
         page.update()
 
@@ -194,11 +202,13 @@ def build_login_view(
         page.update()
 
     processed_callbacks: set[str] = set()
+    web_context_prepared = False
 
     def completar_login_con_code(
         code: str | None,
         fase_inicial: str = "obtener_sesion",
         attempt: WebOAuthAttempt | None = None,
+        context_already_loaded: bool = False,
     ) -> None:
         fase = fase_inicial
         try:
@@ -211,7 +221,9 @@ def build_login_view(
             if attempt is not None:
                 attempt.trace("supabase_session_check_start")
             validation = session_controller.validate_current_session(
-                load_context=True,
+                # Web OAuth already loaded and authorized this context just before
+                # persisting the server-side session. Reuse it for the callback.
+                load_context=not context_already_loaded,
                 claim_home=True,
             )
             if not validation.ok:
@@ -248,7 +260,7 @@ def build_login_view(
                 f"auth.users.id: {auth_user_id}",
                 f"auth.users.email: {email}",
                 "",
-                "VALIDACION EVENTPLUS POR usr_usuario_auth_uuid",
+                "VALIDACION EVKOR POR usr_usuario_auth_uuid",
                 formato_usuario_eventplus(usuario_eventplus),
             ]
 
@@ -299,7 +311,7 @@ def build_login_view(
                     ]
                 )
 
-            set_status("Cargando contexto del usuario EventPlus...")
+            set_status("Cargando contexto del usuario EVKOR...")
             try:
                 fase = "cargar_contexto_usuario"
                 diagnostico.extend(["", formato_resumen_contexto(contexto_usuario)])
@@ -327,31 +339,49 @@ def build_login_view(
                     return
 
             page.session.store.set("diagnostico_login", "\n".join(diagnostico))
-            set_status("Acceso concedido. Abriendo Dashboard...")
+            set_status("Acceso concedido. Preparando la aplicacion...")
             try:
                 fase = "construir_dashboard"
-                print("[HOME] Construyendo vista autenticada")
-                from views.authenticated_router import AuthenticatedViewRouter
+                if on_authenticated is not None:
+                    try:
+                        on_authenticated(contexto_usuario)
+                    except Exception as ex:
+                        if on_post_authentication_error is None:
+                            raise
+                        print(
+                            "[LOGIN][POST_AUTH][ERROR]",
+                            f"type={type(ex).__name__}",
+                            f"message={ex}",
+                        )
+                        if attempt is not None:
+                            attempt.transition(WEB_OAUTH_ATTEMPT_FAILED)
+                        on_post_authentication_error(ex)
+                        return
+                else:
+                    print("[HOME] Construyendo vista autenticada")
+                    from views.authenticated_router import AuthenticatedViewRouter
 
-                authenticated_router = AuthenticatedViewRouter(
-                    page=page,
-                    contexto_usuario=contexto_usuario,
-                    supabase=supabase,
-                    session_controller=session_controller,
-                )
-                home_control = authenticated_router.mount_current_route()
-                print("[HOME] Tipo devuelto:", type(home_control))
-
-                if home_control is None:
-                    raise RuntimeError(
-                        "build_home_view devolvio None; se esperaba un control Flet."
+                    authenticated_router = AuthenticatedViewRouter(
+                        page=page,
+                        contexto_usuario=contexto_usuario,
+                        supabase=supabase,
+                        session_controller=session_controller,
                     )
+                    home_control = authenticated_router.mount_current_route()
+                    print("[HOME] Tipo devuelto:", type(home_control))
 
-                session_controller.start_refresh_monitor(session_became_invalid)
+                    if home_control is None:
+                        raise RuntimeError(
+                            "build_home_view devolvio None; se esperaba un control Flet."
+                        )
+                    print("[HOME] Home mostrado")
+
+                session_controller.start_refresh_monitor(
+                    on_session_invalid or session_became_invalid
+                )
                 if attempt is not None:
                     attempt.transition(WEB_OAUTH_ATTEMPT_COMPLETED)
                     attempt.trace("home_claim_success", home_claimed=True)
-                print("[HOME] Home mostrado")
             except Exception:
                 traceback.print_exc()
                 if attempt is not None:
@@ -470,7 +500,7 @@ def build_login_view(
             fase = "abrir_navegador"
             set_status(
                 "Se abrira el navegador para iniciar sesion con Google. "
-                "Despues del login, vuelve a EventPlus."
+                "Despues del login, vuelve a EVKOR."
             )
 
             webbrowser.open(oauth_url)
@@ -511,7 +541,7 @@ def build_login_view(
             )
             set_status(
                 "Completa el inicio de sesion en el navegador. "
-                "Volveremos automaticamente a EventPlus."
+                "Volveremos automaticamente a EVKOR."
             )
             await page.launch_url(oauth_url)
         except Exception as ex:
@@ -559,7 +589,7 @@ def build_login_view(
             set_web_attempt_ui(False, "Inicio de sesion cancelado.")
 
     async def web_login_completed(e: ft.LoginEvent) -> None:
-        nonlocal current_web_attempt
+        nonlocal current_web_attempt, web_context_prepared
         attempt = current_web_attempt or session_controller.current_oauth_attempt
         if attempt is None:
             return
@@ -620,7 +650,7 @@ def build_login_view(
             session_controller.logout()
             set_web_attempt_ui(
                 False,
-                "La autenticacion fue recibida, pero EventPlus no pudo "
+                "La autenticacion fue recibida, pero EVKOR no pudo "
                 "completar la sesion. Intenta nuevamente.",
             )
             return
@@ -634,13 +664,19 @@ def build_login_view(
             None,
             "obtener_usuario_auth",
             attempt,
+            web_context_prepared,
         )
         session_controller.clear_oauth_attempt(attempt)
         current_web_attempt = None
+        web_context_prepared = False
 
     page.on_login = web_login_completed
 
     async def prepare_server_session_after_exchange() -> None:
+        nonlocal web_context_prepared
+        session_controller.mark_kiosk_e2e_checkpoint(
+            "E1_OAUTH_CALLBACK_RECEIVED"
+        )
         validation = await asyncio.to_thread(
             session_controller.validate_current_session,
             load_context=True,
@@ -654,9 +690,10 @@ def build_login_view(
             raise RuntimeError(
                 "No se pudo crear la sesion web server-side."
             )
+        web_context_prepared = True
 
     async def run_web_login_flow() -> None:
-        nonlocal current_web_attempt
+        nonlocal current_web_attempt, web_context_prepared
         page_id = hex(id(page))
         page_url_raw = str(getattr(page, "url", "") or "")
         route_raw = str(getattr(page, "route", "") or "")
@@ -671,6 +708,7 @@ def build_login_view(
             return
 
         await asyncio.to_thread(session_controller.clear_residual_session)
+        web_context_prepared = False
         attempt = WebOAuthAttempt(page)
         attempt.trace("login_click")
         current_web_attempt = attempt
@@ -765,19 +803,15 @@ def build_login_view(
     instructions = ft.Container(
         content=ft.Column(
             [
-                ft.Image(
-                    src="brand/EventPlus_logo_v2.1_stacked.png",
-                    width=220,
-                    fit=ft.BoxFit.CONTAIN,
-                ),
+                build_evkor_brand(width=220, text_size=38),
                 ft.Text(
-                    "EventPlus",
+                    title,
                     size=28,
                     weight=ft.FontWeight.BOLD,
                     text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Text(
-                    "Control de acceso y consulta de invitados",
+                    subtitle,
                     size=15,
                     color=ft.Colors.ON_SURFACE_VARIANT,
                     text_align=ft.TextAlign.CENTER,

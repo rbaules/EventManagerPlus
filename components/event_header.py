@@ -5,6 +5,7 @@ from typing import Any
 
 import flet as ft
 
+from components.evkor_brand import build_evkor_brand
 from config import is_checkin_mode
 from components.responsive import LayoutMode
 from services.evento_context_service import rol_visible_contextual
@@ -166,10 +167,9 @@ def event_header(
             )
         )
 
-    logo = ft.Image(
-        src="brand/EventPlus_logo_v2.0_horizontal.png",
+    logo = build_evkor_brand(
         width=125 if layout == LayoutMode.PHONE else 150 if layout in {LayoutMode.PHONE_LARGE, LayoutMode.TABLET_PORTRAIT} else 180,
-        fit=ft.BoxFit.CONTAIN,
+        text_size=24 if layout == LayoutMode.PHONE else 28,
     )
     user = ft.Row(
         [

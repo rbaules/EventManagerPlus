@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.navigation_service import parse_app_route
+from services.kiosk_asset_service import KioskVisualAsset
 import views.kiosk_view as kiosk_view
 from views.kiosk_view import KioskPhase, is_kiosk_route
 
@@ -23,19 +24,24 @@ class Response:
 
 
 class FakeStorageBucket:
-    def __init__(self, storage: "FakeStorage") -> None:
+    def __init__(self, storage: "FakeStorage", bucket_name: str) -> None:
         self.storage = storage
+        self.bucket_name = bucket_name
 
     def create_signed_url(self, path: str, expires_in: int) -> dict[str, str]:
-        self.storage.requests.append((self.storage.bucket_name, path, expires_in))
+        self.storage.requests.append((self.bucket_name, path, expires_in))
         self.storage.started.set()
         if self.storage.blocking:
             assert self.storage.release.wait(1)
         if self.storage.error is not None:
             raise self.storage.error
-        if self.storage.url is None:
+        url = self.storage.urls_by_bucket.get(
+            self.bucket_name,
+            self.storage.url if self.bucket_name == "kiosk-backgrounds" else None,
+        )
+        if url is None:
             return {}
-        return {"signedURL": self.storage.url}
+        return {"signedURL": url}
 
 
 class FakeStorage:
@@ -45,10 +51,12 @@ class FakeStorage:
         url: str | None = None,
         error: Exception | None = None,
         blocking: bool = False,
+        urls_by_bucket: dict[str, str] | None = None,
     ) -> None:
         self.url = url
         self.error = error
         self.blocking = blocking
+        self.urls_by_bucket = urls_by_bucket or {}
         self.bucket_name = ""
         self.requests: list[tuple[str, str, int]] = []
         self.started = threading.Event()
@@ -56,7 +64,7 @@ class FakeStorage:
 
     def from_(self, bucket_name: str) -> FakeStorageBucket:
         self.bucket_name = bucket_name
-        return FakeStorageBucket(self)
+        return FakeStorageBucket(self, bucket_name)
 
 
 class FakeSupabase:
@@ -83,6 +91,7 @@ class FakeSupabase:
         }
         self.confirmation_payload = confirmation_payload
         self.confirmation_error = confirmation_error
+        self.admin_allowed = False
         self.calls: list[tuple[str, dict[str, Any]]] = []
         if storage is not None:
             self.storage = storage
@@ -93,6 +102,11 @@ class FakeSupabase:
             return SimpleNamespace(execute=lambda: Response(self.qr_payload))
         if name == "evp_oper_obtener_grupo_invitacion":
             return SimpleNamespace(execute=lambda: Response(self.group_payload))
+        if name == "evp_kpa_validar_pin_administrativo":
+            return SimpleNamespace(execute=lambda: Response({
+                "ok": self.admin_allowed,
+                "code": "KIOSK_ADMIN_ALLOWED" if self.admin_allowed else "KIOSK_ADMIN_DENIED",
+            }))
         assert name == "evp_oper_confirmar_llegadas_invitacion"
 
         def execute() -> Response:
@@ -164,6 +178,7 @@ class FakePage:
         self.overlay: list[Any] = []
         self.update_calls = 0
         self.tasks: list[asyncio.Task[Any]] = []
+        self.dialog: Any = None
 
     def update(self) -> None:
         self.update_calls += 1
@@ -173,6 +188,10 @@ class FakePage:
         task = asyncio.create_task(task_factory())
         self.tasks.append(task)
         return task
+
+    def show_dialog(self, dialog: Any) -> None:
+        self.dialog = dialog
+        dialog.open = True
 
 
 class FakeKioskScanner:
@@ -184,6 +203,8 @@ class FakeKioskScanner:
         self.restart_calls = 0
         self.recover_calls = 0
         self.stop_calls = 0
+        self.suspend_calls = 0
+        self.resume_calls = 0
         self.preview_visible: list[bool] = []
 
     def set_preview_visible(self, visible: bool) -> None:
@@ -194,6 +215,12 @@ class FakeKioskScanner:
 
     def restart(self) -> None:
         self.restart_calls += 1
+
+    async def suspend_for_admin(self) -> None:
+        self.suspend_calls += 1
+
+    async def resume_after_admin(self) -> None:
+        self.resume_calls += 1
 
     def recover_after_reconnect(self) -> None:
         self.recover_calls += 1
@@ -244,11 +271,32 @@ async def drain(page: FakePage) -> None:
                 raise outcome
 
 
-def build(page: FakePage, database: FakeSupabase, user_context: dict[str, Any] | None = None) -> Any:
+def build(
+    page: FakePage,
+    database: FakeSupabase,
+    user_context: dict[str, Any] | None = None,
+    visual_asset_cache: Any = None,
+    on_kiosk_logout: Any = None,
+) -> Any:
     original = kiosk_view.KioskQrScanner
     kiosk_view.KioskQrScanner = FakeKioskScanner
     try:
-        return kiosk_view.build_kiosk_view(page=page, contexto_usuario=user_context or contexto(), supabase=database)
+        cache = visual_asset_cache or kiosk_view.KioskVisualAssetCache(
+            loader=lambda url, _asset_type: KioskVisualAsset(
+                data_url=url,
+                byte_count=1,
+                width=None,
+                height=None,
+                cache_hit=False,
+            )
+        )
+        return kiosk_view.build_kiosk_view(
+            page=page,
+            contexto_usuario=user_context or contexto(),
+            supabase=database,
+            visual_asset_cache=cache,
+            on_kiosk_logout=on_kiosk_logout,
+        )
     finally:
         kiosk_view.KioskQrScanner = original
 
@@ -256,8 +304,17 @@ def build(page: FakePage, database: FakeSupabase, user_context: dict[str, Any] |
 def test_route() -> None:
     assert is_kiosk_route("/app/kiosk")
     assert is_kiosk_route("/app/kiosk?demo=1")
+    assert is_kiosk_route("/kiosk")
+    assert not is_kiosk_route("/kiosk/login")
     assert parse_app_route("/app/kiosk")[0] == "kiosk"
     assert not is_kiosk_route("/app/dashboard")
+
+
+def test_scanner_start_is_scheduled_before_decorative_assets() -> None:
+    source = (ROOT / "views" / "kiosk_view.py").read_text(encoding="utf-8")
+    startup = source.rindex("scanner.start()")
+    assert startup < source.index("start_background_resolution()", startup)
+    assert startup < source.index("start_panel_resolution()", startup)
 
 
 def test_success_greeting_names_follow_updated_group_state() -> None:
@@ -472,9 +529,7 @@ async def test_select_guests_visual_contract_and_select_all_pending_only() -> No
         32,
         32,
     )
-    assert isinstance(content_box.image, kiosk_view.ft.DecorationImage)
-    assert content_box.image.src == "kiosk_panel_floral.png"
-    assert content_box.image.fit == kiosk_view.ft.BoxFit.COVER
+    assert content_box.image is None
     assert guide.content.border.top.color == kiosk_view.KIOSK_WINE
     assert guide.visible
 
@@ -654,7 +709,10 @@ async def test_kiosk_background_is_event_scoped_and_non_blocking() -> None:
     assert root.data["kiosk_state"].phase == KioskPhase.WELCOME_SCAN
     storage.release.set()
     await drain(page)
-    assert storage.requests == [("kiosk-backgrounds", "2/9.jpg", 3600)]
+    assert set(storage.requests) == {
+        ("kiosk-backgrounds", "2/9.jpg", 3600),
+        ("kiosk-panels", "2/9/panel.jpg", 3600),
+    }
     assert isinstance(root.image, kiosk_view.ft.DecorationImage)
     assert root.image.src == "https://example.invalid/signed-background.jpg"
     assert root.image.fit == kiosk_view.ft.BoxFit.CONTAIN
@@ -672,7 +730,10 @@ async def test_kiosk_background_is_event_scoped_and_non_blocking() -> None:
     other_context["eventos_permitidos"] = [other_event]
     other_root = build(other_page, FakeSupabase(storage=other_storage), other_context)
     await drain(other_page)
-    assert other_storage.requests == [("kiosk-backgrounds", "2/10.jpg", 3600)]
+    assert set(other_storage.requests) == {
+        ("kiosk-backgrounds", "2/10.jpg", 3600),
+        ("kiosk-panels", "2/10/panel.jpg", 3600),
+    }
     assert other_root.image is not None
     assert other_root.image.src == "https://example.invalid/event-10.jpg"
 
@@ -687,6 +748,102 @@ async def test_kiosk_background_failure_keeps_fallback_and_scanner_running() -> 
     assert root.bgcolor == kiosk_view.ft.Colors.SURFACE
     assert root.content is not None
     assert root.data["kiosk_state"].phase == KioskPhase.WELCOME_SCAN
+
+
+async def test_kiosk_panel_is_event_scoped_and_standalone_safe() -> None:
+    page = FakePage()
+    page.route = "/kiosk"
+    storage = FakeStorage(
+        urls_by_bucket={
+            "kiosk-backgrounds": "https://example.invalid/event-background.jpg",
+            "kiosk-panels": "https://example.invalid/event-panel.jpg",
+        }
+    )
+    root = build(page, FakeSupabase(storage=storage))
+    await drain(page)
+    content_box = root.data["kiosk_content_box"]
+    assert root.image is not None
+    assert root.image.src == "https://example.invalid/event-background.jpg"
+    assert isinstance(content_box.image, kiosk_view.ft.DecorationImage)
+    assert content_box.image.src == "https://example.invalid/event-panel.jpg"
+    assert content_box.image.fit == kiosk_view.ft.BoxFit.COVER
+    assert content_box.image.alignment == kiosk_view.ft.Alignment.CENTER
+    assert "kiosk_panel_floral.png" not in content_box.image.src
+    assert set(storage.requests) == {
+        ("kiosk-backgrounds", "2/9.jpg", 3600),
+        ("kiosk-panels", "2/9/panel.jpg", 3600),
+    }
+
+
+async def test_kiosk_panel_failure_keeps_neutral_content_box() -> None:
+    page = FakePage()
+    root = build(page, FakeSupabase(storage=FakeStorage(url="https://example.invalid/background.jpg")))
+    await drain(page)
+    content_box = root.data["kiosk_content_box"]
+    assert root.image is not None
+    assert content_box.image is None
+    assert content_box.bgcolor == kiosk_view.KIOSK_IVORY
+
+
+async def test_visual_assets_reuse_session_cache_across_kiosk_rebuilds() -> None:
+    storage = FakeStorage(
+        urls_by_bucket={
+            "kiosk-backgrounds": "https://example.invalid/background.jpg",
+            "kiosk-panels": "https://example.invalid/panel.jpg",
+        }
+    )
+    cache = kiosk_view.KioskVisualAssetCache(
+        loader=lambda url, asset_type: KioskVisualAsset(
+            data_url=f"data:image/{asset_type};base64,{url.rsplit('/', 1)[-1]}",
+            byte_count=10,
+            width=100,
+            height=50,
+            cache_hit=False,
+        )
+    )
+    first_page = FakePage()
+    first = build(first_page, FakeSupabase(storage=storage), visual_asset_cache=cache)
+    assert first.image is None
+    assert first.data["kiosk_content_box"].image is None
+    await drain(first_page)
+    assert len(storage.requests) == 2
+
+    second_page = FakePage()
+    second = build(second_page, FakeSupabase(storage=storage), visual_asset_cache=cache)
+    await drain(second_page)
+    assert len(storage.requests) == 2
+    assert second.image is not None
+    assert second.data["kiosk_content_box"].image is not None
+
+
+async def test_background_and_panel_fail_independently() -> None:
+    page = FakePage()
+    storage = FakeStorage(urls_by_bucket={"kiosk-panels": "https://example.invalid/panel.jpg"})
+    root = build(page, FakeSupabase(storage=storage))
+    await drain(page)
+    assert root.image is None
+    assert root.data["kiosk_content_box"].image is not None
+
+
+async def test_visual_assets_ignore_stale_result_after_event_change() -> None:
+    page = FakePage()
+    storage = FakeStorage(
+        blocking=True,
+        urls_by_bucket={
+            "kiosk-backgrounds": "https://example.invalid/old-background.jpg",
+            "kiosk-panels": "https://example.invalid/old-panel.jpg",
+        },
+    )
+    user_context = contexto()
+    root = build(page, FakeSupabase(storage=storage), user_context)
+    await asyncio.to_thread(storage.started.wait, 1)
+    event_ten = {**user_context["evento_actual"], "evento_id": 10}
+    user_context["evento_actual"] = event_ten
+    user_context["eventos_permitidos"] = [event_ten]
+    storage.release.set()
+    await drain(page)
+    assert root.image is None
+    assert root.data["kiosk_content_box"].image is None
 
 
 async def test_stale_kiosk_background_result_is_discarded_after_route_exit() -> None:
@@ -1200,6 +1357,119 @@ async def test_reconnect_is_limited_to_welcome_scan() -> None:
     assert scanner.recover_calls == 1
 
 
+async def test_hidden_admin_access_requires_six_taps_and_preserves_scanner_lifecycle() -> None:
+    page = FakePage()
+    db = FakeSupabase()
+    root = build(page, db)
+    scanner = root.data["kiosk_scanner"]
+    assert not [node for node in walk(root) if getattr(node, "content", None) == "Cerrar sesión"]
+    activator = next(node for node in walk(root) if getattr(node, "data", None) == {"kiosk": "admin_logo_activator"})
+    for _ in range(5):
+        activator.on_tap(SimpleNamespace())
+    assert page.dialog is None
+    activator.on_tap(SimpleNamespace())
+    assert page.dialog is not None
+    assert page.dialog.data == {"kiosk": "admin_pin_dialog"}
+    await drain(page)
+    assert scanner.suspend_calls == 1
+    pin_field = next(node for node in walk(page.dialog) if getattr(node, "data", None) == {"kiosk": "admin_pin_input"})
+    submit = next(node for node in page.dialog.actions if getattr(node, "data", None) == {"kiosk": "admin_pin_submit"})
+    pin_field.value = "123"
+    submit.on_click(SimpleNamespace())
+    assert not [name for name, _params in db.calls if name == "evp_kpa_validar_pin_administrativo"]
+    assert page.dialog.open
+    page.dialog.actions[0].on_click(SimpleNamespace())
+    await drain(page)
+    assert scanner.resume_calls == 1
+
+    expiry_page = FakePage()
+    expiry_root = build(expiry_page, FakeSupabase())
+    expiry_activator = next(
+        node for node in walk(expiry_root) if getattr(node, "data", None) == {"kiosk": "admin_logo_activator"}
+    )
+    original_clock = kiosk_view.monotonic
+    ticks = iter((0.0, 0.1, 0.2, 0.3, 0.4, 6.0, 6.1, 6.2, 6.3, 6.4, 6.5))
+    kiosk_view.monotonic = lambda: next(ticks)
+    try:
+        for _ in range(5):
+            expiry_activator.on_tap(SimpleNamespace())
+        expiry_activator.on_tap(SimpleNamespace())
+        assert expiry_page.dialog is None
+        for _ in range(5):
+            expiry_activator.on_tap(SimpleNamespace())
+        assert expiry_page.dialog is not None
+        await drain(expiry_page)
+        expiry_root.data["close_admin_access"](resume_scanner=False)
+    finally:
+        kiosk_view.monotonic = original_clock
+
+    exit_page = FakePage()
+    exit_root = build(exit_page, FakeSupabase())
+    exit_activator = next(
+        node for node in walk(exit_root) if getattr(node, "data", None) == {"kiosk": "admin_logo_activator"}
+    )
+    for _ in range(6):
+        exit_activator.on_tap(SimpleNamespace())
+    dialog = exit_page.dialog
+    exit_page.route = "/app/dashboard"
+    exit_page.on_route_change(SimpleNamespace(route="/app/dashboard"))
+    await drain(exit_page)
+    assert not dialog.open
+    assert all(task.done() for task in exit_page.tasks)
+
+
+async def test_hidden_admin_pin_denial_allow_restart_and_logout() -> None:
+    page = FakePage()
+    db = FakeSupabase()
+    logout_calls: list[bool] = []
+    root = build(page, db, on_kiosk_logout=lambda: logout_calls.append(True))
+    activator = next(node for node in walk(root) if getattr(node, "data", None) == {"kiosk": "admin_logo_activator"})
+    for _ in range(6):
+        activator.on_tap(SimpleNamespace())
+    pin_field = next(node for node in walk(page.dialog) if getattr(node, "data", None) == {"kiosk": "admin_pin_input"})
+    submit = next(node for node in page.dialog.actions if getattr(node, "data", None) == {"kiosk": "admin_pin_submit"})
+    pin_field.value = "123456"
+    submit.on_click(SimpleNamespace())
+    submit.on_click(SimpleNamespace())
+    await drain(page)
+    assert len([name for name, _params in db.calls if name == "evp_kpa_validar_pin_administrativo"]) == 1
+    assert page.dialog.data == {"kiosk": "admin_pin_dialog"}
+    assert pin_field.value == ""
+    assert page.dialog.open
+
+    db.admin_allowed = True
+    pin_field.value = "123456"
+    submit.on_click(SimpleNamespace())
+    await drain(page)
+    assert page.dialog.data == {"kiosk": "admin_panel"}
+    assert root.data["kiosk_state"].phase == KioskPhase.WELCOME_SCAN
+    page.dialog.actions[2].on_click(SimpleNamespace())
+    await drain(page)
+    assert root.data["kiosk_scanner"].resume_calls == 1
+
+    for _ in range(6):
+        activator.on_tap(SimpleNamespace())
+    pin_field = next(node for node in walk(page.dialog) if getattr(node, "data", None) == {"kiosk": "admin_pin_input"})
+    submit = next(node for node in page.dialog.actions if getattr(node, "data", None) == {"kiosk": "admin_pin_submit"})
+    pin_field.value = "123456"
+    submit.on_click(SimpleNamespace())
+    await drain(page)
+    page.dialog.actions[0].on_click(SimpleNamespace())
+    await drain(page)
+    assert root.data["kiosk_state"].phase == KioskPhase.WELCOME_SCAN
+    assert root.data["kiosk_scanner"].restart_calls == 1
+
+    for _ in range(6):
+        activator.on_tap(SimpleNamespace())
+    pin_field = next(node for node in walk(page.dialog) if getattr(node, "data", None) == {"kiosk": "admin_pin_input"})
+    submit = next(node for node in page.dialog.actions if getattr(node, "data", None) == {"kiosk": "admin_pin_submit"})
+    pin_field.value = "123456"
+    submit.on_click(SimpleNamespace())
+    await drain(page)
+    page.dialog.actions[1].on_click(SimpleNamespace())
+    assert logout_calls == [True]
+
+
 async def main_async() -> None:
     await test_real_resolution_loads_active_group_and_preserves_arrival_state()
     await test_qr_and_group_errors_never_publish_partial_data()
@@ -1212,6 +1482,11 @@ async def main_async() -> None:
     await test_guest_cards_use_available_width_on_narrow_layout()
     await test_kiosk_background_is_event_scoped_and_non_blocking()
     await test_kiosk_background_failure_keeps_fallback_and_scanner_running()
+    await test_kiosk_panel_is_event_scoped_and_standalone_safe()
+    await test_kiosk_panel_failure_keeps_neutral_content_box()
+    await test_visual_assets_reuse_session_cache_across_kiosk_rebuilds()
+    await test_background_and_panel_fail_independently()
+    await test_visual_assets_ignore_stale_result_after_event_change()
     await test_stale_kiosk_background_result_is_discarded_after_route_exit()
     await test_kiosk_canvas_is_stable_between_welcome_and_guest_selection()
     await test_empty_selection_disables_confirmation_without_writing()
@@ -1230,10 +1505,13 @@ async def main_async() -> None:
     await test_success_map_is_cleared_before_a_new_invitation()
     await test_route_exit_cancels_resolution_before_scanner_shutdown()
     await test_reconnect_is_limited_to_welcome_scan()
+    await test_hidden_admin_access_requires_six_taps_and_preserves_scanner_lifecycle()
+    await test_hidden_admin_pin_denial_allow_restart_and_logout()
 
 
 def main() -> None:
     test_route()
+    test_scanner_start_is_scheduled_before_decorative_assets()
     test_success_greeting_names_follow_updated_group_state()
     asyncio.run(main_async())
     print("Kiosk view tests passed.")

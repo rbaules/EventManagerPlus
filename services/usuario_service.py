@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+from contextvars import ContextVar
+from time import perf_counter
+from typing import Any, Callable
 
 from services.authorization_service import (
     ROL_ADMINISTRADOR,
@@ -31,17 +33,37 @@ class UsuarioContextoError(RuntimeError):
     """Error controlado al cargar permisos y contexto del usuario."""
 
 
+_CONTEXT_PERF_HOOK: ContextVar[Callable[..., Any] | None] = ContextVar(
+    "eventplus_context_perf_hook",
+    default=None,
+)
+
+
+def _profile_query(stage: str, operation: Callable[[], Any], **fields: Any) -> Any:
+    hook = _CONTEXT_PERF_HOOK.get()
+    began_at = perf_counter()
+    try:
+        return operation()
+    finally:
+        if hook is not None:
+            hook(stage, duration_ms=round((perf_counter() - began_at) * 1000, 1), **fields)
+
+
 def buscar_usuario_eventplus_por_auth_uuid(
     supabase: Any,
     auth_user_id: str,
 ) -> dict[str, Any] | None:
-    response = (
-        supabase
-        .table("evp_usr_usuario")
-        .select(SELECT_USUARIO)
-        .eq("usr_usuario_auth_uuid", auth_user_id)
-        .limit(1)
-        .execute()
+    response = _profile_query(
+        "E3_USUARIO_EVENTPLUS_LOADED",
+        lambda: (
+            supabase
+            .table("evp_usr_usuario")
+            .select(SELECT_USUARIO)
+            .eq("usr_usuario_auth_uuid", auth_user_id)
+            .limit(1)
+            .execute()
+        ),
+        query="usuario_eventplus",
     )
 
     data = extract_data(response)
@@ -152,12 +174,16 @@ def _dedupe_eventos(eventos: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _consultar_cuentas_master(supabase: Any) -> list[dict[str, Any]]:
-    response = (
-        supabase
-        .table("evp_cta_cuenta")
-        .select("cta_cuenta_id,cta_nombre_cuenta,cta_nombre_cuenta_abrev,cta_estado")
-        .order("cta_cuenta_id")
-        .execute()
+    response = _profile_query(
+        "E4_CUENTAS_CARGADAS",
+        lambda: (
+            supabase
+            .table("evp_cta_cuenta")
+            .select("cta_cuenta_id,cta_nombre_cuenta,cta_nombre_cuenta_abrev,cta_estado")
+            .order("cta_cuenta_id")
+            .execute()
+        ),
+        query="cuentas_master",
     )
     filas = _extraer_filas(response)
     _trazar_filas("cuentas_master", filas)
@@ -185,7 +211,12 @@ def _consultar_eventos_por_cuenta(
     )
     if solo_activos:
         query = query.eq("eve_estado", "Activo")
-    response = query.order("eve_evento_id").execute()
+    response = _profile_query(
+        "E5_EVENTOS_CARGADOS",
+        lambda: query.order("eve_evento_id").execute(),
+        query="eventos_cuenta",
+        account_id=cuenta_id,
+    )
     filas = _extraer_filas(response)
     _trazar_filas(f"eventos_cuenta_{cuenta_id}", filas)
     return [
@@ -201,18 +232,24 @@ def _consultar_evento_activo(
     evento_id: int,
     rol: str,
 ) -> dict[str, Any] | None:
-    response = (
-        supabase
-        .table("evp_eve_evento")
-        .select(
-            "eve_cuenta_id,eve_evento_id,eve_nombre_evento,eve_nombre_evento_abrev,"
-            "eve_fase_evento,eve_fecha_hora_inicio,eve_fecha_hora_fin,eve_estado"
-        )
-        .eq("eve_cuenta_id", cuenta_id)
-        .eq("eve_evento_id", evento_id)
-        .eq("eve_estado", "Activo")
-        .limit(1)
-        .execute()
+    response = _profile_query(
+        "E5_EVENTO_ACTIVO_CARGADO",
+        lambda: (
+            supabase
+            .table("evp_eve_evento")
+            .select(
+                "eve_cuenta_id,eve_evento_id,eve_nombre_evento,eve_nombre_evento_abrev,"
+                "eve_fase_evento,eve_fecha_hora_inicio,eve_fecha_hora_fin,eve_estado"
+            )
+            .eq("eve_cuenta_id", cuenta_id)
+            .eq("eve_evento_id", evento_id)
+            .eq("eve_estado", "Activo")
+            .limit(1)
+            .execute()
+        ),
+        query="evento_activo",
+        account_id=cuenta_id,
+        event_id=evento_id,
     )
     data = _extraer_filas(response)
     _trazar_filas(f"evento_activo_{cuenta_id}_{evento_id}", data)
@@ -225,18 +262,22 @@ def _consultar_cuentas_vinculadas(
     supabase: Any,
     usr_usuario_id: str,
 ) -> list[dict[str, Any]]:
-    response = (
-        supabase
-        .table("evp_ucu_usuario_cuenta")
-        .select(
-            "ucu_cuenta_id,ucu_rol,ucu_estado,"
-            "evp_cta_cuenta:ucu_cuenta_id("
-            "cta_cuenta_id,cta_nombre_cuenta,cta_nombre_cuenta_abrev,cta_estado"
-            ")"
-        )
-        .eq("ucu_usuario_id", usr_usuario_id)
-        .eq("ucu_estado", "Activo")
-        .execute()
+    response = _profile_query(
+        "E4_CUENTAS_CARGADAS",
+        lambda: (
+            supabase
+            .table("evp_ucu_usuario_cuenta")
+            .select(
+                "ucu_cuenta_id,ucu_rol,ucu_estado,"
+                "evp_cta_cuenta:ucu_cuenta_id("
+                "cta_cuenta_id,cta_nombre_cuenta,cta_nombre_cuenta_abrev,cta_estado"
+                ")"
+            )
+            .eq("ucu_usuario_id", usr_usuario_id)
+            .eq("ucu_estado", "Activo")
+            .execute()
+        ),
+        query="cuentas_vinculadas",
     )
 
     cuentas: list[dict[str, Any]] = []
@@ -260,14 +301,19 @@ def _consultar_eventos_asignados(
     cuenta_id: int,
     rol: str,
 ) -> list[dict[str, Any]]:
-    response = (
-        supabase
-        .table("evp_uev_usuario_evento")
-        .select("uev_cuenta_id,uev_evento_id,uev_estado")
-        .eq("uev_usuario_id", usr_usuario_id)
-        .eq("uev_cuenta_id", cuenta_id)
-        .eq("uev_estado", "Activo")
-        .execute()
+    response = _profile_query(
+        "E5_EVENTOS_ASIGNADOS_CARGADOS",
+        lambda: (
+            supabase
+            .table("evp_uev_usuario_evento")
+            .select("uev_cuenta_id,uev_evento_id,uev_estado")
+            .eq("uev_usuario_id", usr_usuario_id)
+            .eq("uev_cuenta_id", cuenta_id)
+            .eq("uev_estado", "Activo")
+            .execute()
+        ),
+        query="eventos_asignados",
+        account_id=cuenta_id,
     )
 
     eventos: list[dict[str, Any]] = []
@@ -341,7 +387,7 @@ def _seleccionar_evento_actual(
     return None
 
 
-def cargar_contexto_usuario(supabase: Any, auth_user_id: str) -> dict[str, Any]:
+def _cargar_contexto_usuario(supabase: Any, auth_user_id: str) -> dict[str, Any]:
     try:
         usuario = buscar_usuario_eventplus_por_auth_uuid(supabase, auth_user_id)
     except Exception as ex:
@@ -352,7 +398,7 @@ def cargar_contexto_usuario(supabase: Any, auth_user_id: str) -> dict[str, Any]:
 
     if not usuario:
         raise UsuarioContextoError(
-            "Tu usuario fue autenticado, pero no esta autorizado en EventPlus."
+            "Tu usuario fue autenticado, pero no esta autorizado en EVKOR."
         )
 
     if safe_get(usuario, "usr_estado") != "Activo":
@@ -363,7 +409,7 @@ def cargar_contexto_usuario(supabase: Any, auth_user_id: str) -> dict[str, Any]:
     usr_usuario_id = str(safe_get(usuario, "usr_usuario_id", ""))
     if not usr_usuario_id:
         raise UsuarioContextoError(
-            "No pudimos identificar tu usuario interno de EventPlus."
+            "No pudimos identificar tu usuario interno de EVKOR."
         )
 
     es_master = bool(safe_get(usuario, "usr_es_usuario_master", False))
@@ -490,6 +536,20 @@ def cargar_contexto_usuario(supabase: Any, auth_user_id: str) -> dict[str, Any]:
     contexto["capacidades"] = resumen_capacidades(contexto)
     actualizar_rol_visible(contexto)
     return contexto
+
+
+def cargar_contexto_usuario(
+    supabase: Any,
+    auth_user_id: str,
+    *,
+    perf_hook: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Build the existing authorized context, optionally emitting query timings."""
+    token = _CONTEXT_PERF_HOOK.set(perf_hook)
+    try:
+        return _cargar_contexto_usuario(supabase, auth_user_id)
+    finally:
+        _CONTEXT_PERF_HOOK.reset(token)
 
 
 def buscar_usuario_eventplus_por_email(

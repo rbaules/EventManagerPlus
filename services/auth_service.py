@@ -499,7 +499,7 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
         <html lang="es">
         <head>
             <meta charset="utf-8">
-            <title>EventPlus - Login completado</title>
+            <title>EVKOR - Login completado</title>
             <style>
                 body { font-family: Arial, sans-serif; margin: 40px; color: #222; }
                 .box {
@@ -515,7 +515,7 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
         <body>
             <div class="box">
                 <h1>Login completado</h1>
-                <p>Ya puedes cerrar esta pestana y volver a EventPlus.</p>
+                <p>Ya puedes cerrar esta pestana y volver a EVKOR.</p>
             </div>
         </body>
         </html>

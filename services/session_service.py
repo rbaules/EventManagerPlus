@@ -44,11 +44,13 @@ class PageSessionController:
         *,
         context_loader: Callable[[Any, str], dict[str, Any]] = cargar_contexto_usuario,
         server_session_binding: Any = None,
+        kiosk_e2e_profiler: Any = None,
     ) -> None:
         self.page = page
         self.supabase = supabase
         self._context_loader = context_loader
         self._server_session_binding = server_session_binding
+        self._kiosk_e2e_profiler = kiosk_e2e_profiler
         self._refresh_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._tasks: set[Any] = set()
@@ -62,6 +64,25 @@ class PageSessionController:
         self._logout_complete = False
         self.user: Any = None
         self.context: dict[str, Any] | None = None
+
+        if (
+            self._kiosk_e2e_profiler is not None
+            and hasattr(self._server_session_binding, "set_e2e_profiler")
+        ):
+            self._server_session_binding.set_e2e_profiler(self._kiosk_e2e_profiler)
+
+    def _e2e_mark(self, stage: str, **fields: Any) -> float | None:
+        profiler = self._kiosk_e2e_profiler
+        if profiler is None:
+            return None
+        return profiler.mark(stage, **fields)
+
+    def mark_kiosk_e2e_checkpoint(self, stage: str, **fields: Any) -> float | None:
+        """Expose a diagnostic checkpoint without exposing the profiler itself."""
+        profiler = self._kiosk_e2e_profiler
+        if profiler is None:
+            return None
+        return profiler.checkpoint(stage, **fields)
 
     @property
     def authenticated(self) -> bool:
@@ -166,6 +187,10 @@ class PageSessionController:
         load_context: bool = True,
         claim_home: bool = False,
     ) -> SessionValidationResult:
+        self._e2e_mark(
+            "E1_SESSION_RESTORE_BEGIN",
+            source="server_cookie" if self._server_session_binding is not None else "auth_client",
+        )
         if self._server_session_binding is not None:
             result = self._server_session_binding.restore_and_run(
                 self.supabase,
@@ -197,10 +222,20 @@ class PageSessionController:
             # supabase-py refreshes an expired/near-expiry session inside
             # get_session(). This lock guarantees one effective refresh per Page.
             with self._refresh_lock:
+                auth_started = self._e2e_mark("E1_AUTH_GET_SESSION_BEGIN")
                 session = self.supabase.auth.get_session()
+                if auth_started is not None:
+                    self._kiosk_e2e_profiler.duration(
+                        "E1_AUTH_GET_SESSION_END", auth_started
+                    )
                 if not session:
                     return self._invalidate(SESSION_INVALID_MESSAGE)
+                user_started = self._e2e_mark("E2_AUTH_GET_USER_BEGIN")
                 user_response = self.supabase.auth.get_user()
+                if user_started is not None:
+                    self._kiosk_e2e_profiler.duration(
+                        "E2_AUTH_GET_USER_END", user_started
+                    )
         except Exception:
             return self._invalidate(SESSION_INVALID_MESSAGE)
 
@@ -209,15 +244,25 @@ class PageSessionController:
         if not user or not auth_user_id:
             return self._invalidate(SESSION_INVALID_MESSAGE)
 
+        self._e2e_mark("E2_SESSION_AUTH_RESTORED")
+
         context = self.context
         if load_context or context is None:
             try:
-                context = self._context_loader(self.supabase, auth_user_id)
+                self._e2e_mark("E3_CONTEXT_LOAD_BEGIN")
+                if self._context_loader is cargar_contexto_usuario:
+                    context = self._context_loader(
+                        self.supabase,
+                        auth_user_id,
+                        perf_hook=self._e2e_mark,
+                    )
+                else:
+                    context = self._context_loader(self.supabase, auth_user_id)
             except UsuarioContextoError as ex:
                 return self._invalidate(str(ex))
             except Exception:
                 return self._invalidate(
-                    "No fue posible validar tu acceso a EventPlus."
+                    "No fue posible validar tu acceso a EVKOR."
                 )
 
         if load_context and self._server_session_binding is not None:
@@ -247,7 +292,7 @@ class PageSessionController:
 
         if not context or not self._context_is_valid(context, auth_user_id):
             return self._invalidate(
-                "Tu sesion es valida, pero el contexto de EventPlus no es valido."
+                "Tu sesion es valida, pero el contexto de EVKOR no es valido."
             )
 
         with self._state_lock:
@@ -264,6 +309,14 @@ class PageSessionController:
                 should_build_home = True
 
         guardar_contexto_sesion(self.page.session.store, context)
+        account = context.get("cuenta_actual") or {}
+        event = context.get("evento_actual") or {}
+        self._e2e_mark(
+            "E6_CONTEXT_RESOLVED",
+            account_id=account.get("cuenta_id"),
+            event_id=event.get("evento_id"),
+            load_context=load_context,
+        )
         return SessionValidationResult(
             True,
             user=user,

@@ -3,22 +3,25 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any, Callable
-from urllib.parse import urlparse
 
 import flet as ft
 
 from components.kiosk_qr_scanner import KioskQrScanner
 from components.kiosk_route_map import build_kiosk_route_map, build_route_overlay_data_url
 from components.kiosk_route_map_viewer import MAX_ZOOM, MIN_ZOOM, build_kiosk_route_map_viewer
+from components.evkor_brand import build_evkor_brand
 from services.invitado_service import (
     cargar_grupo_invitacion,
     confirmar_llegadas_invitados,
     resolver_invitacion_qr,
 )
-from services.kiosk_background_service import resolve_kiosk_background_url
+from services.kiosk_asset_service import (
+    KioskVisualAssetCache,
+)
 from services.kiosk_map_service import ResultadoRuta, calcular_ruta
+from services.kiosk_admin_service import validar_pin_administrativo
 from services.kiosk_route_map_service import (
     MapAssetCache,
     load_kiosk_route_map_data_url,
@@ -33,11 +36,8 @@ KIOSK_IVORY = "#F8F1E8"
 KIOSK_BLUSH = "#F3D9D0"
 KIOSK_TEXT = "#4B241C"
 KIOSK_BORDER = "#D9C7BC"
-
-# This path is relative to Flet's configured ``assets_dir="assets"``. Keep the
-# panel decoration independent from the signed, event-level background image.
-KIOSK_PANEL_FLORAL_ASSET = "kiosk_panel_floral.png"
-
+KIOSK_ADMIN_TAP_COUNT = 6
+KIOSK_ADMIN_TAP_WINDOW_SECONDS = 5.0
 
 class KioskPhase(str, Enum):
     WELCOME_SCAN = "WELCOME_SCAN"
@@ -273,7 +273,8 @@ def kiosk_success_copy(confirmed_count: int) -> tuple[str, str]:
 
 
 def is_kiosk_route(route: str | None) -> bool:
-    return parse_app_route(route)[0] == "kiosk"
+    clean = str(route or "").split("?", 1)[0].rstrip("/") or "/"
+    return clean == "/kiosk" or parse_app_route(clean)[0] == "kiosk"
 
 
 def build_kiosk_view(
@@ -282,6 +283,10 @@ def build_kiosk_view(
     contexto_usuario: dict[str, Any],
     supabase: Any = None,
     on_authenticated_route_change: Callable[[], None] | None = None,
+    on_kiosk_logout: Callable[[], None] | None = None,
+    visual_asset_cache: KioskVisualAssetCache | None = None,
+    asset_context_ready_at: float | None = None,
+    e2e_profiler: Any = None,
 ) -> ft.Control:
     """Build the Kiosk shell and resolve accepted QR codes through existing read services."""
     # A scrollable Page sizes its direct children from their contents. Kiosk is a
@@ -298,6 +303,14 @@ def build_kiosk_view(
         page.scroll = previous_page_scroll
         page_scroll_restored = True
 
+    build_started = perf_counter()
+    if e2e_profiler is not None:
+        e2e_profiler.mark("E7_KIOSK_BUILD_ENTERED")
+    if asset_context_ready_at is not None:
+        print(
+            "[KIOSK-STARTUP][PERF] stage=T3_build_begin "
+            f"total_ms={(build_started - asset_context_ready_at) * 1000:.1f}"
+        )
     state = KioskState()
     screen_content = ft.Column(horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=20)
     resolution_task: Any = None
@@ -306,6 +319,9 @@ def build_kiosk_view(
     confirmation_owner: object | None = None
     background_task: Any = None
     background_owner: object | None = None
+    panel_task: Any = None
+    panel_owner: object | None = None
+    kiosk_asset_cache = visual_asset_cache or KioskVisualAssetCache()
     route_map_task: Any = None
     route_map_owner: object | None = None
     map_asset_cache = MapAssetCache()
@@ -314,11 +330,229 @@ def build_kiosk_view(
     viewer_overlay: ft.Control | None = None
     viewer_zoom = MIN_ZOOM
     has_rendered = False
+    admin_tap_count = 0
+    admin_tap_started_at: float | None = None
+    admin_dialog: ft.AlertDialog | None = None
+    admin_modal: str | None = None
+    admin_validation_task: Any = None
+    admin_validation_owner: object | None = None
+    admin_scanner_task: Any = None
+    admin_scanner_owner: object | None = None
 
     # The real Flet Page exposes this list.  The small test Page deliberately
     # mirrors it so the viewer is verified without any browser or camera.
     if not hasattr(page, "overlay"):
         page.overlay = []
+
+    def reset_admin_taps() -> None:
+        nonlocal admin_tap_count, admin_tap_started_at
+        admin_tap_count = 0
+        admin_tap_started_at = None
+
+    def close_admin_dialog(*, update: bool = True) -> None:
+        nonlocal admin_dialog
+        if admin_dialog is not None:
+            admin_dialog.open = False
+        admin_dialog = None
+        if update:
+            page.update()
+
+    def resume_scanner_after_admin() -> None:
+        nonlocal admin_scanner_task, admin_scanner_owner
+        if state.phase != KioskPhase.WELCOME_SCAN or admin_modal is not None:
+            return
+        owner = object()
+        admin_scanner_owner = owner
+
+        async def resume() -> None:
+            nonlocal admin_scanner_task
+            try:
+                await scanner.resume_after_admin()
+            finally:
+                if admin_scanner_owner is owner:
+                    admin_scanner_task = None
+
+        admin_scanner_task = page.run_task(resume)
+
+    def suspend_scanner_for_admin() -> None:
+        nonlocal admin_scanner_task, admin_scanner_owner
+        owner = object()
+        admin_scanner_owner = owner
+
+        async def suspend() -> None:
+            nonlocal admin_scanner_task
+            try:
+                await scanner.suspend_for_admin()
+            finally:
+                if admin_scanner_owner is owner:
+                    admin_scanner_task = None
+
+        admin_scanner_task = page.run_task(suspend)
+
+    def cleanup_admin_access(*, resume_scanner: bool, update: bool = False) -> None:
+        nonlocal admin_modal, admin_validation_owner, admin_validation_task, admin_scanner_owner, admin_scanner_task
+        reset_admin_taps()
+        admin_modal = None
+        admin_validation_owner = None
+        task = admin_validation_task
+        admin_validation_task = None
+        if task is not None and not task.done():
+            task.cancel()
+        admin_scanner_owner = None
+        scanner_task = admin_scanner_task
+        admin_scanner_task = None
+        if not resume_scanner and scanner_task is not None and not scanner_task.done():
+            scanner_task.cancel()
+        close_admin_dialog(update=False)
+        if resume_scanner:
+            resume_scanner_after_admin()
+        if update:
+            page.update()
+
+    def show_admin_panel() -> None:
+        nonlocal admin_dialog, admin_modal
+        if state.phase != KioskPhase.WELCOME_SCAN:
+            cleanup_admin_access(resume_scanner=False)
+            return
+        admin_modal = "panel"
+
+        def restart_kiosk(_event: Any = None) -> None:
+            cleanup_admin_access(resume_scanner=False, update=False)
+            reset_kiosk()
+            resume_scanner_after_admin()
+
+        def close_panel(_event: Any = None) -> None:
+            cleanup_admin_access(resume_scanner=True)
+
+        def logout_kiosk(_event: Any = None) -> None:
+            cleanup_admin_access(resume_scanner=False, update=False)
+            if on_kiosk_logout is not None:
+                on_kiosk_logout()
+
+        admin_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Administración Kiosco", color=KIOSK_WINE),
+            content=ft.Column(
+                [ft.Text("Selecciona una acción administrativa.", color=KIOSK_TEXT)],
+                tight=True,
+            ),
+            actions=[
+                ft.OutlinedButton("Reiniciar Kiosco", on_click=restart_kiosk),
+                ft.ElevatedButton(
+                    "Cerrar sesión",
+                    on_click=logout_kiosk,
+                    style=ft.ButtonStyle(bgcolor=KIOSK_WINE, color=ft.Colors.WHITE),
+                ),
+                ft.OutlinedButton("Volver", on_click=close_panel),
+            ],
+            bgcolor=KIOSK_IVORY,
+            data={"kiosk": "admin_panel"},
+        )
+        page.show_dialog(admin_dialog)
+
+    def show_admin_pin_dialog() -> None:
+        nonlocal admin_dialog, admin_modal, admin_validation_task, admin_validation_owner
+        if state.phase != KioskPhase.WELCOME_SCAN or admin_modal is not None:
+            return
+        reset_admin_taps()
+        admin_modal = "pin"
+        suspend_scanner_for_admin()
+        pin_field = ft.TextField(
+            label="PIN administrativo",
+            password=True,
+            can_reveal_password=False,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            max_length=6,
+            autofocus=True,
+            width=280,
+            data={"kiosk": "admin_pin_input"},
+        )
+        feedback = ft.Text("", color=ft.Colors.ERROR, visible=False, data={"kiosk": "admin_pin_feedback"})
+        submit = ft.ElevatedButton(
+            "Acceder",
+            style=ft.ButtonStyle(bgcolor=KIOSK_WINE, color=ft.Colors.WHITE),
+            data={"kiosk": "admin_pin_submit"},
+        )
+
+        def cancel_pin(_event: Any = None) -> None:
+            cleanup_admin_access(resume_scanner=True)
+
+        def submit_pin(_event: Any = None) -> None:
+            nonlocal admin_validation_task, admin_validation_owner
+            if admin_modal != "pin" or admin_validation_owner is not None:
+                return
+            pin = str(pin_field.value or "")
+            if len(pin) != 6 or not pin.isdigit():
+                feedback.value = "Ingresa un PIN de 6 dígitos."
+                feedback.visible = True
+                page.update()
+                return
+            submit.disabled = True
+            feedback.value = "Validando..."
+            feedback.color = KIOSK_TEXT
+            feedback.visible = True
+            owner = object()
+            admin_validation_owner = owner
+            page.update()
+
+            async def validate() -> None:
+                nonlocal admin_validation_task, admin_validation_owner, admin_modal
+                try:
+                    result = await asyncio.to_thread(
+                        validar_pin_administrativo, contexto_usuario, pin, supabase
+                    )
+                    if admin_validation_owner is not owner or admin_modal != "pin":
+                        return
+                    admin_validation_owner = None
+                    admin_validation_task = None
+                    pin_field.value = ""
+                    if result.ok:
+                        close_admin_dialog(update=False)
+                        show_admin_panel()
+                        return
+                    submit.disabled = False
+                    feedback.value = "No fue posible validar el PIN."
+                    feedback.color = ft.Colors.ERROR
+                    feedback.visible = True
+                    page.update()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if admin_validation_owner is owner and admin_modal == "pin":
+                        admin_validation_owner = None
+                        admin_validation_task = None
+                        pin_field.value = ""
+                        submit.disabled = False
+                        feedback.value = "No fue posible validar el PIN."
+                        feedback.color = ft.Colors.ERROR
+                        feedback.visible = True
+                        page.update()
+
+            admin_validation_task = page.run_task(validate)
+
+        submit.on_click = submit_pin
+        pin_field.on_submit = submit_pin
+        admin_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Acceso administrativo", color=KIOSK_WINE),
+            content=ft.Column([pin_field, feedback], tight=True),
+            actions=[ft.TextButton("Cancelar", on_click=cancel_pin), submit],
+            bgcolor=KIOSK_IVORY,
+            data={"kiosk": "admin_pin_dialog"},
+        )
+        page.show_dialog(admin_dialog)
+
+    def register_admin_logo_tap(_event: Any = None) -> None:
+        nonlocal admin_tap_count, admin_tap_started_at
+        if state.phase != KioskPhase.WELCOME_SCAN or admin_modal is not None:
+            return
+        now = monotonic()
+        if admin_tap_started_at is None or now - admin_tap_started_at > KIOSK_ADMIN_TAP_WINDOW_SECONDS:
+            admin_tap_count = 0
+            admin_tap_started_at = now
+        admin_tap_count += 1
+        if admin_tap_count >= KIOSK_ADMIN_TAP_COUNT:
+            show_admin_pin_dialog()
 
     def active_event() -> tuple[dict[str, Any], tuple[int, int]] | None:
         evento = contexto_usuario.get("evento_actual")
@@ -535,6 +769,11 @@ def build_kiosk_view(
             scanner.set_preview_visible(True)
             qr_guide.visible = True
             controls = [
+                ft.GestureDetector(
+                    content=build_evkor_brand(width=150, text_size=28),
+                    on_tap=register_admin_logo_tap,
+                    data={"kiosk": "admin_logo_activator"},
+                ),
                 ft.Text("¡Bienvenidos!", size=34, weight=ft.FontWeight.BOLD, color=KIOSK_WINE),
                 ft.Text(
                     "Escanea el código QR de tu invitación",
@@ -990,6 +1229,8 @@ def build_kiosk_view(
         page=page,
         on_qr_finalized=on_kiosk_qr_finalized,
         on_camera_error=on_kiosk_camera_error,
+        startup_origin=asset_context_ready_at,
+        e2e_profiler=e2e_profiler,
     )
     qr_guide = ft.Container(
         width=560,
@@ -1030,11 +1271,6 @@ def build_kiosk_view(
         padding=ft.Padding(left=32, top=64, right=32, bottom=32),
         border_radius=24,
         bgcolor=KIOSK_IVORY,
-        image=ft.DecorationImage(
-            src=KIOSK_PANEL_FLORAL_ASSET,
-            fit=ft.BoxFit.COVER,
-            alignment=ft.Alignment.CENTER,
-        ),
         border=ft.Border.all(width=1, color=KIOSK_BORDER),
         shadow=ft.BoxShadow(
             blur_radius=16,
@@ -1071,63 +1307,107 @@ def build_kiosk_view(
         if storage is None:
             return
         _evento, event_key = captured
+        kiosk_asset_cache.activate(*event_key)
         owner = object()
         background_owner = owner
 
         async def resolve_background() -> None:
             nonlocal background_task
-            url = await asyncio.to_thread(
-                resolve_kiosk_background_url,
+            asset = await asyncio.to_thread(
+                kiosk_asset_cache.get_or_load,
                 supabase,
                 event_key[0],
                 event_key[1],
+                "background",
             )
             current = active_event()
-            if url is None:
-                print(
-                    "[KIOSK-BG] fallback reason=signed_url_unavailable "
-                    f"account_id={event_key[0]} event_id={event_key[1]}"
-                )
+            if asset is None:
                 return
             if background_owner is not owner:
-                print("[KIOSK-BG] result_discarded reason=stale_owner")
+                print("[KIOSK-ASSET] stale result ignored asset=background reason=stale_owner")
                 return
             if current is None or current[1] != event_key:
-                print("[KIOSK-BG] result_discarded reason=event_changed")
+                print("[KIOSK-ASSET] stale result ignored asset=background reason=event_changed")
                 return
             if not is_kiosk_route(getattr(page, "route", None)):
-                print("[KIOSK-BG] result_discarded reason=route_exit")
+                print("[KIOSK-ASSET] stale result ignored asset=background reason=route_exit")
                 return
-            parsed_url = urlparse(url)
-            path_parts = [part for part in parsed_url.path.split("/") if part]
-            path_suffix = (
-                "/" + "/".join(path_parts[-2:])
-                if len(path_parts) >= 2
-                else parsed_url.path or "/"
-            )
-            print(
-                "[KIOSK-BG] url_metadata "
-                f"scheme={parsed_url.scheme or '<missing>'} "
-                f"host={parsed_url.hostname or '<missing>'} "
-                f"path_suffix={path_suffix} url_length={len(url)}"
-            )
+            update_started = perf_counter()
             root.image = ft.DecorationImage(
-                src=url,
+                src=asset.data_url,
                 fit=ft.BoxFit.CONTAIN,
                 alignment=ft.Alignment.CENTER,
             )
             print(
-                "[KIOSK-BG] applied "
+                "[KIOSK-ASSET] background applied "
                 f"account_id={event_key[0]} event_id={event_key[1]} "
                 "target=root_container mode=decoration_image fit=contain"
             )
-            print("[KIOSK-BG] update_begin")
             page.update()
-            print("[KIOSK-BG] update_complete")
+            print(
+                "[KIOSK-ASSET][PERF] stage=decoration_update asset=background "
+                f"duration_ms={(perf_counter() - update_started) * 1000:.1f} cache_hit={asset.cache_hit}"
+            )
 
         task = page.run_task(resolve_background)
         if background_owner is owner:
             background_task = task
+
+    def start_panel_resolution() -> None:
+        nonlocal panel_owner, panel_task
+        captured = active_event()
+        if captured is None or supabase is None:
+            return
+        try:
+            storage = supabase.storage
+        except (AttributeError, RuntimeError):
+            return
+        if storage is None:
+            return
+        _evento, event_key = captured
+        owner = object()
+        panel_owner = owner
+
+        async def resolve_panel() -> None:
+            nonlocal panel_task
+            asset = await asyncio.to_thread(
+                kiosk_asset_cache.get_or_load,
+                supabase,
+                event_key[0],
+                event_key[1],
+                "panel",
+            )
+            current = active_event()
+            if asset is None:
+                return
+            if panel_owner is not owner:
+                print("[KIOSK-ASSET] stale result ignored asset=panel reason=stale_owner")
+                return
+            if current is None or current[1] != event_key:
+                print("[KIOSK-ASSET] stale result ignored asset=panel reason=event_changed")
+                return
+            if not is_kiosk_route(getattr(page, "route", None)):
+                print("[KIOSK-ASSET] stale result ignored asset=panel reason=route_exit")
+                return
+            update_started = perf_counter()
+            content_box.image = ft.DecorationImage(
+                src=asset.data_url,
+                fit=ft.BoxFit.COVER,
+                alignment=ft.Alignment.CENTER,
+            )
+            print(
+                "[KIOSK-ASSET] panel applied "
+                f"account_id={event_key[0]} event_id={event_key[1]}"
+            )
+            page.update()
+            print(
+                "[KIOSK-ASSET][PERF] stage=decoration_update asset=panel "
+                f"duration_ms={(perf_counter() - update_started) * 1000:.1f} cache_hit={asset.cache_hit}"
+            )
+
+        task = page.run_task(resolve_panel)
+        if panel_owner is owner:
+            panel_task = task
 
     def start_route_map_prefetch() -> None:
         """Prepare an invitation route while SELECT_GUESTS remains interactive."""
@@ -1271,24 +1551,45 @@ def build_kiosk_view(
         scanner.recover_after_reconnect()
 
     def pause_kiosk() -> None:
+        nonlocal background_owner, background_task, panel_owner, panel_task
+        cleanup_admin_access(resume_scanner=False, update=False)
         cancel_resolution()
         cancel_confirmation()
         cancel_route_map()
+        map_asset_cache.clear()
+        kiosk_asset_cache.clear()
+        background_owner = None
+        task = background_task
+        background_task = None
+        if task is not None and not task.done():
+            task.cancel()
+        panel_owner = None
+        task = panel_task
+        panel_task = None
+        if task is not None and not task.done():
+            task.cancel()
         scanner.close(disconnected=True)
 
     def on_route_change(event: ft.RouteChangeEvent) -> None:
-        nonlocal background_owner, background_task
+        nonlocal background_owner, background_task, panel_owner, panel_task
         if not is_kiosk_route(getattr(event, "route", None) or page.route):
+            cleanup_admin_access(resume_scanner=False, update=False)
             restore_page_scroll()
             cancel_resolution()
             cancel_confirmation()
             cancel_route_map()
+            kiosk_asset_cache.clear()
             map_asset_cache.clear()
             background_owner = None
             task = background_task
             background_task = None
             if task is not None and not task.done():
                 task.cancel()
+            panel_owner = None
+            panel = panel_task
+            panel_task = None
+            if panel is not None and not panel.done():
+                panel.cancel()
 
             async def leave_kiosk() -> None:
                 await scanner.stop_scan()
@@ -1309,17 +1610,41 @@ def build_kiosk_view(
         "cancel_confirmation": cancel_confirmation,
         "cancel_route_map": cancel_route_map,
         "map_asset_cache": map_asset_cache,
+        "kiosk_asset_cache": kiosk_asset_cache,
         "open_route_map_viewer": open_route_map_viewer,
         "close_route_map_viewer": close_route_map_viewer,
         "set_route_map_viewer_zoom": set_route_map_viewer_zoom,
         "start_confirmation": start_confirmation,
+        "logout_kiosk": on_kiosk_logout,
         "contexto_usuario": contexto_usuario,
         "kiosk_root": root,
         "kiosk_content_box": content_box,
         "kiosk_qr_guide": qr_guide,
         "kiosk_camera_stage": camera_stage,
+        "open_admin_pin": show_admin_pin_dialog,
+        "admin_logo_tap": register_admin_logo_tap,
+        "close_admin_access": cleanup_admin_access,
     }
     render()
-    start_background_resolution()
+    if e2e_profiler is not None:
+        e2e_profiler.mark("E7_KIOSK_BUILD_COMPLETE")
+    if asset_context_ready_at is not None:
+        print(
+            "[KIOSK-STARTUP][PERF] stage=T4_build_complete "
+            f"total_ms={(perf_counter() - asset_context_ready_at) * 1000:.1f}"
+        )
+    print(
+        "[KIOSK-ASSET][PERF] stage=build_initial "
+        f"duration_ms={(perf_counter() - build_started) * 1000:.1f}"
+    )
+    if asset_context_ready_at is not None:
+        print(
+            "[KIOSK-ASSET][PERF] stage=context_ready_to_build "
+            f"duration_ms={(perf_counter() - asset_context_ready_at) * 1000:.1f}"
+        )
+    # Scanner startup gets the first scheduled task. Decorative assets are
+    # independent and may finish later without changing ready-to-scan.
     scanner.start()
+    start_background_resolution()
+    start_panel_resolution()
     return root

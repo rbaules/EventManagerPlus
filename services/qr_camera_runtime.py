@@ -16,6 +16,9 @@ class QrCameraRuntime:
         self.preview_paused = False
         self.lifecycle_lock = asyncio.Lock()
         self.camera_description = None
+        # Metadata interna de flet_camera es válida sólo para esta Page/runtime.
+        # No se persiste: availableCameras() debe poblarla tras una Page nueva.
+        self.camera_metadata_ready = False
 
     def invalidate(self) -> int:
         self.generation += 1

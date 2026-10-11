@@ -399,12 +399,22 @@ class ServerSessionBinding:
         self.opaque_id = opaque_id
         self.active_account_id: int | None = None
         self.active_event_id: int | None = None
+        self._e2e_profiler: Any = None
         if opaque_id:
             self.repository.bind_page(opaque_id, self.page_id)
 
     @property
     def active_context_key(self) -> tuple[int | None, int | None]:
         return self.active_account_id, self.active_event_id
+
+    def set_e2e_profiler(self, profiler: Any) -> None:
+        """Attach a per-Page diagnostic sink without exposing session values."""
+        self._e2e_profiler = profiler
+
+    def _e2e_mark(self, stage: str, **fields: Any) -> float | None:
+        if self._e2e_profiler is None:
+            return None
+        return self._e2e_profiler.mark(stage, **fields)
 
     @staticmethod
     def _session_values(client: Any) -> tuple[str, str, str] | None:
@@ -477,20 +487,31 @@ class ServerSessionBinding:
         if not opaque_id:
             return operation()
 
+        lookup_started = self._e2e_mark("E1_COOKIE_SESSION_LOOKUP_BEGIN")
+
         def serialized(record: ServerSession) -> Any:
             try:
+                if lookup_started is not None:
+                    self._e2e_profiler.duration(
+                        "E1_COOKIE_SESSION_LOOKUP_END", lookup_started
+                    )
                 self.active_account_id = record.active_account_id
                 self.active_event_id = record.active_event_id
+                set_started = self._e2e_mark("E1_SUPABASE_SET_SESSION_BEGIN")
                 response = client.auth.set_session(
                     record.access_token,
                     record.refresh_token,
                 )
+                if set_started is not None:
+                    self._e2e_profiler.duration(
+                        "E1_SUPABASE_SET_SESSION_END", set_started
+                    )
                 restored = safe_get(response, "session") or client.auth.get_session()
                 if restored is None:
                     raise RuntimeError("Sesion Supabase no restaurada.")
                 result = operation()
                 if getattr(result, "ok", True) is False:
-                    raise RuntimeError("La revalidacion EventPlus fue rechazada.")
+                    raise RuntimeError("La revalidacion EVKOR fue rechazada.")
                 values = self._session_values(client)
                 if values is None:
                     raise RuntimeError("Sesion Supabase no disponible.")

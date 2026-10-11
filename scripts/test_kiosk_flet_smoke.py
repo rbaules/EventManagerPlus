@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from components.kiosk_qr_scanner import KioskQrScanner
-from views.kiosk_view import KIOSK_IVORY, KIOSK_PANEL_FLORAL_ASSET, build_kiosk_view
+from views.kiosk_view import KIOSK_IVORY, build_kiosk_view
 
 
 class FakePage:
@@ -83,10 +83,7 @@ def test_kiosk_controls_build_with_installed_flet() -> None:
         32,
         32,
     )
-    assert isinstance(content_box.image, ft.DecorationImage)
-    assert content_box.image.src == KIOSK_PANEL_FLORAL_ASSET
-    assert content_box.image.fit == ft.BoxFit.COVER
-    assert content_box.image.alignment == ft.Alignment.CENTER
+    assert content_box.image is None
     content = content_box.content
     camera_stage = root.data["kiosk_camera_stage"]
     assert isinstance(camera_stage, ft.Stack)

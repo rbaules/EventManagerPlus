@@ -291,7 +291,7 @@ def normalizar_invitado(
 
 _MENSAJES_NOVEDAD = {
     "UNAUTHENTICATED": "La sesión no es válida. Inicia sesión nuevamente.",
-    "ACTOR_NOT_FOUND": "No fue posible identificar el usuario de EventPlus.",
+    "ACTOR_NOT_FOUND": "No fue posible identificar el usuario de EVKOR.",
     "ACTOR_INACTIVE": "El usuario no está activo para registrar novedades.",
     "INVITADO_NOT_FOUND": "El invitado ya no está disponible.",
     "EVENTO_INACTIVE": "El evento no está activo.",
