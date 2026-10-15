@@ -178,6 +178,7 @@ class FakePage:
         self.overlay: list[Any] = []
         self.update_calls = 0
         self.tasks: list[asyncio.Task[Any]] = []
+        self.success_timer_tasks: list[DeferredSuccessTimer] = []
         self.dialog: Any = None
 
     def update(self) -> None:
@@ -185,13 +186,41 @@ class FakePage:
 
     def run_task(self, task_factory: Any) -> asyncio.Task[Any]:
         assert inspect.iscoroutinefunction(task_factory)
+        if task_factory.__name__ == "auto_reset_success":
+            task = DeferredSuccessTimer(task_factory)
+            self.success_timer_tasks.append(task)
+            return task  # type: ignore[return-value]
         task = asyncio.create_task(task_factory())
         self.tasks.append(task)
         return task
 
+    async def run_next_success_timer(self) -> None:
+        task = next(task for task in self.success_timer_tasks if not task.cancelled)
+        await task.run()
+
     def show_dialog(self, dialog: Any) -> None:
         self.dialog = dialog
         dialog.open = True
+
+
+class DeferredSuccessTimer:
+    """Lets lifecycle tests control the ten-second task without real waiting."""
+
+    def __init__(self, task_factory: Any) -> None:
+        self._task_factory = task_factory
+        self.cancelled = False
+        self.completed = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def done(self) -> bool:
+        return self.cancelled or self.completed
+
+    async def run(self) -> None:
+        if not self.cancelled:
+            await self._task_factory()
+        self.completed = True
 
 
 class FakeKioskScanner:
@@ -201,6 +230,7 @@ class FakeKioskScanner:
         self.on_camera_error = kwargs["on_camera_error"]
         self.start_calls = 0
         self.restart_calls = 0
+        self.next_guest_resume_calls = 0
         self.recover_calls = 0
         self.stop_calls = 0
         self.suspend_calls = 0
@@ -215,6 +245,9 @@ class FakeKioskScanner:
 
     def restart(self) -> None:
         self.restart_calls += 1
+
+    def resume_for_next_guest(self) -> None:
+        self.next_guest_resume_calls += 1
 
     async def suspend_for_admin(self) -> None:
         self.suspend_calls += 1
@@ -342,6 +375,18 @@ def test_success_greeting_names_follow_updated_group_state() -> None:
         "Esperamos que disfruten lo que hemos preparado para ustedes.",
         "¡Bienvenidos!",
     )
+    assert kiosk_view.kiosk_success_detail(1) == "Esperamos que disfrutes lo que hemos preparado para ti."
+    assert kiosk_view.kiosk_success_detail(2) == "Esperamos que disfruten lo que hemos preparado para ustedes."
+
+    table_state = kiosk_view.KioskState(guests=[guest(4, "Ana", 8, "Amor", True, "Llegó", None)])
+    assert table_state.success_table_message() == "Su mesa es: Amor"
+    table_state.guests = [guest(4, "Ana", None, "Sin mesa", True, "Llegó", None)]
+    assert table_state.success_table_message() == "Su mesa aún no está asignada."
+    table_state.guests = [
+        guest(4, "Ana", 8, "Amor", True, "Llegó", None),
+        guest(5, "Luis", 9, "Paz", True, "Llegó", None),
+    ]
+    assert table_state.success_table_message() == "Su mesa aún no está asignada."
 
     all_arrived_single = [guest(1, "Karla López", 1, "Mesa 1", True, "Llegó", None)]
     assert kiosk_view.format_kiosk_success_name("Familia Karla", all_arrived_single, {1}) == "Familia Karla"
@@ -440,7 +485,8 @@ async def test_selected_invitation_can_return_to_scan_and_load_a_new_qr() -> Non
     assert state.qr_code is None
     assert state.cuenta_id is None and state.evento_id is None and state.invitation_id is None
     assert state.destinatario is None and state.guests == [] and state.selected_guest_ids == set()
-    assert scanner.restart_calls == 1
+    assert scanner.next_guest_resume_calls == 1
+    assert scanner.restart_calls == 0
 
     db.qr_payload = {
         "ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 9, "invitacion_id": 32,
@@ -521,7 +567,11 @@ async def test_select_guests_visual_contract_and_select_all_pending_only() -> No
     assert guide.content is not None
     assert (guide.content.width, guide.content.height, guide.content.ignore_interactions) == (200, 200, True)
     assert guide.content.width < stage.width and guide.content.height < stage.height
-    assert content_box.width == 680
+    assert content_box.width == kiosk_view.KIOSK_WIDE_PANEL_MIN_WIDTH
+    assert content_box.data["layout"] == "landscape_safe_zone"
+    assert root.content.alignment == kiosk_view.ft.Alignment(
+        kiosk_view.KIOSK_WIDE_PANEL_ALIGNMENT_X, 0
+    )
     assert content_box.bgcolor == kiosk_view.KIOSK_IVORY
     assert (content_box.padding.left, content_box.padding.top, content_box.padding.right, content_box.padding.bottom) == (
         32,
@@ -738,6 +788,36 @@ async def test_kiosk_background_is_event_scoped_and_non_blocking() -> None:
     assert other_root.image.src == "https://example.invalid/event-10.jpg"
 
 
+async def test_kiosk_background_layout_uses_a_conservative_landscape_safe_zone() -> None:
+    wide_page = FakePage(width=1536)
+    wide_root = build(wide_page, FakeSupabase())
+    wide_foreground = wide_root.content
+    wide_panel = wide_root.data["kiosk_content_box"]
+
+    assert wide_root.expand is True
+    assert wide_root.padding is None
+    assert wide_root.bgcolor == kiosk_view.KIOSK_BACKGROUND_EXTENSION
+    assert wide_root.bgcolor != kiosk_view.ft.Colors.WHITE
+    assert wide_panel.width == kiosk_view.KIOSK_WIDE_PANEL_MAX_WIDTH
+    assert wide_panel.data["layout"] == "landscape_safe_zone"
+    assert wide_foreground.alignment == kiosk_view.ft.Alignment(
+        kiosk_view.KIOSK_WIDE_PANEL_ALIGNMENT_X, 0
+    )
+    assert wide_root.data["kiosk_scanner"].start_calls == 1
+    await drain(wide_page)
+
+    narrow_page = FakePage(width=1024)
+    narrow_root = build(narrow_page, FakeSupabase())
+    narrow_foreground = narrow_root.content
+    narrow_panel = narrow_root.data["kiosk_content_box"]
+
+    assert narrow_panel.width == 680
+    assert narrow_panel.data["layout"] == "centered"
+    assert narrow_foreground.alignment == kiosk_view.ft.Alignment.CENTER
+    assert narrow_root.data["kiosk_scanner"].start_calls == 1
+    await drain(narrow_page)
+
+
 async def test_kiosk_background_failure_keeps_fallback_and_scanner_running() -> None:
     page = FakePage()
     storage = FakeStorage(error=RuntimeError("object not found"))
@@ -745,7 +825,7 @@ async def test_kiosk_background_failure_keeps_fallback_and_scanner_running() -> 
     await drain(page)
     assert root.data["kiosk_scanner"].start_calls == 1
     assert root.image is None
-    assert root.bgcolor == kiosk_view.ft.Colors.SURFACE
+    assert root.bgcolor == kiosk_view.KIOSK_BACKGROUND_EXTENSION
     assert root.content is not None
     assert root.data["kiosk_state"].phase == KioskPhase.WELCOME_SCAN
 
@@ -933,7 +1013,8 @@ async def test_confirmation_batch_success_and_double_click_guard() -> None:
     assert "Familia Real:" in text_values
     assert "¡Gracias por acompañarnos!" in text_values
     assert "Esperamos que disfruten lo que hemos preparado para ustedes." in text_values
-    assert "¡Bienvenidos!" in text_values
+    assert "Su mesa es: Mesa 4" in text_values
+    assert "¡Bienvenidos!" not in text_values
 
 
 async def test_confirmation_rejects_arrived_guest_and_backend_error_without_retry() -> None:
@@ -1076,6 +1157,79 @@ async def reach_success_for_event_ten(page: FakePage, database: FakeSupabase, us
     return root
 
 
+async def test_success_table_copy_and_auto_reset_lifecycle() -> None:
+    page = FakePage()
+    root = await reach_success_for_event_ten(
+        page,
+        FakeSupabase(qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31}),
+        event_ten_context(),
+    )
+    state = root.data["kiosk_state"]
+    scanner = root.data["kiosk_scanner"]
+    text_values = [node.value for node in walk(root) if isinstance(node, kiosk_view.ft.Text)]
+
+    assert "Su mesa es: Mesa 4" in text_values
+    assert "¡Bienvenidos!" not in text_values
+    assert root.data["success_timer_active"]()
+    assert len(page.success_timer_tasks) == 1
+
+    original_sleep = kiosk_view.asyncio.sleep
+
+    async def immediate_sleep(seconds: float) -> None:
+        assert seconds == kiosk_view.KIOSK_SUCCESS_RESET_SECONDS
+
+    kiosk_view.asyncio.sleep = immediate_sleep
+    try:
+        await page.run_next_success_timer()
+    finally:
+        kiosk_view.asyncio.sleep = original_sleep
+
+    assert state.phase == KioskPhase.WELCOME_SCAN
+    assert state.guests == [] and state.selected_guest_ids == set()
+    assert state.confirmed_count == 0 and state.success_name is None
+    assert state.route_result is None and page.overlay == []
+    assert scanner.next_guest_resume_calls == 1
+    assert scanner.restart_calls == 0
+    assert not root.data["success_timer_active"]()
+
+
+async def test_success_timer_cancellation_prevents_stale_reset() -> None:
+    page = FakePage()
+    root = await reach_success_for_event_ten(
+        page,
+        FakeSupabase(qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31}),
+        event_ten_context(),
+    )
+    stale_timer = page.success_timer_tasks[0]
+    root.data["reset_kiosk"]()
+    assert stale_timer.cancelled
+
+    root.data["kiosk_scanner"].on_qr_finalized("NEW-INVITATION")
+    await drain(page)
+    assert root.data["kiosk_state"].phase == KioskPhase.SELECT_GUESTS
+    await stale_timer.run()
+    assert root.data["kiosk_state"].phase == KioskPhase.SELECT_GUESTS
+
+    root.data["pause_dashboard"]()
+    assert not root.data["success_timer_active"]()
+
+
+async def test_success_timer_is_cancelled_on_route_exit() -> None:
+    page = FakePage()
+    root = await reach_success_for_event_ten(
+        page,
+        FakeSupabase(qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31}),
+        event_ten_context(),
+    )
+    timer = page.success_timer_tasks[0]
+    page.route = "/app/dashboard"
+    assert page.on_route_change is not None
+    page.on_route_change(SimpleNamespace(route="/app/dashboard"))
+    assert timer.cancelled
+    assert not root.data["success_timer_active"]()
+    await drain(page)
+
+
 async def test_success_loads_route_map_without_changing_success_copy() -> None:
     database = FakeSupabase(
         qr_payload={"ok": True, "codigo_resultado": "QR_RESOLVED", "cuenta_id": 2, "evento_id": 10, "invitacion_id": 31},
@@ -1109,13 +1263,15 @@ async def test_success_loads_route_map_without_changing_success_copy() -> None:
     )
     assert thumbnail.on_click is not None
     instruction = next(node for node in walk(root) if getattr(node, "data", None) == {"kiosk": "route_map_instruction"})
-    assert "".join(span.text or "" for span in instruction.spans) == "Para conocer cómo llegar a su mesa, seleccione el mapa"
-    assert instruction.spans[0].style.weight == kiosk_view.ft.FontWeight.BOLD
-    assert instruction.spans[1].style is None
+    assert instruction.value == "¿Cómo llegar a su mesa? (toque el mapa)"
+    assert instruction.semantics_label == "¿Cómo llegar a su mesa? (toque el mapa)"
+    assert instruction.size == 20
     assert "Esperamos que disfrutes lo que hemos preparado para ti." in [
         node.value for node in walk(root) if isinstance(node, kiosk_view.ft.Text)
     ]
     thumbnail.on_click(SimpleNamespace())
+    assert page.success_timer_tasks[0].cancelled
+    assert not root.data["success_timer_active"]()
     assert len(page.overlay) == 1
     viewer = page.overlay[0]
     assert getattr(viewer, "data", None) == {"kiosk": "route_map_viewer", "zoom": 1.0}
@@ -1123,6 +1279,8 @@ async def test_success_loads_route_map_without_changing_success_copy() -> None:
     close = next(node for node in walk(viewer) if getattr(node, "data", None) == {"kiosk": "route_map_viewer_close"})
     close.on_click(SimpleNamespace())
     assert page.overlay == [] and state.phase == KioskPhase.SUCCESS
+    assert root.data["success_timer_active"]()
+    assert len(page.success_timer_tasks) == 2
     await drain(page)
 
 
@@ -1215,6 +1373,8 @@ async def test_route_map_viewer_timeout_zoom_and_reset_are_ui_only() -> None:
         root.data["open_route_map_viewer"]()
         await drain(page)
         assert page.overlay == [] and root.data["kiosk_state"].phase == KioskPhase.SUCCESS
+        assert root.data["success_timer_active"]()
+        assert len(page.success_timer_tasks) == 2
     finally:
         kiosk_view.asyncio.sleep = original_sleep
         kiosk_view.resolve_kiosk_route_map_url = original_url
@@ -1481,6 +1641,7 @@ async def main_async() -> None:
     await test_select_guests_five_guest_actions_wrap_without_touching_camera()
     await test_guest_cards_use_available_width_on_narrow_layout()
     await test_kiosk_background_is_event_scoped_and_non_blocking()
+    await test_kiosk_background_layout_uses_a_conservative_landscape_safe_zone()
     await test_kiosk_background_failure_keeps_fallback_and_scanner_running()
     await test_kiosk_panel_is_event_scoped_and_standalone_safe()
     await test_kiosk_panel_failure_keeps_neutral_content_box()
@@ -1497,6 +1658,9 @@ async def main_async() -> None:
     await test_confirmation_event_change_discards_late_result()
     await test_consulta_and_invalid_phase_do_not_start_confirmation()
     await test_success_can_reset_and_resolve_a_new_qr()
+    await test_success_table_copy_and_auto_reset_lifecycle()
+    await test_success_timer_cancellation_prevents_stale_reset()
+    await test_success_timer_is_cancelled_on_route_exit()
     await test_success_loads_route_map_without_changing_success_copy()
     await test_map_prefetch_starts_in_selection_and_reuses_event_asset()
     await test_route_map_viewer_timeout_zoom_and_reset_are_ui_only()

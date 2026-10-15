@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from components.kiosk_qr_scanner import KioskQrScanner
-from views.kiosk_view import KIOSK_IVORY, build_kiosk_view
+from views.kiosk_view import KIOSK_BACKGROUND_EXTENSION, KIOSK_IVORY, build_kiosk_view
 
 
 class FakePage:
@@ -62,7 +62,9 @@ def test_kiosk_controls_build_with_installed_flet() -> None:
     root = build_kiosk_view(page=page, contexto_usuario={})
     assert isinstance(root, ft.Container)
     assert root.expand is True
-    assert root.bgcolor == ft.Colors.SURFACE
+    assert root.bgcolor == KIOSK_BACKGROUND_EXTENSION
+    assert root.bgcolor != ft.Colors.WHITE
+    assert root.padding is None
     assert page.scroll is None
     assert isinstance(root.data["kiosk_scanner"], KioskQrScanner)
     kiosk_scanner = root.data["kiosk_scanner"]
@@ -100,7 +102,7 @@ def test_installed_flet_constructs_decoration_image_background() -> None:
     """Validates the production background mechanism without requiring a browser."""
     background = ft.Container(
         expand=True,
-        bgcolor=ft.Colors.SURFACE,
+        bgcolor=KIOSK_BACKGROUND_EXTENSION,
         image=ft.DecorationImage(
             src="https://example.invalid/kiosk-background.jpg",
             fit=ft.BoxFit.CONTAIN,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sys
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import flet as ft
 
@@ -22,13 +24,27 @@ def test_brand_control_uses_only_the_approved_evkor_paths() -> None:
     assert EVKOR_TRANSPARENT_LOGO_ASSET == "brand/evkor_logo_transparent.png"
 
     control = build_evkor_brand(width=220)
-    approved_logo = ROOT / "assets" / EVKOR_TRANSPARENT_LOGO_ASSET
-    if approved_logo.is_file():
-        assert isinstance(control, ft.Image)
-        assert control.src == EVKOR_TRANSPARENT_LOGO_ASSET
-    else:
-        assert isinstance(control, ft.Text)
-        assert control.value == "EVKOR"
+    assert isinstance(control, ft.Image)
+    assert control.src == EVKOR_TRANSPARENT_LOGO_ASSET
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "assets/brand"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert "assets/brand/evkor_logo.png" in tracked
+    assert "assets/brand/evkor_logo_transparent.png" in tracked
+    assert "assets/brand/evkor_logo.PNG" not in tracked
+    assert "assets/brand/evkor_logo_transparent.PNG" not in tracked
+
+
+def test_brand_fallback_is_reserved_for_a_missing_asset() -> None:
+    with patch("components.evkor_brand._asset_is_available", return_value=False):
+        control = build_evkor_brand(width=220)
+    assert isinstance(control, ft.Text)
+    assert control.value == "EVKOR"
 
 
 def test_visible_entry_points_do_not_reference_the_old_logo() -> None:
@@ -57,6 +73,7 @@ def test_visible_oauth_callback_and_user_messages_use_evkor() -> None:
 
 def main() -> None:
     test_brand_control_uses_only_the_approved_evkor_paths()
+    test_brand_fallback_is_reserved_for_a_missing_asset()
     test_visible_entry_points_do_not_reference_the_old_logo()
     test_visible_oauth_callback_and_user_messages_use_evkor()
     print("EVKOR branding tests passed.")

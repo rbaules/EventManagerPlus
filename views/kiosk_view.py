@@ -36,6 +36,15 @@ KIOSK_IVORY = "#F8F1E8"
 KIOSK_BLUSH = "#F3D9D0"
 KIOSK_TEXT = "#4B241C"
 KIOSK_BORDER = "#D9C7BC"
+# CONTAIN preserves the full event composition. This warm neutral extends it
+# when the viewport aspect ratio differs without introducing white bands.
+KIOSK_BACKGROUND_EXTENSION = "#5E4A43"
+KIOSK_WIDE_LAYOUT_MIN_WIDTH = 1180
+KIOSK_WIDE_PANEL_MIN_WIDTH = 624
+KIOSK_WIDE_PANEL_MAX_WIDTH = 640
+KIOSK_WIDE_PANEL_ALIGNMENT_X = 0.1
+# Future debt: background composition contract / configurable safe zone per event.
+KIOSK_SUCCESS_RESET_SECONDS = 10
 KIOSK_ADMIN_TAP_COUNT = 6
 KIOSK_ADMIN_TAP_WINDOW_SECONDS = 5.0
 
@@ -190,6 +199,26 @@ class KioskState:
             return None
         return normalized_mesa_id if normalized_mesa_id > 0 else None
 
+    def success_table_message(self) -> str:
+        """Return a single safe table heading from the confirmed group state."""
+        resolved_tables: set[tuple[int, str]] = set()
+        for guest in self.guests:
+            if isinstance(guest.mesa_id, bool):
+                return "Su mesa aún no está asignada."
+            try:
+                mesa_id = int(guest.mesa_id)
+            except (TypeError, ValueError):
+                return "Su mesa aún no está asignada."
+            mesa_texto = str(guest.mesa_texto or "").strip()
+            if mesa_id <= 0 or not mesa_texto or mesa_texto.casefold() == "sin mesa":
+                return "Su mesa aún no está asignada."
+            resolved_tables.add((mesa_id, mesa_texto))
+
+        if len(resolved_tables) != 1:
+            return "Su mesa aún no está asignada."
+        _mesa_id, mesa_texto = next(iter(resolved_tables))
+        return f"Su mesa es: {mesa_texto}"
+
     def set_guest_selected(self, guest_id: int, selected: bool) -> None:
         for guest in self.guests:
             if guest.guest_id != guest_id:
@@ -272,6 +301,13 @@ def kiosk_success_copy(confirmed_count: int) -> tuple[str, str]:
     )
 
 
+def kiosk_success_detail(confirmed_count: int) -> str:
+    """Return only the guest-facing SUCCESS detail, not its table heading."""
+    if confirmed_count == 1:
+        return "Esperamos que disfrutes lo que hemos preparado para ti."
+    return "Esperamos que disfruten lo que hemos preparado para ustedes."
+
+
 def is_kiosk_route(route: str | None) -> bool:
     clean = str(route or "").split("?", 1)[0].rstrip("/") or "/"
     return clean == "/kiosk" or parse_app_route(clean)[0] == "kiosk"
@@ -329,6 +365,8 @@ def build_kiosk_view(
     viewer_owner: object | None = None
     viewer_overlay: ft.Control | None = None
     viewer_zoom = MIN_ZOOM
+    success_timer_task: Any = None
+    success_timer_owner: object | None = None
     has_rendered = False
     admin_tap_count = 0
     admin_tap_started_at: float | None = None
@@ -610,6 +648,53 @@ def build_kiosk_view(
         if task is not None and not task.done():
             task.cancel()
 
+    def cancel_success_timer() -> None:
+        """Cancel the SUCCESS idle timer without affecting the scanner lifecycle."""
+        nonlocal success_timer_owner, success_timer_task
+        success_timer_owner = None
+        task = success_timer_task
+        success_timer_task = None
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        if task is not None and not task.done() and task is not current_task:
+            task.cancel()
+
+    def success_timer_is_current(owner: object) -> bool:
+        return (
+            success_timer_owner is owner
+            and viewer_owner is None
+            and state.phase == KioskPhase.SUCCESS
+            and is_kiosk_route(getattr(page, "route", None))
+        )
+
+    def start_success_timer() -> None:
+        """Start one fresh idle window for the current SUCCESS screen."""
+        nonlocal success_timer_owner, success_timer_task
+        if state.phase != KioskPhase.SUCCESS or viewer_owner is not None:
+            return
+        cancel_success_timer()
+        owner = object()
+        success_timer_owner = owner
+
+        async def auto_reset_success() -> None:
+            nonlocal success_timer_owner, success_timer_task
+            try:
+                await asyncio.sleep(KIOSK_SUCCESS_RESET_SECONDS)
+                if success_timer_is_current(owner):
+                    reset_kiosk(for_next_guest=True)
+            except asyncio.CancelledError:
+                raise
+            finally:
+                if success_timer_owner is owner:
+                    success_timer_owner = None
+                    success_timer_task = None
+
+        task = page.run_task(auto_reset_success)
+        if success_timer_owner is owner:
+            success_timer_task = task
+
     def route_map_is_current(
         owner: object,
         route_map_generation: int,
@@ -707,6 +792,8 @@ def build_kiosk_view(
         viewer_overlay = None
         if owner is not None and reason in {"manual", "timeout"}:
             print(f"[KIOSK-MAP] viewer closed {reason}")
+            if state.phase == KioskPhase.SUCCESS and is_kiosk_route(getattr(page, "route", None)):
+                start_success_timer()
         if update:
             page.update()
 
@@ -716,6 +803,7 @@ def build_kiosk_view(
             return
         if state.route_result is None or not state.map_preview_ready or not state.map_preview_src:
             return
+        cancel_success_timer()
         viewer_owner = object()
         viewer_zoom = MIN_ZOOM
         owner = viewer_owner
@@ -857,7 +945,11 @@ def build_kiosk_view(
                         lambda _event: start_confirmation(),
                         disabled=not can_confirm_selection(),
                     ),
-                    button("Volver a escanear", lambda _event: reset_kiosk(), primary=False),
+                    button(
+                        "Volver a escanear",
+                        lambda _event: reset_kiosk(for_next_guest=True),
+                        primary=False,
+                    ),
                 ],
                 width=content_width - 64,
                 alignment=ft.MainAxisAlignment.CENTER,
@@ -902,7 +994,7 @@ def build_kiosk_view(
         elif phase == KioskPhase.SUCCESS:
             scanner.set_preview_visible(False)
             qr_guide.visible = False
-            success_detail, success_welcome = kiosk_success_copy(state.confirmed_count)
+            success_detail = kiosk_success_detail(state.confirmed_count)
             success_controls = [
                 *(
                     [ft.Text(f"{state.success_name}:", size=30, weight=ft.FontWeight.BOLD, color=KIOSK_WINE)]
@@ -916,25 +1008,25 @@ def build_kiosk_view(
                     color=KIOSK_TEXT,
                     text_align=ft.TextAlign.CENTER,
                 ),
-                ft.Text(success_welcome, size=32, weight=ft.FontWeight.BOLD, color=KIOSK_WINE),
-                ft.Text(state.table_heading(), size=18, color=KIOSK_TEXT),
+                ft.Text(
+                    state.success_table_message(),
+                    size=32,
+                    weight=ft.FontWeight.BOLD,
+                    color=KIOSK_WINE,
+                    text_align=ft.TextAlign.CENTER,
+                    data={"kiosk": "success_table_heading"},
+                ),
             ]
             if state.map_preview_ready and state.route_result is not None and state.map_preview_src:
                 try:
                     thumbnail_width = min(340, max(200, content_width - 64))
                     success_controls.append(
                         ft.Text(
-                            spans=[
-                                ft.TextSpan(
-                                    "Para conocer cómo llegar a su mesa",
-                                    style=ft.TextStyle(weight=ft.FontWeight.BOLD),
-                                ),
-                                ft.TextSpan(", seleccione el mapa"),
-                            ],
-                            size=16,
+                            "¿Cómo llegar a su mesa? (toque el mapa)",
+                            size=20,
                             color=KIOSK_TEXT,
                             text_align=ft.TextAlign.CENTER,
-                            semantics_label="Para conocer cómo llegar a su mesa, seleccione el mapa",
+                            semantics_label="¿Cómo llegar a su mesa? (toque el mapa)",
                             data={"kiosk": "route_map_instruction"},
                         )
                     )
@@ -950,7 +1042,13 @@ def build_kiosk_view(
                     )
                 except (TypeError, ValueError) as ex:
                     print(f"[KIOSK-MAP] unavailable code=MAP_RENDER_ERROR type={type(ex).__name__}")
-            success_controls.append(button("Volver a escanear", lambda _event: reset_kiosk(), primary=False))
+            success_controls.append(
+                button(
+                    "Volver a escanear",
+                    lambda _event: reset_kiosk(for_next_guest=True),
+                    primary=False,
+                )
+            )
             controls = [
                 ft.Container(
                     padding=ft.Padding(left=0, top=48, right=0, bottom=0),
@@ -1107,6 +1205,7 @@ def build_kiosk_view(
                 render()
                 if state.phase == KioskPhase.SUCCESS:
                     start_success_route_map()
+                    start_success_timer()
             except asyncio.CancelledError:
                 raise
             except Exception as ex:
@@ -1263,7 +1362,20 @@ def build_kiosk_view(
         page_width = float(getattr(page, "width", 0) or 0)
     except (TypeError, ValueError, RuntimeError):
         page_width = 0
-    content_width = min(680, max(280, page_width - 32)) if page_width else 680
+    is_wide_landscape = page_width >= KIOSK_WIDE_LAYOUT_MIN_WIDTH
+    if is_wide_landscape:
+        # Preserve both edges of a landscape event background: make the panel
+        # modestly narrower and shift it only slightly right of centre.
+        content_width = min(
+            KIOSK_WIDE_PANEL_MAX_WIDTH,
+            max(KIOSK_WIDE_PANEL_MIN_WIDTH, round(page_width * 0.42)),
+        )
+        foreground_alignment = ft.Alignment(KIOSK_WIDE_PANEL_ALIGNMENT_X, 0)
+        layout_variant = "landscape_safe_zone"
+    else:
+        content_width = min(680, max(280, page_width - 32)) if page_width else 680
+        foreground_alignment = ft.Alignment.CENTER
+        layout_variant = "centered"
     content_box = ft.Container(
         width=content_width,
         # Keep every screen's functional column clear of the floral art in the
@@ -1279,17 +1391,17 @@ def build_kiosk_view(
             offset=ft.Offset(0, 4),
         ),
         content=content,
-        data={"kiosk": "content_box", "width": content_width},
+        data={"kiosk": "content_box", "width": content_width, "layout": layout_variant},
     )
     foreground = ft.Container(
         expand=True,
-        alignment=ft.Alignment.CENTER,
+        alignment=foreground_alignment,
         content=content_box,
+        data={"kiosk": "foreground", "layout": layout_variant},
     )
     root = ft.Container(
         expand=True,
-        bgcolor=ft.Colors.SURFACE,
-        padding=16,
+        bgcolor=KIOSK_BACKGROUND_EXTENSION,
         alignment=ft.Alignment.CENTER,
         content=foreground,
         data={"kiosk": "root"},
@@ -1533,16 +1645,21 @@ def build_kiosk_view(
             return
         start_route_map_prefetch()
 
-    def reset_kiosk() -> None:
+    def reset_kiosk(*, for_next_guest: bool = False) -> None:
+        """Reset UI state, choosing fast resume only for a normal guest transition."""
         if confirmation_owner is not None:
             return
+        cancel_success_timer()
         cancel_resolution()
         cancel_confirmation()
         cancel_route_map()
         state.reset_kiosk()
         scanner.set_preview_visible(True)
         render()
-        scanner.restart()
+        if for_next_guest:
+            scanner.resume_for_next_guest()
+        else:
+            scanner.restart()
 
     def resume_kiosk_after_reconnect() -> None:
         if state.phase != KioskPhase.WELCOME_SCAN:
@@ -1553,6 +1670,7 @@ def build_kiosk_view(
     def pause_kiosk() -> None:
         nonlocal background_owner, background_task, panel_owner, panel_task
         cleanup_admin_access(resume_scanner=False, update=False)
+        cancel_success_timer()
         cancel_resolution()
         cancel_confirmation()
         cancel_route_map()
@@ -1575,6 +1693,7 @@ def build_kiosk_view(
         if not is_kiosk_route(getattr(event, "route", None) or page.route):
             cleanup_admin_access(resume_scanner=False, update=False)
             restore_page_scroll()
+            cancel_success_timer()
             cancel_resolution()
             cancel_confirmation()
             cancel_route_map()
@@ -1608,6 +1727,9 @@ def build_kiosk_view(
         "resume_dashboard": resume_kiosk_after_reconnect,
         "cancel_resolution": cancel_resolution,
         "cancel_confirmation": cancel_confirmation,
+        "cancel_success_timer": cancel_success_timer,
+        "start_success_timer": start_success_timer,
+        "success_timer_active": lambda: success_timer_owner is not None,
         "cancel_route_map": cancel_route_map,
         "map_asset_cache": map_asset_cache,
         "kiosk_asset_cache": kiosk_asset_cache,

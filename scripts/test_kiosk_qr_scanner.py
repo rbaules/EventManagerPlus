@@ -1281,6 +1281,118 @@ async def test_reset_startup_cancelled_by_disconnect_releases_lock_for_reconnect
     assert scanner._startup_task is None
 
 
+async def test_fifteen_guest_cycles_fast_resume_reuses_one_controller() -> None:
+    page = FakePage()
+    camera = FakeCamera(page)
+    callbacks: list[str] = []
+    scanner = KioskQrScanner(
+        page=page,
+        on_qr_finalized=callbacks.append,
+        on_camera_error=lambda message: callbacks.append(f"error:{message}"),
+        camera=camera,
+        sleep=_no_delay,
+        create_host=False,
+    )
+
+    camera.streaming_supported = False
+    camera.snapshot_payload = _qr_jpeg("C000")
+    await scanner.start_scan()
+    await _wait_page_tasks(page)
+    first_camera_id = id(scanner.camera)
+    previous_generation = scanner.runtime.generation
+    for cycle in range(1, 15):
+        assert scanner.runtime.snapshot_task is None
+        assert scanner.runtime.controller_initialized and scanner.runtime.preview_paused
+        camera.snapshot_payload = _qr_jpeg(f"C{cycle:03}")
+        scanner.resume_for_next_guest()
+        await asyncio.sleep(0)
+        polling_task = scanner.runtime.snapshot_task
+        assert polling_task is None or not polling_task.done()
+        await _wait_page_tasks(page)
+        assert scanner.runtime.snapshot_task is None
+        assert scanner.runtime.generation > previous_generation
+        previous_generation = scanner.runtime.generation
+
+    assert id(scanner.camera) == first_camera_id
+    assert camera.discovery_calls == 1
+    assert camera.initialize_calls == 1
+    assert camera.pause_calls == 15
+    assert camera.resume_calls == 14
+    assert callbacks == [f"C{cycle:03}" for cycle in range(15)]
+
+
+async def test_fast_resume_controller_lost_falls_back_once_then_recovers() -> None:
+    page = FakePage()
+    camera = FakeCamera(page)
+    callbacks: list[str] = []
+    scanner = KioskQrScanner(
+        page=page,
+        on_qr_finalized=callbacks.append,
+        on_camera_error=lambda message: callbacks.append(f"error:{message}"),
+        camera=camera,
+        sleep=_no_delay,
+        create_host=False,
+    )
+
+    await scanner.start_scan()
+    session_key = scanner._session_key
+    assert session_key is not None
+    assert scanner._accept_code("F001", scanner.runtime.generation, session_key)
+    await _wait_page_tasks(page)
+    camera.resume_error = RuntimeError("Camera is not initialized. Call initialize() first.")
+    scanner.resume_for_next_guest()
+    await _wait_page_tasks(page)
+
+    assert camera.resume_calls == 1
+    assert camera.discovery_calls == 2
+    assert camera.initialize_calls == 2
+    assert scanner.active
+    assert scanner.runtime.snapshot_task is None
+
+    session_key = scanner._session_key
+    assert session_key is not None
+    assert scanner._accept_code("F002", scanner.runtime.generation, session_key)
+    await _wait_page_tasks(page)
+    camera.resume_error = None
+    scanner.resume_for_next_guest()
+    await _wait_page_tasks(page)
+
+    assert camera.resume_calls == 2
+    assert camera.discovery_calls == 2
+    assert camera.initialize_calls == 2
+    assert callbacks == ["F001", "F002"]
+
+
+async def test_fast_resume_then_full_restart_error_has_no_recovery_loop() -> None:
+    page = FakePage()
+    camera = FakeCamera(page)
+    errors: list[str] = []
+    scanner = KioskQrScanner(
+        page=page,
+        on_qr_finalized=lambda _code: None,
+        on_camera_error=errors.append,
+        camera=camera,
+        sleep=_no_delay,
+        create_host=False,
+    )
+
+    await scanner.start_scan()
+    session_key = scanner._session_key
+    assert session_key is not None
+    assert scanner._accept_code("E001", scanner.runtime.generation, session_key)
+    await _wait_page_tasks(page)
+    camera.resume_error = RuntimeError("Camera is not initialized. Call initialize() first.")
+    camera.fail_discovery = RuntimeError("permission denied")
+    scanner.resume_for_next_guest()
+    await _wait_page_tasks(page)
+
+    assert camera.resume_calls == 1
+    assert camera.discovery_calls == 2
+    assert camera.initialize_calls == 1
+    assert len(errors) == 1 and "permiso" in errors[0].lower()
+    assert not scanner.active and scanner.runtime.snapshot_task is None
+
+
 def test_adapter_has_no_business_or_rpc() -> None:
     source = (ROOT / "components" / "kiosk_qr_scanner.py").read_text(encoding="utf-8")
     for forbidden in (
@@ -1323,6 +1435,9 @@ async def _main_async() -> None:
     await test_reconnect_after_cancelled_discovery_starts_fresh_recovery()
     await test_stale_recovery_cannot_publish_over_new_recovery()
     await test_reset_startup_cancelled_by_disconnect_releases_lock_for_reconnect()
+    await test_fifteen_guest_cycles_fast_resume_reuses_one_controller()
+    await test_fast_resume_controller_lost_falls_back_once_then_recovers()
+    await test_fast_resume_then_full_restart_error_has_no_recovery_loop()
 
 
 def main() -> None:
