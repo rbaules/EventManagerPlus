@@ -21,7 +21,7 @@ from services.qr_scanner_service import (
     process_qr_camera_frame,
     run_qr_snapshot_polling,
     scanner_strategy,
-    select_camera_description,
+    select_front_first_camera_description,
     stop_camera_capture,
 )
 
@@ -90,19 +90,8 @@ def _select_camera_description_with_preference(
     cameras: list[Any],
     preference: fcam.CameraDescription | None,
 ) -> Any | None:
-    """Use persisted fields only to select from this runtime's discovered list."""
-    if preference is not None:
-        for camera in cameras:
-            if (
-                getattr(camera, "name", None) == preference.name
-                and getattr(getattr(camera, "lens_direction", None), "value", None)
-                == preference.lens_direction.value
-                and getattr(camera, "sensor_orientation", None) == preference.sensor_orientation
-                and getattr(getattr(camera, "lens_type", None), "value", None)
-                == preference.lens_type.value
-            ):
-                return camera
-    return select_camera_description(cameras, fcam.CameraLensDirection.BACK)
+    """Apply the Kiosk FRONT-first policy to this Page's discovered cameras."""
+    return select_front_first_camera_description(cameras, preference)
 
 
 def _cached_description_requires_discovery(error: Exception) -> bool:
@@ -325,7 +314,9 @@ class KioskQrScanner:
                     f"preview_paused={self.runtime.preview_paused} snapshot_task={polling_status}"
                 )
                 try:
+                    resume_began = self._perf_mark(generation, "resume_preview_begin")
                     await self.camera.resume_preview()
+                    self._perf_duration(generation, "resume_preview_end", resume_began)
                 except Exception as ex:
                     if classify_camera_resume_outcome(ex) == "controller_lost":
                         self.active = False
@@ -341,7 +332,7 @@ class KioskQrScanner:
                 self._log_camera_identity("fast_resume_ready")
             if not self._session_is_current(generation, session_key):
                 return
-            self.strategy = scanner_strategy(await self.camera.supports_image_streaming())
+            self.strategy = await self._resolve_capture_strategy(generation)
             await self._start_capture(generation, session_key, self.strategy)
             print(
                 "[KIOSK-QR][FAST-RESUME] success "
@@ -411,7 +402,7 @@ class KioskQrScanner:
         self.active = True
         self.stream_active = False
         try:
-            self.strategy = scanner_strategy(await self.camera.supports_image_streaming())
+            self.strategy = await self._resolve_capture_strategy(generation)
             await self._start_capture(generation, session_key, self.strategy)
             print("[KIOSK-QR][ADMIN] capture_resumed")
         except Exception as ex:
@@ -773,7 +764,9 @@ class KioskQrScanner:
             # solicitar el controller nativo. En reset el mismo control ya
             # persistente sigue montado, por lo que no requiere esa espera.
             if startup_source != "reset":
+                mount_delay_began = self._perf_mark(generation, "mount_delay_begin")
                 await self._sleep(0.3)
+                self._perf_duration(generation, "mount_delay_end", mount_delay_began)
             if not self._session_is_current(generation, session_key):
                 return
             if not self._camera_is_mounted():
@@ -887,6 +880,12 @@ class KioskQrScanner:
                 )
                 if description is None:
                     raise RuntimeError("No camera available")
+                lens_direction = getattr(getattr(description, "lens_direction", None), "value", "unknown")
+                print(
+                    "[KIOSK-QR][PERF] camera_selected "
+                    f"generation={generation} lens_direction={lens_direction}"
+                )
+                self._perf_mark(generation, "camera_selected")
                 self.runtime.camera_description = description
                 description_discovered = True
 
@@ -923,8 +922,16 @@ class KioskQrScanner:
         if description_discovered:
             await self._save_cached_camera_description(description)
         self._perf_mark(generation, "initialize_return")
-        self.strategy = scanner_strategy(await self.camera.supports_image_streaming())
+        self.strategy = await self._resolve_capture_strategy(generation)
         await self._start_capture(generation, session_key, self.strategy)
+
+    async def _resolve_capture_strategy(self, generation: int) -> str:
+        began = self._perf_mark(generation, "supports_image_streaming_begin")
+        streaming_supported = await self.camera.supports_image_streaming()
+        self._perf_duration(generation, "supports_image_streaming_end", began)
+        strategy = scanner_strategy(streaming_supported)
+        print(f"[KIOSK-QR][PERF] capture_strategy generation={generation} strategy={strategy}")
+        return strategy
 
     async def _initialize_cached_description(
         self,
@@ -1008,8 +1015,11 @@ class KioskQrScanner:
             )
             self._startup_generation = None
         if strategy == "stream":
+            stream_began = self._perf_mark(generation, "start_image_stream_begin")
             await self.camera.start_image_stream()
             self.stream_active = True
+            self._perf_duration(generation, "start_image_stream_end", stream_began)
+            self._perf_mark(generation, "capture_ready")
             return
 
         def capture_error(attempt: int, error: Exception) -> None:
@@ -1022,6 +1032,8 @@ class KioskQrScanner:
         def on_snapshot_code(code: str) -> bool:
             return self.on_snapshot_code(code, generation, session_key)
 
+        self._perf_mark(generation, "snapshot_polling_begin")
+        self._perf_mark(generation, "capture_ready")
         await run_qr_snapshot_polling(
             self.runtime,
             lambda: self._take_snapshot(generation, session_key),

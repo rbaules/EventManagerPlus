@@ -175,9 +175,67 @@ def select_camera_description(
 ) -> T | None:
     """Selecciona la primera cámara del lente preferido o la primera disponible."""
     for camera in cameras:
-        if getattr(camera, "lens_direction", None) == preferred_lens:
+        direction = getattr(camera, "lens_direction", None)
+        if getattr(direction, "value", direction) == getattr(preferred_lens, "value", preferred_lens):
             return camera
     return cameras[0] if cameras else None
+
+
+def _camera_description_key(camera: object) -> tuple[str, str, str]:
+    """Stable ordering key available on Flet CameraDescription values."""
+    lens_type = getattr(camera, "lens_type", None)
+    return (
+        str(getattr(camera, "name", "")),
+        str(getattr(lens_type, "value", lens_type) or ""),
+        str(getattr(camera, "sensor_orientation", "")),
+    )
+
+
+def _same_camera_description(camera: object, preference: object) -> bool:
+    return (
+        getattr(camera, "name", None) == getattr(preference, "name", None)
+        and getattr(getattr(camera, "lens_direction", None), "value", getattr(camera, "lens_direction", None))
+        == getattr(getattr(preference, "lens_direction", None), "value", getattr(preference, "lens_direction", None))
+        and getattr(camera, "sensor_orientation", None) == getattr(preference, "sensor_orientation", None)
+        and getattr(getattr(camera, "lens_type", None), "value", getattr(camera, "lens_type", None))
+        == getattr(getattr(preference, "lens_type", None), "value", getattr(preference, "lens_type", None))
+    )
+
+
+def select_front_first_camera_description(
+    cameras: list[T],
+    persisted_preference: object | None = None,
+) -> T | None:
+    """Select FRONT deterministically, retaining persistence only when safe.
+
+    A persisted BACK must never override an available FRONT. When no FRONT is
+    detectable, the persisted camera remains a useful compatibility fallback,
+    followed by BACK and finally the first available device.
+    """
+    front_cameras = [
+        camera
+        for camera in cameras
+        if getattr(getattr(camera, "lens_direction", None), "value", getattr(camera, "lens_direction", None))
+        == "front"
+    ]
+    if front_cameras:
+        if (
+            getattr(
+                getattr(persisted_preference, "lens_direction", None),
+                "value",
+                getattr(persisted_preference, "lens_direction", None),
+            )
+            == "front"
+        ):
+            for camera in front_cameras:
+                if _same_camera_description(camera, persisted_preference):
+                    return camera
+        return min(front_cameras, key=_camera_description_key)
+    if persisted_preference is not None:
+        for camera in cameras:
+            if _same_camera_description(camera, persisted_preference):
+                return camera
+    return select_camera_description(cameras, "back")
 
 
 def _normalizar_codigo_qr(value: str | None) -> str | None:

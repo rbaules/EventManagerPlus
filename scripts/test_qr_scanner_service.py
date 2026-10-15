@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -275,6 +276,30 @@ def test_camera_description_selection() -> None:
     original_order = list(cameras)
     assert scanner.select_camera_description(cameras, back) is first_back
     assert cameras == original_order
+
+
+def test_front_first_camera_description_selection() -> None:
+    def camera(name: str, direction: str, lens_type: str = "wide", orientation: int = 0):
+        return SimpleNamespace(
+            name=name,
+            lens_direction=SimpleNamespace(value=direction),
+            lens_type=SimpleNamespace(value=lens_type),
+            sensor_orientation=orientation,
+        )
+
+    back = camera("rear", "back")
+    front = camera("front", "front")
+    other_front = camera("front-secondary", "front", "telephoto", 90)
+    external = camera("usb", "external")
+    missing = camera("missing", "front")
+
+    assert scanner.select_front_first_camera_description([back, front], back) is front
+    assert scanner.select_front_first_camera_description([back, front], front) is front
+    assert scanner.select_front_first_camera_description([other_front, front], None) is front
+    assert scanner.select_front_first_camera_description([back], None) is back
+    assert scanner.select_front_first_camera_description([external], None) is external
+    assert scanner.select_front_first_camera_description([back], missing) is back
+    assert scanner.select_front_first_camera_description([], None) is None
 
 
 def test_camera_initialize_retry_policy() -> None:
@@ -797,6 +822,7 @@ def main() -> int:
     test_camera_resume_outcome_classification()
     test_stop_camera_capture()
     test_camera_description_selection()
+    test_front_first_camera_description_selection()
     test_camera_initialize_retry_policy()
     test_camera_enumeration_retry_policy()
     test_camera_enumeration_stops_during_backoff()
