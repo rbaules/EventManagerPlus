@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 os.environ.setdefault("EVENTPLUS_ASGI", "true")
 
 import flet as ft
 from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
 from app import main as eventplus_main
 from config import (
@@ -26,6 +27,7 @@ from services.webclient_telemetry import (
 
 
 session_repository = InMemorySessionRepository()
+_QR_WEB_SPIKE_FILE = Path(__file__).resolve().parent / "assets" / "qr_web_spike.html"
 
 
 def asgi_main(page: ft.Page) -> None:
@@ -52,6 +54,12 @@ async def web_recovery_diagnostic(request: Request) -> Response:
     payload = await parse_webclient_telemetry(request)
     log_webclient_telemetry(payload)
     return Response(status_code=204)
+
+
+# Temporary isolated diagnostic route for evaluating the browser-only QR scanner.
+@app.get("/diagnostics/qr-web-spike")
+async def qr_web_spike() -> FileResponse:
+    return FileResponse(_QR_WEB_SPIKE_FILE, media_type="text/html")
 
 
 @app.get("/session/logout")
