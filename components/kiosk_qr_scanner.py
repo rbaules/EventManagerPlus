@@ -37,6 +37,14 @@ class _FastResumeFallback(RuntimeError):
     """Internal signal to leave the warm path before one full restart."""
 
 
+class _WarmResumeSnapshotCaptureFailure(RuntimeError):
+    """Preserve the native snapshot error until the warm-resume fallback logs it."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
 def _description_to_cache_value(description: fcam.CameraDescription) -> str | None:
     """Persist only the fields Flet 0.85.3 needs to recreate a description."""
     try:
@@ -131,7 +139,11 @@ def _is_camera_missing_metadata(error: Exception) -> bool:
 def _safe_camera_error_detail(error: Exception) -> str:
     """Keep a useful plugin error diagnostic without exposing sensitive text."""
     detail = " ".join(str(error).split())
-    if re.search(r"(?:token|authorization|bearer|https?://)", detail, re.IGNORECASE):
+    if re.search(
+        r"(?:token|cookie|authorization|bearer|password|pin|https?://)",
+        detail,
+        re.IGNORECASE,
+    ):
         return "<redacted_sensitive_error>"
     return detail[:240] or "<empty>"
 
@@ -182,6 +194,7 @@ class KioskQrScanner:
         self._e2e_profiler = e2e_profiler
         self._native_ready_generation: int | None = None
         self._last_snapshot_diagnostic: tuple[str, object] | None = None
+        self._last_camera_state: dict[str, bool | None] = {}
         self.camera = camera or fcam.Camera(
             preview_enabled=True,
             content=ft.Container(
@@ -274,6 +287,8 @@ class KioskQrScanner:
         startup_id = self._startup_id
         began = time.perf_counter()
         fallback_reason: str | None = None
+        operation = "validate_preconditions"
+        cached_strategy: str | None = None
         generation: int | None = None
         session_key: tuple[int, int] | None = None
         try:
@@ -310,7 +325,11 @@ class KioskQrScanner:
                 )
             if not self._session_is_current(generation, session_key):
                 return
-            self.strategy = await self._resolve_capture_strategy(generation)
+            operation = "validate_cached_strategy"
+            cached_strategy = self.strategy if isinstance(self.strategy, str) else None
+            if cached_strategy not in {"stream", "snapshot"}:
+                fallback_reason = "cached_strategy_invalid"
+                raise _FastResumeFallback(fallback_reason)
             kiosk_log(
                 self.page,
                 "KIOSK-QR",
@@ -318,13 +337,31 @@ class KioskQrScanner:
                 **self._diagnostic_fields(
                     generation=generation,
                     startup_id=startup_id,
+                    strategy_cached=cached_strategy,
                     elapsed_ms=round((time.perf_counter() - began) * 1000, 1),
                 ),
             )
-            await self._start_capture(generation, session_key, self.strategy)
+            operation = (
+                "start_image_stream"
+                if cached_strategy == "stream"
+                else "start_snapshot_polling"
+            )
+            await self._start_capture(generation, session_key, cached_strategy)
         except Exception as ex:
+            diagnostic_error = (
+                ex.error if isinstance(ex, _WarmResumeSnapshotCaptureFailure) else ex
+            )
+            if isinstance(ex, _WarmResumeSnapshotCaptureFailure):
+                operation = "take_picture"
             if fallback_reason is None:
-                fallback_reason = type(ex).__name__
+                fallback_reason = type(diagnostic_error).__name__
+            failure_fields = self._warm_resume_failure_fields(
+                operation=operation,
+                error=diagnostic_error,
+                strategy_cached=cached_strategy,
+                generation=generation,
+                startup_id=startup_id,
+            )
             self.active = False
             self.gate.stop()
             self._session_key = None
@@ -334,7 +371,7 @@ class KioskQrScanner:
                 self.page,
                 "KIOSK-QR",
                 "warm_resume_failed",
-                **self._diagnostic_fields(reason=fallback_reason, startup_id=startup_id),
+                **failure_fields,
             )
             kiosk_log(
                 self.page,
@@ -432,6 +469,33 @@ class KioskQrScanner:
         }
         result.update(fields)
         return result
+
+    def _warm_resume_failure_fields(
+        self,
+        *,
+        operation: str,
+        error: Exception,
+        strategy_cached: str | None,
+        generation: int | None,
+        startup_id: int,
+    ) -> dict[str, object]:
+        """Return the PII-safe technical context for a warm-resume fallback."""
+        fields: dict[str, object] = {
+            "reason": type(error).__name__,
+            "operation": operation,
+            "exception_type": type(error).__name__,
+            "sanitized_error": _safe_camera_error_detail(error),
+            "strategy_cached": strategy_cached or "none",
+            "stream_active": self.stream_active,
+            "controller_initialized": self.runtime.controller_initialized,
+            "preview_paused": self.runtime.preview_paused,
+            "camera_metadata_ready": self.runtime.camera_metadata_ready,
+            "camera_description_cached": self.runtime.camera_description is not None,
+            "generation": generation,
+            "startup_id": startup_id,
+        }
+        fields.update(self._last_camera_state)
+        return self._diagnostic_fields(**fields)
 
     def recover_after_reconnect(self) -> None:
         """Recupera una sesión de scanner cuyo cliente Web pudo perderse."""
@@ -1041,6 +1105,12 @@ class KioskQrScanner:
         self._perf_duration(generation, "supports_image_streaming_end", began)
         strategy = scanner_strategy(streaming_supported)
         print(f"[KIOSK-QR][PERF] capture_strategy generation={generation} strategy={strategy}")
+        kiosk_log(
+            self.page,
+            "KIOSK-QR",
+            "capture_strategy",
+            **self._diagnostic_fields(generation=generation, strategy=strategy),
+        )
         return strategy
 
     async def _initialize_cached_description(
@@ -1114,6 +1184,7 @@ class KioskQrScanner:
             return
         self._perf_mark(generation, "polling_started")
         startup = self._startup_generation
+        startup_source: str | None = None
         if startup is not None and startup[1] == generation:
             startup_id, _, startup_source = startup
             if startup_source == "reconnect":
@@ -1132,8 +1203,15 @@ class KioskQrScanner:
             self._perf_mark(generation, "capture_ready")
             return
 
+        snapshot_failure: Exception | None = None
+
         def capture_error(attempt: int, error: Exception) -> None:
+            nonlocal snapshot_failure
             if attempt >= 3 and self._session_is_current(generation, session_key):
+                if startup_source == "warm_resume":
+                    snapshot_failure = error
+                    return
+
                 async def fail_capture_session() -> None:
                     await self._fail_session(error, generation, session_key)
 
@@ -1153,6 +1231,8 @@ class KioskQrScanner:
             lambda code: self._log_snapshot_decoded(code, generation, session_key),
             generation=generation,
         )
+        if snapshot_failure is not None:
+            raise _WarmResumeSnapshotCaptureFailure(snapshot_failure)
 
     def on_snapshot_code(
         self,
@@ -1412,6 +1492,16 @@ class KioskQrScanner:
         self._on_camera_error(kiosk_camera_error_message(error))
 
     def _on_camera_state_change(self, event: fcam.CameraStateEvent) -> None:
+        self._last_camera_state = {
+            field: getattr(event, field, None)
+            for field in (
+                "is_initialized",
+                "is_streaming_images",
+                "is_preview_paused",
+                "has_error",
+            )
+            if hasattr(event, field)
+        }
         self.runtime.preview_paused = bool(event.is_preview_paused)
         if event.has_error:
             self.runtime.controller_initialized = False

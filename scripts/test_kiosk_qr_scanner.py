@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import flet_camera as fcam
+import components.kiosk_qr_scanner as kiosk_qr_scanner_module
 
 from components.kiosk_qr_scanner import (
     KIOSK_CAMERA_DESCRIPTION_CACHE_KEY,
@@ -97,6 +98,8 @@ class FakeCamera:
         self.fail_runtime_initialize = False
         self.resume_error: Exception | None = None
         self.fail_next_start_stream = False
+        self.fail_supports_on_repeat = False
+        self.fail_snapshot_attempts = 0
         self.discovery_calls = 0
         self.initialize_calls = 0
         self.start_stream_calls = 0
@@ -138,9 +141,14 @@ class FakeCamera:
 
     async def supports_image_streaming(self) -> bool:
         self.supports_calls += 1
+        if self.fail_supports_on_repeat and self.supports_calls > 1:
+            raise RuntimeError("Camera capabilities are unavailable after warm idle")
         return self.streaming_supported
 
     async def take_picture(self) -> bytes:
+        if self.fail_snapshot_attempts:
+            self.fail_snapshot_attempts -= 1
+            raise RuntimeError("Camera snapshot is unavailable after warm idle")
         return self.snapshot_payload
 
     async def start_image_stream(self) -> None:
@@ -1309,6 +1317,7 @@ async def test_fifteen_guest_cycles_fast_resume_reuses_one_controller() -> None:
     camera.streaming_supported = False
     camera.snapshot_payload = _qr_jpeg("C000")
     await scanner.start_scan()
+    camera.fail_supports_on_repeat = True
     await _wait_page_tasks(page)
     first_camera_id = id(scanner.camera)
     previous_generation = scanner.runtime.generation
@@ -1328,6 +1337,7 @@ async def test_fifteen_guest_cycles_fast_resume_reuses_one_controller() -> None:
     assert id(scanner.camera) == first_camera_id
     assert camera.discovery_calls == 1
     assert camera.initialize_calls == 1
+    assert camera.supports_calls == 1
     assert camera.pause_calls == 0
     assert camera.resume_calls == 0
     assert callbacks == [f"C{cycle:03}" for cycle in range(15)]
@@ -1348,6 +1358,7 @@ async def test_fifteen_stream_guest_cycles_reuse_one_warm_controller() -> None:
 
     camera.streaming_supported = True
     await scanner.start_scan()
+    camera.fail_supports_on_repeat = True
     first_camera_id = id(scanner.camera)
     for cycle in range(15):
         generation = scanner.runtime.generation
@@ -1363,6 +1374,7 @@ async def test_fifteen_stream_guest_cycles_reuse_one_warm_controller() -> None:
     assert id(scanner.camera) == first_camera_id
     assert camera.discovery_calls == 1
     assert camera.initialize_calls == 1
+    assert camera.supports_calls == 1
     assert camera.start_stream_calls == 15
     assert camera.stop_stream_calls == 15
     assert camera.pause_calls == 0
@@ -1370,10 +1382,91 @@ async def test_fifteen_stream_guest_cycles_reuse_one_warm_controller() -> None:
     assert callbacks == [f"S{cycle:03}" for cycle in range(15)]
 
 
+async def test_warm_resume_invalid_cached_strategy_falls_back_once() -> None:
+    page = FakePage()
+    camera = FakeCamera(page)
+    scanner = KioskQrScanner(
+        page=page,
+        on_qr_finalized=lambda _code: None,
+        on_camera_error=lambda _message: None,
+        camera=camera,
+        sleep=_no_delay,
+        create_host=False,
+    )
+    diagnostic_events: list[tuple[str, dict[str, object]]] = []
+    original_kiosk_log = kiosk_qr_scanner_module.kiosk_log
+
+    def record_log(_page, _family, event, **fields) -> None:
+        diagnostic_events.append((event, fields))
+
+    kiosk_qr_scanner_module.kiosk_log = record_log
+    try:
+        await scanner.start_scan()
+        session_key = scanner._session_key
+        assert session_key is not None
+        assert scanner._accept_code("I001", scanner.runtime.generation, session_key)
+        await _wait_page_tasks(page)
+        scanner.strategy = "none"
+        scanner.resume_for_next_guest()
+        await _wait_page_tasks(page)
+
+        assert camera.discovery_calls == 2
+        assert camera.initialize_calls == 2
+        assert scanner.active
+        failed_fields = next(fields for event, fields in diagnostic_events if event == "warm_resume_failed")
+        assert failed_fields["operation"] == "validate_cached_strategy"
+        assert failed_fields["strategy_cached"] == "none"
+        assert sum(event == "full_restart_fallback" for event, _fields in diagnostic_events) == 1
+    finally:
+        kiosk_qr_scanner_module.kiosk_log = original_kiosk_log
+
+
+async def test_warm_resume_snapshot_failure_falls_back_once() -> None:
+    page = FakePage()
+    camera = FakeCamera(page)
+    callbacks: list[str] = []
+    diagnostic_events: list[tuple[str, dict[str, object]]] = []
+    scanner = KioskQrScanner(
+        page=page,
+        on_qr_finalized=callbacks.append,
+        on_camera_error=lambda message: callbacks.append(f"error:{message}"),
+        camera=camera,
+        sleep=_no_delay,
+        create_host=False,
+    )
+    original_kiosk_log = kiosk_qr_scanner_module.kiosk_log
+
+    def record_log(_page, _family, event, **fields) -> None:
+        diagnostic_events.append((event, fields))
+
+    camera.streaming_supported = False
+    camera.snapshot_payload = _qr_jpeg("P001")
+    kiosk_qr_scanner_module.kiosk_log = record_log
+    try:
+        await scanner.start_scan()
+        await _wait_page_tasks(page)
+        camera.fail_snapshot_attempts = 3
+        camera.snapshot_payload = _qr_jpeg("P002")
+        scanner.resume_for_next_guest()
+        await _wait_page_tasks(page)
+
+        assert camera.discovery_calls == 2
+        assert camera.initialize_calls == 2
+        assert camera.pause_calls == 0
+        failed_fields = next(fields for event, fields in diagnostic_events if event == "warm_resume_failed")
+        assert failed_fields["operation"] == "take_picture"
+        assert failed_fields["strategy_cached"] == "snapshot"
+        assert sum(event == "full_restart_fallback" for event, _fields in diagnostic_events) == 1
+        assert callbacks == ["P001", "P002"]
+    finally:
+        kiosk_qr_scanner_module.kiosk_log = original_kiosk_log
+
+
 async def test_warm_resume_capture_failure_falls_back_once_then_recovers() -> None:
     page = FakePage()
     camera = FakeCamera(page)
     callbacks: list[str] = []
+    diagnostic_events: list[tuple[str, dict[str, object]]] = []
     scanner = KioskQrScanner(
         page=page,
         on_qr_finalized=callbacks.append,
@@ -1383,32 +1476,56 @@ async def test_warm_resume_capture_failure_falls_back_once_then_recovers() -> No
         create_host=False,
     )
 
-    await scanner.start_scan()
-    session_key = scanner._session_key
-    assert session_key is not None
-    assert scanner._accept_code("F001", scanner.runtime.generation, session_key)
-    await _wait_page_tasks(page)
-    camera.fail_next_start_stream = True
-    scanner.resume_for_next_guest()
-    await _wait_page_tasks(page)
+    original_kiosk_log = kiosk_qr_scanner_module.kiosk_log
 
-    assert camera.resume_calls == 0
-    assert camera.discovery_calls == 2
-    assert camera.initialize_calls == 2
-    assert scanner.active
-    assert scanner.runtime.snapshot_task is None
+    def record_log(_page, _family, event, **fields) -> None:
+        diagnostic_events.append((event, fields))
 
-    session_key = scanner._session_key
-    assert session_key is not None
-    assert scanner._accept_code("F002", scanner.runtime.generation, session_key)
-    await _wait_page_tasks(page)
-    scanner.resume_for_next_guest()
-    await _wait_page_tasks(page)
+    kiosk_qr_scanner_module.kiosk_log = record_log
+    try:
+        await scanner.start_scan()
+        session_key = scanner._session_key
+        assert session_key is not None
+        assert scanner._accept_code("F001", scanner.runtime.generation, session_key)
+        await _wait_page_tasks(page)
+        scanner._on_camera_state_change(
+            SimpleNamespace(
+                is_initialized=True,
+                is_streaming_images=True,
+                is_preview_paused=False,
+                has_error=False,
+            )
+        )
+        camera.fail_next_start_stream = True
+        scanner.resume_for_next_guest()
+        await _wait_page_tasks(page)
 
-    assert camera.resume_calls == 0
-    assert camera.discovery_calls == 2
-    assert camera.initialize_calls == 2
-    assert callbacks == ["F001", "F002"]
+        assert camera.resume_calls == 0
+        assert camera.discovery_calls == 2
+        assert camera.initialize_calls == 2
+        assert scanner.active
+        assert scanner.runtime.snapshot_task is None
+        failed_fields = next(fields for event, fields in diagnostic_events if event == "warm_resume_failed")
+        assert failed_fields["operation"] == "start_image_stream"
+        assert failed_fields["exception_type"] == "RuntimeError"
+        assert failed_fields["sanitized_error"] == "Camera is not initialized. Call initialize() first."
+        assert failed_fields["strategy_cached"] == "stream"
+        assert failed_fields["is_initialized"] is True
+        assert failed_fields["is_streaming_images"] is True
+
+        session_key = scanner._session_key
+        assert session_key is not None
+        assert scanner._accept_code("F002", scanner.runtime.generation, session_key)
+        await _wait_page_tasks(page)
+        scanner.resume_for_next_guest()
+        await _wait_page_tasks(page)
+
+        assert camera.resume_calls == 0
+        assert camera.discovery_calls == 2
+        assert camera.initialize_calls == 2
+        assert callbacks == ["F001", "F002"]
+    finally:
+        kiosk_qr_scanner_module.kiosk_log = original_kiosk_log
 
 
 async def test_warm_resume_then_full_restart_error_has_no_recovery_loop() -> None:
@@ -1485,6 +1602,8 @@ async def _main_async() -> None:
     await test_reset_startup_cancelled_by_disconnect_releases_lock_for_reconnect()
     await test_fifteen_guest_cycles_fast_resume_reuses_one_controller()
     await test_fifteen_stream_guest_cycles_reuse_one_warm_controller()
+    await test_warm_resume_invalid_cached_strategy_falls_back_once()
+    await test_warm_resume_snapshot_failure_falls_back_once()
     await test_warm_resume_capture_failure_falls_back_once_then_recovers()
     await test_warm_resume_then_full_restart_error_has_no_recovery_loop()
 
