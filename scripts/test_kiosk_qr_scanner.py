@@ -36,6 +36,7 @@ async def _cooperative_delay(_seconds: float) -> None:
 class FakePage:
     def __init__(self) -> None:
         self.tasks: list[asyncio.Task[object]] = []
+        self.all_tasks: list[asyncio.Task[object]] = []
         self.on_route_change = None
         self.web = False
 
@@ -44,6 +45,7 @@ class FakePage:
             raise TypeError("handler must be a coroutine function")
         task = asyncio.create_task(task_factory())
         self.tasks.append(task)
+        self.all_tasks.append(task)
         return task
 
     def run_thread(self, worker) -> None:
@@ -251,7 +253,7 @@ async def _wait_page_tasks(page: FakePage) -> None:
             await asyncio.gather(*finite_tasks)
         for _ in range(20):
             await asyncio.sleep(0)
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)
 
 
 async def test_session_acceptance_duplicate_and_reset() -> None:
@@ -1375,7 +1377,7 @@ async def test_fifteen_guest_cycles_fast_resume_reuses_one_controller() -> None:
     assert callbacks == [f"C{cycle:03}" for cycle in range(15)]
 
 
-async def test_snapshot_gate_blocks_capture_until_next_guest() -> None:
+async def test_snapshot_gate_keeps_camera_alive_without_decode_until_next_guest() -> None:
     page = FakePage()
     camera = FakeCamera(page)
     camera.streaming_supported = False
@@ -1397,16 +1399,30 @@ async def test_snapshot_gate_blocks_capture_until_next_guest() -> None:
     assert callbacks == ["G001"]
     assert polling_task is not None and not polling_task.done()
 
+    decode_calls = 0
+    original_decode = kiosk_qr_scanner_module.decode_qr_frame
+
+    def count_decode(payload: bytes) -> str | None:
+        nonlocal decode_calls
+        decode_calls += 1
+        return original_decode(payload)
+
+    kiosk_qr_scanner_module.decode_qr_frame = count_decode
     for _ in range(30):
         await asyncio.sleep(0)
-    assert camera.take_picture_calls == captures_while_open
+    assert camera.take_picture_calls > captures_while_open
+    assert decode_calls == 0
+    assert callbacks == ["G001"]
 
-    camera.snapshot_payload = _qr_jpeg("G002")
-    scanner.resume_for_next_guest()
-    await _wait_page_tasks(page)
-    assert callbacks == ["G001", "G002"]
-    assert scanner.runtime.snapshot_task is polling_task
-    await scanner.stop_scan()
+    try:
+        camera.snapshot_payload = _qr_jpeg("G002")
+        scanner.resume_for_next_guest()
+        await _wait_page_tasks(page)
+        assert callbacks == ["G001", "G002"]
+        assert scanner.runtime.snapshot_task is polling_task
+    finally:
+        kiosk_qr_scanner_module.decode_qr_frame = original_decode
+        await scanner.stop_scan()
     assert polling_task.cancelled() or polling_task.done()
 
 
@@ -1514,7 +1530,6 @@ async def test_warm_resume_snapshot_failure_falls_back_once() -> None:
         await _wait_page_tasks(page)
         camera.fail_snapshot_attempts = 3
         camera.snapshot_payload = _qr_jpeg("P002")
-        scanner.resume_for_next_guest()
         await _wait_page_tasks(page)
 
         assert camera.discovery_calls == 2
@@ -1527,6 +1542,17 @@ async def test_warm_resume_snapshot_failure_falls_back_once() -> None:
         assert failed_fields["sanitized_error"] == "Camera snapshot is unavailable after warm idle"
         assert sum(event == "full_restart_fallback" for event, _fields in diagnostic_events) == 1
         assert callbacks == ["P001", "P002"]
+        polling_task = next(
+            task for task in page.all_tasks if task.get_coro().__name__ == "poll_snapshots"
+        )
+        recovery_task = next(
+            task
+            for task in page.all_tasks
+            if task.get_coro().__name__ == "recover_snapshot_controller"
+        )
+        assert polling_task is not recovery_task
+        assert any(event == "snapshot_recovery_scheduled" for event, _fields in diagnostic_events)
+        assert any(event == "snapshot_recovery_complete" for event, _fields in diagnostic_events)
     finally:
         kiosk_qr_scanner_module.kiosk_log = original_kiosk_log
 
@@ -1670,7 +1696,7 @@ async def _main_async() -> None:
     await test_stale_recovery_cannot_publish_over_new_recovery()
     await test_reset_startup_cancelled_by_disconnect_releases_lock_for_reconnect()
     await test_fifteen_guest_cycles_fast_resume_reuses_one_controller()
-    await test_snapshot_gate_blocks_capture_until_next_guest()
+    await test_snapshot_gate_keeps_camera_alive_without_decode_until_next_guest()
     await test_fifteen_stream_guest_cycles_reuse_one_warm_controller()
     await test_warm_resume_invalid_cached_strategy_falls_back_once()
     await test_warm_resume_snapshot_failure_falls_back_once()
