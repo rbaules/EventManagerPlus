@@ -418,6 +418,19 @@ class KioskQrScanner:
 
         self.page.run_task(stop_after_page_close)
 
+    def lifecycle_diagnostic_state(self) -> dict[str, object]:
+        """Entrega estado Python para logs sin invocar el control Camera."""
+        snapshot_task = self.runtime.snapshot_task
+        startup_task = self._startup_task
+        return {
+            "snapshot_task_active": snapshot_task is not None and not snapshot_task.done(),
+            "stream_active": self.stream_active,
+            "startup_task_active": startup_task is not None and not startup_task.done(),
+            "controller_initialized": self.runtime.controller_initialized,
+            "preview_paused": self.runtime.preview_paused,
+            "generation": self.runtime.generation,
+        }
+
     def recover_after_reconnect(self) -> None:
         """Recupera una sesión de scanner cuyo cliente Web pudo perderse."""
         # Un F5 puede conservar esta instancia Python pero destruir el

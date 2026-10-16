@@ -56,6 +56,10 @@ class AuthenticatedViewRouter:
                 session_controller=self.session_controller,
                 on_authenticated_route_change=self.mount_current_route,
             )
+        print(
+            "[PAGE-CLEAN] source=authenticated_router.mount_current_route "
+            f"route={str(getattr(self.page, 'route', None) or '/').split('?', 1)[0]}"
+        )
         self.page.clean()
         self.page.add(control)
         self.page.update()

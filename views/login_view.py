@@ -192,6 +192,10 @@ def build_login_view(
     async def session_became_invalid(message: str) -> None:
         session_controller.logout(cancel_tasks=False)
         page.navigation_bar = None
+        print(
+            "[PAGE-CLEAN] source=login_view.session_became_invalid "
+            f"route={str(getattr(page, 'route', None) or '/').split('?', 1)[0]}"
+        )
         page.clean()
         build_login_view(
             page,
@@ -387,6 +391,10 @@ def build_login_view(
                 if attempt is not None:
                     attempt.transition(WEB_OAUTH_ATTEMPT_FAILED)
                 session_controller.logout()
+                print(
+                    "[PAGE-CLEAN] source=login_view.post_authentication_error "
+                    f"route={str(getattr(page, 'route', None) or '/').split('?', 1)[0]}"
+                )
                 page.clean()
                 build_login_view(
                     page,

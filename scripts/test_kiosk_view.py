@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import inspect
 import sys
 import threading
@@ -1504,6 +1506,24 @@ async def test_route_exit_cancels_resolution_before_scanner_shutdown() -> None:
     assert state.invitation_id is None and state.guests == [] and state.selected_guest_ids == set()
 
 
+async def test_transient_route_event_keeps_original_exit_reason() -> None:
+    page = FakePage()
+    root = build(page, FakeSupabase())
+    scanner = root.data["kiosk_scanner"]
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert page.on_route_change is not None
+        page.on_route_change(SimpleNamespace(route="/app/dashboard"))
+        page.route = "/app/kiosk"
+        await drain(page)
+
+    trace = output.getvalue()
+    assert scanner.stop_calls == 1
+    assert "[KIOSK-ROUTE] event event_route=/app/dashboard page_route=/app/kiosk" in trace
+    assert "[KIOSK-ROUTE] leave_scheduled reason=event_route_not_kiosk" in trace
+    assert "[KIOSK-ROUTE] leave_begin event_route=/app/dashboard page_route=/app/kiosk" in trace
+
+
 async def test_reconnect_is_limited_to_welcome_scan() -> None:
     page = FakePage()
     root = build(page, FakeSupabase())
@@ -1668,6 +1688,7 @@ async def main_async() -> None:
     await test_success_map_failures_and_missing_mesa_keep_welcome_visible()
     await test_success_map_is_cleared_before_a_new_invitation()
     await test_route_exit_cancels_resolution_before_scanner_shutdown()
+    await test_transient_route_event_keeps_original_exit_reason()
     await test_reconnect_is_limited_to_welcome_scan()
     await test_hidden_admin_access_requires_six_taps_and_preserves_scanner_lifecycle()
     await test_hidden_admin_pin_denial_allow_restart_and_logout()

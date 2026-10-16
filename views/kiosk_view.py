@@ -1696,9 +1696,53 @@ def build_kiosk_view(
             task.cancel()
         scanner.close(disconnected=True)
 
+    def route_diagnostic_fields(event_route: object) -> str:
+        event_path = str(event_route or "/").split("?", 1)[0]
+        page_path = str(getattr(page, "route", None) or "/").split("?", 1)[0]
+        snapshot: dict[str, object] = {}
+        diagnostic_state = getattr(scanner, "lifecycle_diagnostic_state", None)
+        if callable(diagnostic_state):
+            snapshot = diagnostic_state()
+        else:
+            runtime = getattr(scanner, "runtime", None)
+            snapshot_task = getattr(runtime, "snapshot_task", None)
+            startup_task = getattr(scanner, "_startup_task", None)
+            snapshot = {
+                "snapshot_task_active": snapshot_task is not None and not snapshot_task.done(),
+                "stream_active": bool(getattr(scanner, "stream_active", False)),
+                "startup_task_active": startup_task is not None and not startup_task.done(),
+                "controller_initialized": bool(getattr(runtime, "controller_initialized", False)),
+                "preview_paused": bool(getattr(runtime, "preview_paused", False)),
+                "generation": getattr(runtime, "generation", None),
+            }
+        camera = getattr(scanner, "camera", None)
+        try:
+            control_id = getattr(camera, "_i", None)
+        except RuntimeError:
+            control_id = None
+        return (
+            f"event_route={event_path} page_route={page_path} "
+            f"event_is_kiosk={is_kiosk_route(event_path)} phase={state.phase.value} "
+            f"kiosk_python_id={id(root)} scanner_python_id={id(scanner)} "
+            f"camera_python_id={id(camera) if camera is not None else None} "
+            f"camera_control_id={control_id} page_python_id={id(page)} "
+            f"snapshot_task_active={snapshot['snapshot_task_active']} "
+            f"stream_active={snapshot['stream_active']} "
+            f"startup_task_active={snapshot['startup_task_active']} "
+            f"controller_initialized={snapshot['controller_initialized']} "
+            f"preview_paused={snapshot['preview_paused']} "
+            f"generation={snapshot['generation']}"
+        )
+
     def on_route_change(event: ft.RouteChangeEvent) -> None:
         nonlocal background_owner, background_task, panel_owner, panel_task
-        if not is_kiosk_route(getattr(event, "route", None) or page.route):
+        event_route = getattr(event, "route", None)
+        app_route_logger = getattr(page, "_evkor_log_route_event", None)
+        if callable(app_route_logger):
+            app_route_logger(event_route)
+        fields = route_diagnostic_fields(event_route)
+        print(f"[KIOSK-ROUTE] event {fields}")
+        if not is_kiosk_route(event_route or page.route):
             cleanup_admin_access(resume_scanner=False, update=False)
             restore_page_scroll()
             cancel_success_timer()
@@ -1718,7 +1762,13 @@ def build_kiosk_view(
             if panel is not None and not panel.done():
                 panel.cancel()
 
+            print(
+                "[KIOSK-ROUTE] leave_scheduled "
+                f"reason=event_route_not_kiosk {fields}"
+            )
+
             async def leave_kiosk() -> None:
+                print(f"[KIOSK-ROUTE] leave_begin {route_diagnostic_fields(event_route)}")
                 await scanner.stop_scan()
                 if on_authenticated_route_change is not None:
                     on_authenticated_route_change()

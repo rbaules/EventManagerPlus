@@ -58,6 +58,22 @@ def main(
             f"page_python_id={id(page)}"
         )
 
+    def log_route_event(event_route: object) -> None:
+        """Expone correlacion de rutas al handler efectivo de cada vista."""
+        event_path = str(event_route or "/").split("?", 1)[0]
+        page_path = str(getattr(page, "route", None) or "/").split("?", 1)[0]
+        print(
+            "[APP-ROUTE] "
+            f"event_route={event_path} page_route={page_path} "
+            f"authenticated={'yes' if session_controller.authenticated else 'no'} "
+            f"standalone_kiosk_requested={str(standalone_kiosk_requested).lower()} "
+            f"page_python_id={id(page)}"
+        )
+
+    # Flet expone un solo callback on_route_change; cada vista instala el suyo.
+    # Se comparte este logger sin reemplazar el handler de la vista activa.
+    setattr(page, "_evkor_log_route_event", log_route_event)
+
     def disconnected(_event: ft.Event[ft.Page]) -> None:
         log_kiosk_lifecycle("page_disconnect")
         web_telemetry.disconnect()
@@ -168,6 +184,10 @@ async def _show_login_after_invalid_session(
 ) -> None:
     session_controller.logout()
     page.navigation_bar = None
+    print(
+        "[PAGE-CLEAN] source=app._show_login_after_invalid_session "
+        f"route={str(getattr(page, 'route', None) or '/').split('?', 1)[0]}"
+    )
     page.clean()
     if is_kiosk_standalone_route(getattr(page, "route", None)):
         KioskStandaloneRouter(
