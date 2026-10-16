@@ -22,6 +22,7 @@ from services.kiosk_asset_service import (
 )
 from services.kiosk_map_service import ResultadoRuta, calcular_ruta
 from services.kiosk_admin_service import validar_pin_administrativo
+from services.kiosk_diagnostic_log import kiosk_log
 from services.kiosk_route_map_service import (
     MapAssetCache,
     load_kiosk_route_map_data_url,
@@ -1161,6 +1162,15 @@ def build_kiosk_view(
             f"[KIOSK][CONFIRM] confirmation_id={confirmation_id} begin "
             f"invitation_id={invitation_id} selected_count={len(invitados)}"
         )
+        kiosk_log(
+            page,
+            "KIOSK-CONFIRM",
+            "begin",
+            confirmation_id=confirmation_id,
+            selected_count=len(invitados),
+            phase=state.phase.value,
+            scanner_id=id(scanner),
+        )
         render()
 
         async def confirm() -> None:
@@ -1191,6 +1201,15 @@ def build_kiosk_view(
                         f"[KIOSK][CONFIRM] confirmation_id={confirmation_id} completed "
                         f"confirmed_count={resultado.confirmados}"
                     )
+                    kiosk_log(
+                        page,
+                        "KIOSK-CONFIRM",
+                        "success",
+                        confirmation_id=confirmation_id,
+                        confirmed_count=resultado.confirmados,
+                        phase=state.phase.value,
+                        scanner_id=id(scanner),
+                    )
                 else:
                     if resultado.invitados:
                         state._apply_guests(resultado.invitados)
@@ -1202,6 +1221,15 @@ def build_kiosk_view(
                         state.error_message = resultado.mensaje
                         state.phase = KioskPhase.SELECT_GUESTS
                     print(f"[KIOSK][CONFIRM] confirmation_id={confirmation_id} failed code={resultado.estado}")
+                    kiosk_log(
+                        page,
+                        "KIOSK-CONFIRM",
+                        "error",
+                        confirmation_id=confirmation_id,
+                        error_type=resultado.estado,
+                        phase=state.phase.value,
+                        scanner_id=id(scanner),
+                    )
                 render()
                 if state.phase == KioskPhase.SUCCESS:
                     start_success_route_map()
@@ -1214,6 +1242,15 @@ def build_kiosk_view(
                     state.selected_guest_ids.clear()
                     state.phase = KioskPhase.SELECT_GUESTS
                     print(f"[KIOSK][CONFIRM] confirmation_id={confirmation_id} failed code={type(ex).__name__}")
+                    kiosk_log(
+                        page,
+                        "KIOSK-CONFIRM",
+                        "error",
+                        confirmation_id=confirmation_id,
+                        error_type=type(ex).__name__,
+                        phase=state.phase.value,
+                        scanner_id=id(scanner),
+                    )
                     render()
             finally:
                 if confirmation_owner is owner:
@@ -1696,7 +1733,7 @@ def build_kiosk_view(
             task.cancel()
         scanner.close(disconnected=True)
 
-    def route_diagnostic_fields(event_route: object) -> str:
+    def route_diagnostic_values(event_route: object) -> dict[str, object]:
         event_path = str(event_route or "/").split("?", 1)[0]
         page_path = str(getattr(page, "route", None) or "/").split("?", 1)[0]
         snapshot: dict[str, object] = {}
@@ -1720,18 +1757,26 @@ def build_kiosk_view(
             control_id = getattr(camera, "_i", None)
         except RuntimeError:
             control_id = None
-        return (
-            f"event_route={event_path} page_route={page_path} "
-            f"event_is_kiosk={is_kiosk_route(event_path)} phase={state.phase.value} "
-            f"kiosk_python_id={id(root)} scanner_python_id={id(scanner)} "
-            f"camera_python_id={id(camera) if camera is not None else None} "
-            f"camera_control_id={control_id} page_python_id={id(page)} "
-            f"snapshot_task_active={snapshot['snapshot_task_active']} "
-            f"stream_active={snapshot['stream_active']} "
-            f"startup_task_active={snapshot['startup_task_active']} "
-            f"controller_initialized={snapshot['controller_initialized']} "
-            f"preview_paused={snapshot['preview_paused']} "
-            f"generation={snapshot['generation']}"
+        return {
+            "event_route": event_path,
+            "page_route": page_path,
+            "event_is_kiosk": is_kiosk_route(event_path),
+            "phase": state.phase.value,
+            "kiosk_id": id(root),
+            "scanner_id": id(scanner),
+            "camera_id": id(camera) if camera is not None else None,
+            "control_id": control_id,
+            "snapshot_task_active": snapshot["snapshot_task_active"],
+            "stream_active": snapshot["stream_active"],
+            "startup_task_active": snapshot["startup_task_active"],
+            "controller_initialized": snapshot["controller_initialized"],
+            "preview_paused": snapshot["preview_paused"],
+            "generation": snapshot["generation"],
+        }
+
+    def route_diagnostic_fields(event_route: object) -> str:
+        return " ".join(
+            f"{name}={value}" for name, value in route_diagnostic_values(event_route).items()
         )
 
     def on_route_change(event: ft.RouteChangeEvent) -> None:
@@ -1742,6 +1787,7 @@ def build_kiosk_view(
             app_route_logger(event_route)
         fields = route_diagnostic_fields(event_route)
         print(f"[KIOSK-ROUTE] event {fields}")
+        kiosk_log(page, "KIOSK-ROUTE", "event", **route_diagnostic_values(event_route))
         if not is_kiosk_route(event_route or page.route):
             cleanup_admin_access(resume_scanner=False, update=False)
             restore_page_scroll()
@@ -1766,9 +1812,22 @@ def build_kiosk_view(
                 "[KIOSK-ROUTE] leave_scheduled "
                 f"reason=event_route_not_kiosk {fields}"
             )
+            kiosk_log(
+                page,
+                "KIOSK-ROUTE",
+                "leave_scheduled",
+                reason="event_route_not_kiosk",
+                **route_diagnostic_values(event_route),
+            )
 
             async def leave_kiosk() -> None:
                 print(f"[KIOSK-ROUTE] leave_begin {route_diagnostic_fields(event_route)}")
+                kiosk_log(
+                    page,
+                    "KIOSK-ROUTE",
+                    "leave_begin",
+                    **route_diagnostic_values(event_route),
+                )
                 await scanner.stop_scan()
                 if on_authenticated_route_change is not None:
                     on_authenticated_route_change()

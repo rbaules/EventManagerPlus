@@ -16,6 +16,7 @@ from services.authorization_service import (
     rol_contexto,
 )
 from services.kiosk_asset_service import KioskVisualAssetCache
+from services.kiosk_diagnostic_log import kiosk_log
 from views.kiosk_login_view import build_kiosk_login_view
 from views.kiosk_view import build_kiosk_view
 
@@ -128,32 +129,35 @@ class KioskStandaloneRouter:
 
     def _mount(self, control: ft.Control) -> ft.Control:
         route = str(getattr(self.page, "route", None) or "/").split("?", 1)[0]
-        print(
-            "[KIOSK-ROUTER] mount_begin "
-            f"route_requested={route} page_route={route} "
-            f"router_python_id={id(self)} active_control_python_id="
-            f"{id(self.active_control) if self.active_control is not None else None}"
+        kiosk_log(
+            self.page,
+            "KIOSK-ROUTER",
+            "mount_begin",
+            route_requested=route,
+            page_route=route,
+            router_id=id(self),
+            active_control_id=id(self.active_control) if self.active_control is not None else None,
         )
         self.page.navigation_bar = None
-        print(f"[PAGE-CLEAN] source=kiosk_router._mount route={route}")
+        kiosk_log(self.page, "PAGE-CLEAN", "before", source="kiosk_router._mount")
         self.page.clean()
         self.page.add(control)
         self.page.update()
         self.active_control = control
-        print(
-            "[KIOSK-ROUTER] mount_end "
-            f"route_requested={route} page_route="
-            f"{str(getattr(self.page, 'route', None) or '/').split('?', 1)[0]} "
-            f"router_python_id={id(self)} active_control_python_id={id(control)}"
+        kiosk_log(
+            self.page,
+            "KIOSK-ROUTER",
+            "mount_end",
+            route_requested=route,
+            page_route=str(getattr(self.page, "route", None) or "/").split("?", 1)[0],
+            router_id=id(self),
+            active_control_id=id(control),
         )
         return control
 
     def _show_login(self, message: str | None = None) -> None:
         self.page.navigation_bar = None
-        print(
-            "[PAGE-CLEAN] source=kiosk_router._show_login "
-            f"route={str(getattr(self.page, 'route', None) or '/').split('?', 1)[0]}"
-        )
+        kiosk_log(self.page, "PAGE-CLEAN", "before", source="kiosk_router._show_login")
         self.page.clean()
         self._kiosk_login_builder(
             page=self.page,

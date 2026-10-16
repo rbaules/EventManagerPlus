@@ -11,6 +11,7 @@ from typing import Any
 import flet as ft
 import flet_camera as fcam
 
+from services.kiosk_diagnostic_log import kiosk_log
 from services.qr_camera_runtime import QrCameraRuntime
 from services.qr_scanner_service import (
     QrFrameGate,
@@ -431,6 +432,22 @@ class KioskQrScanner:
             "generation": self.runtime.generation,
         }
 
+    def _diagnostic_fields(self, **fields: object) -> dict[str, object]:
+        """Return PII-free identifiers for a structured Kiosk log record."""
+        try:
+            control_id = getattr(self.camera, "_i", None)
+        except RuntimeError:
+            control_id = None
+        result: dict[str, object] = {
+            "scanner_id": id(self),
+            "camera_id": id(self.camera),
+            "control_id": control_id,
+            "generation": self.runtime.generation,
+            "startup_id": self._startup_id,
+        }
+        result.update(fields)
+        return result
+
     def recover_after_reconnect(self) -> None:
         """Recupera una sesión de scanner cuyo cliente Web pudo perderse."""
         # Un F5 puede conservar esta instancia Python pero destruir el
@@ -538,6 +555,19 @@ class KioskQrScanner:
             f"camera_mounted={self._camera_is_mounted()} "
             f"host_mounted={host_mounted}"
         )
+        kiosk_log(
+            self.page,
+            "KIOSK-QR",
+            "disconnect_invalidation",
+            **self._diagnostic_fields(
+                stage=stage,
+                controller_initialized=self.runtime.controller_initialized,
+                preview_paused=self.runtime.preview_paused,
+                camera_description_cached=self.runtime.camera_description is not None,
+                camera_mounted=self._camera_is_mounted(),
+                host_mounted=host_mounted,
+            ),
+        )
 
     def _log_reconnect_runtime(self, stage: str) -> None:
         startup_task = self._startup_task
@@ -550,6 +580,18 @@ class KioskQrScanner:
             f"preview_paused={self.runtime.preview_paused} "
             f"camera_description_cached={self.runtime.camera_description is not None} "
             f"startup_task_active={startup_task_active}"
+        )
+        kiosk_log(
+            self.page,
+            "KIOSK-QR",
+            "reconnect",
+            **self._diagnostic_fields(
+                stage=stage,
+                controller_initialized=self.runtime.controller_initialized,
+                preview_paused=self.runtime.preview_paused,
+                camera_description_cached=self.runtime.camera_description is not None,
+                startup_task_active=startup_task_active,
+            ),
         )
 
     def _log_snapshot_diagnostic(self, status: str, detail: object) -> None:
@@ -603,6 +645,24 @@ class KioskQrScanner:
                 f"source={entry['source']} stage={stage} "
                 f"total_ms={(now - entry['startup_begin']) * 1000:.1f}{checkpoint}"
             )
+            if stage in {
+                "startup_begin",
+                "camera_discovery_begin",
+                "camera_selected",
+                "initialize_begin",
+                "capture_ready",
+            }:
+                kiosk_log(
+                    self.page,
+                    "KIOSK-QR",
+                    stage,
+                    **self._diagnostic_fields(
+                        generation=generation,
+                        startup_id=entry["startup_id"],
+                        startup_source=entry["source"],
+                        total_ms=round((now - entry["startup_begin"]) * 1000, 1),
+                    ),
+                )
             origin = self._startup_origin or entry["startup_begin"]
             print(
                 "[KIOSK-STARTUP][PERF] "
@@ -639,6 +699,19 @@ class KioskQrScanner:
             f"duration_ms={(now - began) * 1000:.1f} "
             f"total_ms={(now - entry['startup_begin']) * 1000:.1f}{checkpoint}"
         )
+        if stage in {"mount_delay_end", "camera_discovery_end", "initialize_end"}:
+            kiosk_log(
+                self.page,
+                "KIOSK-QR",
+                stage,
+                **self._diagnostic_fields(
+                    generation=generation,
+                    startup_id=entry["startup_id"],
+                    startup_source=entry["source"],
+                    duration_ms=round((now - began) * 1000, 1),
+                    total_ms=round((now - entry["startup_begin"]) * 1000, 1),
+                ),
+            )
 
     def _log_discovery_retry(self, generation: int, retry: int, maximum: int) -> None:
         print("[KIOSK-QR][WARN] camera discovery retry", f"{retry}/{maximum}")
@@ -1200,6 +1273,12 @@ class KioskQrScanner:
         self.gate.stop()
         self.runtime.invalidate()
         self._log_camera_identity("qr_accepted")
+        kiosk_log(
+            self.page,
+            "KIOSK-QR",
+            "qr_accepted",
+            **self._diagnostic_fields(generation=generation),
+        )
 
         async def finalize_code() -> None:
             await self._finalize_code(code)
@@ -1250,6 +1329,7 @@ class KioskQrScanner:
             self.runtime.snapshot_task = None
             print("[KIOSK-QR][WARM] capture_suspended")
             self._log_camera_identity("capture_suspended")
+            kiosk_log(self.page, "KIOSK-QR", "capture_suspended", **self._diagnostic_fields())
         finally:
             self._closing = False
 
@@ -1260,6 +1340,12 @@ class KioskQrScanner:
             f"generation={self.runtime.generation} "
             f"controller_initialized={self.runtime.controller_initialized} "
             f"preview_paused={self.runtime.preview_paused}"
+        )
+        kiosk_log(
+            self.page,
+            "KIOSK-QR",
+            "shutdown_begin",
+            **self._diagnostic_fields(reason=reason),
         )
         await self._suspend_capture_for_phase()
         if not self._camera_is_mounted():
@@ -1299,6 +1385,12 @@ class KioskQrScanner:
             "[KIOSK-QR][ERROR] camera session failed "
             f"type={type(error).__name__} message={str(error)} "
             f"generation={generation} startup_id={self._startup_id}"
+        )
+        kiosk_log(
+            self.page,
+            "KIOSK-QR",
+            "camera_error",
+            **self._diagnostic_fields(generation=generation, error_type=type(error).__name__),
         )
         self._log_camera_identity("camera_session_failed")
         print(traceback.format_exc())

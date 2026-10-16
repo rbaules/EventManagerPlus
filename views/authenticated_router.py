@@ -5,6 +5,7 @@ from typing import Any
 
 import flet as ft
 
+from services.kiosk_diagnostic_log import kiosk_log
 from views.kiosk_view import build_kiosk_view, is_kiosk_route
 
 
@@ -56,10 +57,7 @@ class AuthenticatedViewRouter:
                 session_controller=self.session_controller,
                 on_authenticated_route_change=self.mount_current_route,
             )
-        print(
-            "[PAGE-CLEAN] source=authenticated_router.mount_current_route "
-            f"route={str(getattr(self.page, 'route', None) or '/').split('?', 1)[0]}"
-        )
+        kiosk_log(self.page, "PAGE-CLEAN", "before", source="authenticated_router.mount_current_route")
         self.page.clean()
         self.page.add(control)
         self.page.update()

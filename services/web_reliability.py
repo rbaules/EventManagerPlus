@@ -22,6 +22,19 @@ LOGGER.setLevel(logging.INFO)
 LOGGER.propagate = False
 
 
+def page_correlation_id(page: Any) -> str:
+    """Return the stable per-Page ID shared by web and Kiosk diagnostics."""
+    page_id = getattr(page, "_eventplus_page_id", None)
+    if isinstance(page_id, str) and page_id:
+        return page_id
+    page_id = secrets.token_hex(4).upper()
+    try:
+        setattr(page, "_eventplus_page_id", page_id)
+    except (AttributeError, RuntimeError, TypeError):
+        pass
+    return page_id
+
+
 def _technical_id(value: Any) -> str:
     if value is None or value == "":
         return "none"
@@ -40,7 +53,11 @@ class PageWebTelemetry:
         page_id: str | None = None,
     ) -> None:
         self.page = page
-        self.page_id = (page_id or secrets.token_hex(4)).upper()
+        self.page_id = (page_id or page_correlation_id(page)).upper()
+        try:
+            setattr(page, "_eventplus_page_id", self.page_id)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
         self.connect_count = 0
         self.disconnect_count = 0
         self._clock = clock

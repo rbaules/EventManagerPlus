@@ -6,6 +6,7 @@ from config import APP_MODE, APP_VERSION
 from db import create_supabase_client
 from services.session_service import PageSessionController
 from services.kiosk_e2e_service import KioskE2EProfiler
+from services.kiosk_diagnostic_log import kiosk_log
 from services.web_reliability import PageWebTelemetry
 from views.login_view import build_login_view
 from views.authenticated_router import AuthenticatedViewRouter
@@ -62,12 +63,15 @@ def main(
         """Expone correlacion de rutas al handler efectivo de cada vista."""
         event_path = str(event_route or "/").split("?", 1)[0]
         page_path = str(getattr(page, "route", None) or "/").split("?", 1)[0]
-        print(
-            "[APP-ROUTE] "
-            f"event_route={event_path} page_route={page_path} "
-            f"authenticated={'yes' if session_controller.authenticated else 'no'} "
-            f"standalone_kiosk_requested={str(standalone_kiosk_requested).lower()} "
-            f"page_python_id={id(page)}"
+        kiosk_log(
+            page,
+            "APP-ROUTE",
+            "event",
+            event_route=event_path,
+            page_route=page_path,
+            authenticated="yes" if session_controller.authenticated else "no",
+            standalone_kiosk_requested=standalone_kiosk_requested,
+            page_python_id=id(page),
         )
 
     # Flet expone un solo callback on_route_change; cada vista instala el suyo.
@@ -184,10 +188,7 @@ async def _show_login_after_invalid_session(
 ) -> None:
     session_controller.logout()
     page.navigation_bar = None
-    print(
-        "[PAGE-CLEAN] source=app._show_login_after_invalid_session "
-        f"route={str(getattr(page, 'route', None) or '/').split('?', 1)[0]}"
-    )
+    kiosk_log(page, "PAGE-CLEAN", "before", source="app._show_login_after_invalid_session")
     page.clean()
     if is_kiosk_standalone_route(getattr(page, "route", None)):
         KioskStandaloneRouter(
