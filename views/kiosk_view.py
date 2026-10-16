@@ -1662,6 +1662,10 @@ def build_kiosk_view(
             scanner.restart()
 
     def resume_kiosk_after_reconnect() -> None:
+        print(
+            "[KIOSK-LIFECYCLE] "
+            f"stage=kiosk_resume_after_reconnect phase={state.phase.value}"
+        )
         if state.phase != KioskPhase.WELCOME_SCAN:
             print(f"[KIOSK-QR][RECONNECT] skipped phase={state.phase.value}")
             return
@@ -1669,6 +1673,10 @@ def build_kiosk_view(
 
     def pause_kiosk() -> None:
         nonlocal background_owner, background_task, panel_owner, panel_task
+        print(
+            "[KIOSK-LIFECYCLE] "
+            f"stage=kiosk_pause_for_disconnect phase={state.phase.value}"
+        )
         cleanup_admin_access(resume_scanner=False, update=False)
         cancel_success_timer()
         cancel_resolution()

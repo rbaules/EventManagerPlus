@@ -412,12 +412,17 @@ class KioskQrScanner:
         if disconnected or not self._page_connection_available():
             self._invalidate_after_disconnect()
             return
-        self.page.run_task(self.stop_scan)
+
+        async def stop_after_page_close() -> None:
+            await self.stop_scan(reason="page_close")
+
+        self.page.run_task(stop_after_page_close)
 
     def recover_after_reconnect(self) -> None:
         """Recupera una sesión de scanner cuyo cliente Web pudo perderse."""
         # Un F5 puede conservar esta instancia Python pero destruir el
         # controller nativo del navegador. Nunca se reutiliza ese controller.
+        self._log_reconnect_runtime("begin")
         self.runtime.controller_initialized = False
         self.runtime.preview_paused = False
         self.runtime.camera_description = None
@@ -427,6 +432,7 @@ class KioskQrScanner:
         self.stream_active = False
         print("[KIOSK-QR][RECONNECT] runtime_invalidated")
         self._schedule_startup("reconnect")
+        self._log_reconnect_runtime("end")
 
     def _schedule_startup(self, source: str, *, restart: bool = False) -> None:
         startup_task = self._startup_task
@@ -476,6 +482,7 @@ class KioskQrScanner:
             return True
 
     def _invalidate_after_disconnect(self) -> None:
+        self._log_disconnect_invalidation("before")
         self.active = False
         self.gate.stop()
         self._session_key = None
@@ -499,6 +506,38 @@ class KioskQrScanner:
             polling_task.cancel()
         self.runtime.snapshot_task = None
         self.stream_active = False
+        self._log_disconnect_invalidation("after")
+
+    def _log_disconnect_invalidation(self, stage: str) -> None:
+        """Registra el estado afectado por un disconnect sin modificarlo."""
+        host = self.host
+        try:
+            host_mounted = host is not None and host.page is self.page
+        except RuntimeError:
+            host_mounted = False
+        print(
+            "[KIOSK-QR][INVALIDATE] "
+            f"stage={stage} reason=page_disconnect "
+            f"startup_id={self._startup_id} generation={self.runtime.generation} "
+            f"controller_initialized={self.runtime.controller_initialized} "
+            f"preview_paused={self.runtime.preview_paused} "
+            f"camera_description_cached={self.runtime.camera_description is not None} "
+            f"camera_mounted={self._camera_is_mounted()} "
+            f"host_mounted={host_mounted}"
+        )
+
+    def _log_reconnect_runtime(self, stage: str) -> None:
+        startup_task = self._startup_task
+        startup_task_active = startup_task is not None and not startup_task.done()
+        print(
+            "[KIOSK-QR][RECONNECT] "
+            f"stage={stage} full_initialization_source=reconnect "
+            f"startup_id={self._startup_id} generation={self.runtime.generation} "
+            f"controller_initialized={self.runtime.controller_initialized} "
+            f"preview_paused={self.runtime.preview_paused} "
+            f"camera_description_cached={self.runtime.camera_description is not None} "
+            f"startup_task_active={startup_task_active}"
+        )
 
     def _log_snapshot_diagnostic(self, status: str, detail: object) -> None:
         marker = (status, detail)
@@ -1159,17 +1198,17 @@ class KioskQrScanner:
         # El controller Web puede perderse durante una fase intermedia aunque
         # el control Python siga montado. Aplicamos el mismo cierre que deja
         # listo el camino manual "Intentar nuevamente" para initialize.
-        await self._shutdown_camera()
+        await self._shutdown_camera(reason="qr_accepted")
         self._log_camera_identity("qr_finalized_after_shutdown")
         print("[KIOSK-QR][SNAPSHOT] kiosk_callback", "called")
         self._on_qr_finalized(code)
 
-    async def stop_scan(self) -> None:
+    async def stop_scan(self, *, reason: str = "route_exit") -> None:
         self.active = False
         self.gate.stop()
         self._session_key = None
         self.runtime.invalidate()
-        await self._shutdown_camera()
+        await self._shutdown_camera(reason=reason)
 
     async def _suspend_capture_for_phase(self) -> None:
         if self._closing:
@@ -1201,7 +1240,14 @@ class KioskQrScanner:
         finally:
             self._closing = False
 
-    async def _shutdown_camera(self) -> None:
+    async def _shutdown_camera(self, *, reason: str) -> None:
+        print(
+            "[KIOSK-QR][SHUTDOWN] "
+            f"reason={reason} startup_id={self._startup_id} "
+            f"generation={self.runtime.generation} "
+            f"controller_initialized={self.runtime.controller_initialized} "
+            f"preview_paused={self.runtime.preview_paused}"
+        )
         await self._suspend_capture_for_phase()
         if not self._camera_is_mounted():
             return
@@ -1246,7 +1292,7 @@ class KioskQrScanner:
         self.active = False
         self.gate.stop()
         self.runtime.invalidate()
-        await self._shutdown_camera()
+        await self._shutdown_camera(reason="fatal_error")
         self._on_camera_error(kiosk_camera_error_message(error))
 
     def _on_camera_state_change(self, event: fcam.CameraStateEvent) -> None:

@@ -50,12 +50,22 @@ def main(
             if callable(callback):
                 callback()
 
+    def log_kiosk_lifecycle(stage: str) -> None:
+        """Registra transiciones de transporte sin datos de sesión o usuario."""
+        print(
+            "[KIOSK-LIFECYCLE] "
+            f"stage={stage} route={getattr(page, 'route', None)} "
+            f"page_python_id={id(page)}"
+        )
+
     def disconnected(_event: ft.Event[ft.Page]) -> None:
+        log_kiosk_lifecycle("page_disconnect")
         web_telemetry.disconnect()
         session_controller.set_connected(False)
         notify_home("pause_dashboard")
 
     async def connected(_event: ft.Event[ft.Page]) -> None:
+        log_kiosk_lifecycle("page_connect")
         web_telemetry.connect()
         if not session_controller.authenticated:
             session_controller.set_connected(True)
@@ -75,6 +85,7 @@ def main(
         web_telemetry.ready(restored_session=False)
 
     def closed(_event: ft.Event[ft.Page]) -> None:
+        log_kiosk_lifecycle("page_close")
         web_telemetry.close()
         notify_home("pause_dashboard")
         session_controller.close()

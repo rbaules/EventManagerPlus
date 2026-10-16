@@ -382,6 +382,9 @@ async def test_startup_perf_instrumentation_distinguishes_sources_without_new_ta
     assert "startup_id=2 source=reset stage=first_take_picture_end" in trace
     assert "startup_id=3 source=reconnect stage=camera_discovery_begin" in trace
     assert "startup_id=3 source=reconnect stage=initialize_end" in trace
+    assert "[KIOSK-QR][RECONNECT] stage=begin full_initialization_source=reconnect" in trace
+    assert "[KIOSK-QR][RECONNECT] stage=end full_initialization_source=reconnect" in trace
+    assert "[KIOSK-QR][SHUTDOWN] reason=qr_accepted" in trace
     assert callbacks == ["T3A1", "T3A2", "T3A3"]
     assert scanner.runtime.snapshot_task is None
     assert not page.tasks
@@ -825,14 +828,19 @@ async def test_disconnect_while_warm_invalidates_without_automatic_reconnect() -
     assert scanner.runtime.controller_initialized
     assert scanner.runtime.snapshot_task is None
 
-    page.session.connection = None
-    scanner.close()
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        page.session.connection = None
+        scanner.close()
 
     assert not scanner.runtime.controller_initialized
     assert scanner.runtime.camera_description is None
     assert scanner.runtime.snapshot_task is None
     assert not page.tasks
     assert camera.initialize_calls == 1
+    trace = output.getvalue()
+    assert "[KIOSK-QR][INVALIDATE] stage=before reason=page_disconnect" in trace
+    assert "[KIOSK-QR][INVALIDATE] stage=after reason=page_disconnect" in trace
 
 
 async def test_reset_with_lost_warm_camera_uses_full_initialization_once() -> None:
