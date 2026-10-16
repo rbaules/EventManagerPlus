@@ -30,7 +30,7 @@ async def _no_delay(_seconds: float) -> None:
 
 async def _cooperative_delay(_seconds: float) -> None:
     """Da tiempo al test para simular el corte del transporte Web."""
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
 
 
 class FakePage:
@@ -106,6 +106,7 @@ class FakeCamera:
         self.stop_stream_calls = 0
         self.pause_calls = 0
         self.resume_calls = 0
+        self.take_picture_calls = 0
         self.order: list[str] = []
         self.streaming_supported = True
         self.snapshot_payload = b""
@@ -146,6 +147,7 @@ class FakeCamera:
         return self.streaming_supported
 
     async def take_picture(self) -> bytes:
+        self.take_picture_calls += 1
         if self.fail_snapshot_attempts:
             self.fail_snapshot_attempts -= 1
             raise RuntimeError("Camera snapshot is unavailable after warm idle")
@@ -233,9 +235,23 @@ def test_page_scheduler_requires_coroutine_function() -> None:
 
 
 async def _wait_page_tasks(page: FakePage) -> None:
+    for _ in range(20):
+        await asyncio.sleep(0)
+    # Snapshot decoding runs in a worker thread; give its completion callback
+    # one scheduling turn without awaiting the persistent polling task itself.
+    await asyncio.sleep(0.01)
     while page.tasks:
         tasks, page.tasks = page.tasks[:], []
-        await asyncio.gather(*tasks)
+        finite_tasks = [
+            task
+            for task in tasks
+            if task.get_coro().__name__ != "poll_snapshots"
+        ]
+        if finite_tasks:
+            await asyncio.gather(*finite_tasks)
+        for _ in range(20):
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
 
 
 async def test_session_acceptance_duplicate_and_reset() -> None:
@@ -341,7 +357,8 @@ async def test_snapshot_pipeline_with_realistic_jpeg_payload() -> None:
     await _wait_page_tasks(page)
     assert callbacks == ["T3A1"]
     assert not scanner.active
-    assert scanner.runtime.snapshot_task is None
+    assert scanner.runtime.snapshot_task is not None
+    assert not scanner.runtime.snapshot_task.done()
 
 
 async def test_startup_perf_instrumentation_distinguishes_sources_without_new_tasks() -> None:
@@ -398,7 +415,8 @@ async def test_startup_perf_instrumentation_distinguishes_sources_without_new_ta
     assert "[KIOSK-QR][RECONNECT] stage=end full_initialization_source=reconnect" in trace
     assert "[KIOSK-QR][SHUTDOWN] reason=qr_accepted" in trace
     assert callbacks == ["T3A1", "T3A2", "T3A3"]
-    assert scanner.runtime.snapshot_task is None
+    assert scanner.runtime.snapshot_task is not None
+    assert not scanner.runtime.snapshot_task.done()
     assert not page.tasks
 
 
@@ -460,7 +478,7 @@ async def test_initial_startup_keeps_mounted_discovery_then_initialize_after_mou
         await _wait_page_tasks(page)
 
     trace = output.getvalue()
-    assert sleep_calls == [0.3]
+    assert sleep_calls[0] == 0.3
     assert camera.discovery_calls == 1
     assert camera.initialize_calls == 1
     assert "source=initial phase=call_enter" in trace
@@ -539,7 +557,7 @@ async def test_persisted_preference_on_new_runtime_uses_discovery_then_selects_i
         await _wait_page_tasks(page)
 
     trace = output.getvalue()
-    assert sleep_calls == [0.3]
+    assert sleep_calls[0] == 0.3
     assert second_camera.discovery_calls == 1
     assert second_camera.initialize_calls == 1
     assert second_camera.initialize_descriptions[0] is second_camera.description
@@ -751,7 +769,8 @@ async def test_five_guest_cycles_use_full_recovery_without_error() -> None:
         else:
             scanner.restart()
         await _wait_page_tasks(page)
-        assert scanner.runtime.snapshot_task is None
+        assert scanner.runtime.snapshot_task is not None
+        assert not scanner.runtime.snapshot_task.done()
         assert scanner.runtime.controller_initialized
         assert not scanner.runtime.preview_paused
 
@@ -838,7 +857,8 @@ async def test_disconnect_while_warm_invalidates_without_automatic_reconnect() -
     scanner.start()
     await _wait_page_tasks(page)
     assert scanner.runtime.controller_initialized
-    assert scanner.runtime.snapshot_task is None
+    assert scanner.runtime.snapshot_task is not None
+    assert not scanner.runtime.snapshot_task.done()
 
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
@@ -986,7 +1006,8 @@ async def test_disconnect_during_reset_fast_path_keeps_reconnect_recovery() -> N
     await _drain_page_tasks_after_disconnect(page)
 
     assert callbacks == ["T3A1", "T3A2"]
-    assert scanner.runtime.snapshot_task is None
+    assert scanner.runtime.snapshot_task is not None
+    assert not scanner.runtime.snapshot_task.done()
 
 
 async def test_production_start_handoff_is_synchronous_and_finalizes_once() -> None:
@@ -1015,18 +1036,14 @@ async def test_production_start_handoff_is_synchronous_and_finalizes_once() -> N
         await _wait_page_tasks(page)
 
     assert state.phase == KioskPhase.RESOLVING
-    assert scanner.runtime.snapshot_task is None
+    assert scanner.runtime.snapshot_task is not None
+    assert not scanner.runtime.snapshot_task.done()
     assert not scanner.active
     assert not inspect.iscoroutinefunction(scanner.on_snapshot_code)
     trace = output.getvalue()
     markers = (
-        "[QR-SCAN][SNAPSHOT] qr_found",
-        "[QR-SCAN][SNAPSHOT] before_on_code",
         "[KIOSK-QR][SNAPSHOT] on_code_enter",
         "[KIOSK-QR][SNAPSHOT] code_gate session_current=True accepted=True reason=accepted",
-        "[QR-SCAN][SNAPSHOT] on_code_return value=True",
-        "[QR-SCAN][SNAPSHOT] polling_exit reason=code_accepted",
-        "[QR-SCAN][LIFECYCLE] polling task finished",
         "[KIOSK-QR][SNAPSHOT] kiosk_callback called",
     )
     for marker in markers:
@@ -1083,10 +1100,19 @@ async def test_close_with_active_page_schedules_normal_cleanup() -> None:
 async def _drain_page_tasks_after_disconnect(page: FakePage) -> None:
     while page.tasks:
         tasks, page.tasks = page.tasks[:], []
-        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        finite_tasks = [
+            task for task in tasks if task.get_coro().__name__ != "poll_snapshots"
+        ]
+        outcomes = await asyncio.gather(*finite_tasks, return_exceptions=True)
         for outcome in outcomes:
             if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
                 raise outcome
+        for _ in range(20):
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    await asyncio.sleep(0.1)
 
 
 async def test_same_page_reconnect_restarts_one_snapshot_session() -> None:
@@ -1106,7 +1132,7 @@ async def test_same_page_reconnect_restarts_one_snapshot_session() -> None:
     )
 
     scanner.start()
-    await asyncio.sleep(0.03)
+    await asyncio.sleep(0.06)
     first_generation = scanner.runtime.generation
     first_polling_task = scanner.runtime.snapshot_task
     assert scanner.active and first_polling_task is not None
@@ -1121,14 +1147,15 @@ async def test_same_page_reconnect_restarts_one_snapshot_session() -> None:
     scanner.recover_after_reconnect()
     scanner.recover_after_reconnect()
     scanner.recover_after_reconnect()
-    assert len(page.tasks) == 2  # polling cancelado + una sola recuperacion encolada
+    assert scanner._startup_task is not None
     await _drain_page_tasks_after_disconnect(page)
 
     assert scanner.runtime.generation > first_generation
     assert camera.initialize_calls == 2
     assert callbacks == ["T3A1"]
     assert state.phase == KioskPhase.RESOLVING
-    assert scanner.runtime.snapshot_task is None
+    assert scanner.runtime.snapshot_task is not None
+    assert not scanner.runtime.snapshot_task.done()
 
 
 async def test_reconnect_cycles_do_not_duplicate_camera_or_polling() -> None:
@@ -1146,7 +1173,7 @@ async def test_reconnect_cycles_do_not_duplicate_camera_or_polling() -> None:
         create_host=False,
     )
     scanner.start()
-    await asyncio.sleep(0.03)
+    await asyncio.sleep(0.06)
 
     for code in ("T3A1", "T3A2", "T3A3"):
         page.session.connection = None
@@ -1156,12 +1183,13 @@ async def test_reconnect_cycles_do_not_duplicate_camera_or_polling() -> None:
         scanner.recover_after_reconnect()
         await _drain_page_tasks_after_disconnect(page)
         assert callbacks[-1] == code
-        assert scanner.runtime.snapshot_task is None
+        assert scanner.runtime.snapshot_task is not None
+        assert not scanner.runtime.snapshot_task.done()
         assert not scanner.active
         if code != "T3A3":
             camera.snapshot_payload = b""
             scanner.start()
-            await asyncio.sleep(0.03)
+            await asyncio.sleep(0.06)
             assert scanner.active and scanner.runtime.snapshot_task is not None
 
     assert callbacks == ["T3A1", "T3A2", "T3A3"]
@@ -1184,7 +1212,7 @@ async def test_reconnect_after_cancelled_discovery_starts_fresh_recovery() -> No
         create_host=False,
     )
     scanner.start()
-    await asyncio.sleep(0.03)
+    await asyncio.sleep(0.06)
     first_generation = scanner.runtime.generation
 
     page.session.connection = None
@@ -1226,7 +1254,7 @@ async def test_stale_recovery_cannot_publish_over_new_recovery() -> None:
         create_host=False,
     )
     scanner.start()
-    await asyncio.sleep(0.03)
+    await asyncio.sleep(0.06)
 
     page.session.connection = None
     scanner.close()
@@ -1297,7 +1325,8 @@ async def test_reset_startup_cancelled_by_disconnect_releases_lock_for_reconnect
     await _drain_page_tasks_after_disconnect(page)
 
     assert callbacks == ["T3A1", "T3A2"]
-    assert scanner.runtime.snapshot_task is None
+    assert scanner.runtime.snapshot_task is not None
+    assert not scanner.runtime.snapshot_task.done()
     assert scanner._startup_task is None
 
 
@@ -1320,17 +1349,20 @@ async def test_fifteen_guest_cycles_fast_resume_reuses_one_controller() -> None:
     camera.fail_supports_on_repeat = True
     await _wait_page_tasks(page)
     first_camera_id = id(scanner.camera)
+    polling_task = scanner.runtime.snapshot_task
+    assert polling_task is not None and not polling_task.done()
     previous_generation = scanner.runtime.generation
     for cycle in range(1, 15):
-        assert scanner.runtime.snapshot_task is None
+        assert scanner.runtime.snapshot_task is polling_task
         assert scanner.runtime.controller_initialized and not scanner.runtime.preview_paused
         camera.snapshot_payload = _qr_jpeg(f"C{cycle:03}")
         scanner.resume_for_next_guest()
         await asyncio.sleep(0)
-        polling_task = scanner.runtime.snapshot_task
-        assert polling_task is None or not polling_task.done()
+        assert scanner.runtime.snapshot_task is polling_task
+        assert not polling_task.done()
         await _wait_page_tasks(page)
-        assert scanner.runtime.snapshot_task is None
+        assert scanner.runtime.snapshot_task is polling_task
+        assert not polling_task.done()
         assert scanner.runtime.generation > previous_generation
         previous_generation = scanner.runtime.generation
 
@@ -1341,6 +1373,41 @@ async def test_fifteen_guest_cycles_fast_resume_reuses_one_controller() -> None:
     assert camera.pause_calls == 0
     assert camera.resume_calls == 0
     assert callbacks == [f"C{cycle:03}" for cycle in range(15)]
+
+
+async def test_snapshot_gate_blocks_capture_until_next_guest() -> None:
+    page = FakePage()
+    camera = FakeCamera(page)
+    camera.streaming_supported = False
+    camera.snapshot_payload = _qr_jpeg("G001")
+    callbacks: list[str] = []
+    scanner = KioskQrScanner(
+        page=page,
+        on_qr_finalized=callbacks.append,
+        on_camera_error=lambda message: callbacks.append(f"error:{message}"),
+        camera=camera,
+        sleep=_no_delay,
+        create_host=False,
+    )
+
+    await scanner.start_scan()
+    await _wait_page_tasks(page)
+    polling_task = scanner.runtime.snapshot_task
+    captures_while_open = camera.take_picture_calls
+    assert callbacks == ["G001"]
+    assert polling_task is not None and not polling_task.done()
+
+    for _ in range(30):
+        await asyncio.sleep(0)
+    assert camera.take_picture_calls == captures_while_open
+
+    camera.snapshot_payload = _qr_jpeg("G002")
+    scanner.resume_for_next_guest()
+    await _wait_page_tasks(page)
+    assert callbacks == ["G001", "G002"]
+    assert scanner.runtime.snapshot_task is polling_task
+    await scanner.stop_scan()
+    assert polling_task.cancelled() or polling_task.done()
 
 
 async def test_fifteen_stream_guest_cycles_reuse_one_warm_controller() -> None:
@@ -1453,9 +1520,11 @@ async def test_warm_resume_snapshot_failure_falls_back_once() -> None:
         assert camera.discovery_calls == 2
         assert camera.initialize_calls == 2
         assert camera.pause_calls == 0
-        failed_fields = next(fields for event, fields in diagnostic_events if event == "warm_resume_failed")
-        assert failed_fields["operation"] == "take_picture"
-        assert failed_fields["strategy_cached"] == "snapshot"
+        failed_fields = next(
+            fields for event, fields in diagnostic_events if event == "snapshot_controller_failed"
+        )
+        assert failed_fields["exception_type"] == "RuntimeError"
+        assert failed_fields["sanitized_error"] == "Camera snapshot is unavailable after warm idle"
         assert sum(event == "full_restart_fallback" for event, _fields in diagnostic_events) == 1
         assert callbacks == ["P001", "P002"]
     finally:
@@ -1601,6 +1670,7 @@ async def _main_async() -> None:
     await test_stale_recovery_cannot_publish_over_new_recovery()
     await test_reset_startup_cancelled_by_disconnect_releases_lock_for_reconnect()
     await test_fifteen_guest_cycles_fast_resume_reuses_one_controller()
+    await test_snapshot_gate_blocks_capture_until_next_guest()
     await test_fifteen_stream_guest_cycles_reuse_one_warm_controller()
     await test_warm_resume_invalid_cached_strategy_falls_back_once()
     await test_warm_resume_snapshot_failure_falls_back_once()

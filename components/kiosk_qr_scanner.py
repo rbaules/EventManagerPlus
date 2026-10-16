@@ -15,11 +15,11 @@ from services.kiosk_diagnostic_log import kiosk_log
 from services.qr_camera_runtime import QrCameraRuntime
 from services.qr_scanner_service import (
     QrFrameGate,
+    decode_qr_frame,
     enumerate_cameras_with_retry,
     initialize_camera_with_retry,
     is_camera_transient,
     process_qr_camera_frame,
-    run_qr_snapshot_polling,
     scanner_strategy,
     select_front_first_camera_description,
     stop_camera_capture,
@@ -195,6 +195,7 @@ class KioskQrScanner:
         self._native_ready_generation: int | None = None
         self._last_snapshot_diagnostic: tuple[str, object] | None = None
         self._last_camera_state: dict[str, bool | None] = {}
+        self._snapshot_controller_recovery_active = False
         self.camera = camera or fcam.Camera(
             preview_enabled=True,
             content=ft.Container(
@@ -269,6 +270,11 @@ class KioskQrScanner:
 
     def _warm_resume_ready(self) -> bool:
         polling_task = self.runtime.snapshot_task
+        snapshot_polling_ready = (
+            polling_task is not None and not polling_task.done()
+            if self.strategy == "snapshot"
+            else polling_task is None or polling_task.done()
+        )
         return (
             not self._closing
             and not self.active
@@ -279,7 +285,7 @@ class KioskQrScanner:
             and not self.runtime.preview_paused
             and self.runtime.camera_description is not None
             and self.runtime.camera_metadata_ready
-            and (polling_task is None or polling_task.done())
+            and snapshot_polling_ready
         )
 
     async def _resume_warm_capture(self) -> None:
@@ -330,6 +336,11 @@ class KioskQrScanner:
             if cached_strategy not in {"stream", "snapshot"}:
                 fallback_reason = "cached_strategy_invalid"
                 raise _FastResumeFallback(fallback_reason)
+            if cached_strategy == "snapshot":
+                polling_task = self.runtime.snapshot_task
+                if polling_task is None or polling_task.done():
+                    fallback_reason = "persistent_snapshot_task_unavailable"
+                    raise _FastResumeFallback(fallback_reason)
             kiosk_log(
                 self.page,
                 "KIOSK-QR",
@@ -346,6 +357,32 @@ class KioskQrScanner:
                 if cached_strategy == "stream"
                 else "start_snapshot_polling"
             )
+            if cached_strategy == "snapshot":
+                self._startup_generation = None
+                self._perf_mark(generation, "capture_ready")
+                kiosk_log(
+                    self.page,
+                    "KIOSK-QR",
+                    "snapshot_gate_opened",
+                    **self._diagnostic_fields(
+                        generation=generation,
+                        startup_id=startup_id,
+                        snapshot_task_id=id(self.runtime.snapshot_task),
+                        snapshot_task_done=False,
+                    ),
+                )
+                kiosk_log(
+                    self.page,
+                    "KIOSK-QR",
+                    "snapshot_polling_reused",
+                    **self._diagnostic_fields(
+                        generation=generation,
+                        startup_id=startup_id,
+                        snapshot_task_id=id(self.runtime.snapshot_task),
+                        snapshot_task_done=False,
+                    ),
+                )
+                return
             await self._start_capture(generation, session_key, cached_strategy)
         except Exception as ex:
             diagnostic_error = (
@@ -527,7 +564,7 @@ class KioskQrScanner:
                 print(f"[KIOSK-QR][RECONNECT] recovery_id={startup_id} begin")
                 print("[KIOSK-QR][RECONNECT] phase=WELCOME_SCAN")
             try:
-                if restart:
+                if restart or source == "reconnect":
                     await self._suspend_capture_for_phase()
                 await self.start_scan(startup_id=startup_id, startup_source=source)
                 if self._startup_id != startup_id:
@@ -1203,36 +1240,102 @@ class KioskQrScanner:
             self._perf_mark(generation, "capture_ready")
             return
 
-        snapshot_failure: Exception | None = None
-
-        def capture_error(attempt: int, error: Exception) -> None:
-            nonlocal snapshot_failure
-            if attempt >= 3 and self._session_is_current(generation, session_key):
-                if startup_source == "warm_resume":
-                    snapshot_failure = error
-                    return
-
-                async def fail_capture_session() -> None:
-                    await self._fail_session(error, generation, session_key)
-
-                self.page.run_task(fail_capture_session)
-
-        def on_snapshot_code(code: str) -> bool:
-            return self.on_snapshot_code(code, generation, session_key)
-
         self._perf_mark(generation, "snapshot_polling_begin")
         self._perf_mark(generation, "capture_ready")
-        await run_qr_snapshot_polling(
-            self.runtime,
-            lambda: self._take_snapshot(generation, session_key),
-            lambda: self._session_is_current(generation, session_key),
-            on_snapshot_code,
-            capture_error,
-            lambda code: self._log_snapshot_decoded(code, generation, session_key),
-            generation=generation,
+        self._start_persistent_snapshot_polling()
+
+    def _start_persistent_snapshot_polling(self) -> None:
+        """Create the sole physical snapshot task for this native controller."""
+        task = self.runtime.snapshot_task
+        if task is not None and not task.done():
+            return
+
+        async def poll_snapshots() -> None:
+            await self._run_persistent_snapshot_polling()
+
+        task = self.page.run_task(poll_snapshots)
+        self.runtime.snapshot_task = task
+        self._snapshot_controller_recovery_active = False
+
+    async def _run_persistent_snapshot_polling(self) -> None:
+        """Keep snapshot ownership alive while logical guest sessions open and close."""
+        task = asyncio.current_task()
+        consecutive_errors = 0
+        try:
+            while not self._closing and self._page_connection_available():
+                generation = self.runtime.generation
+                session_key = self._session_key
+                if (
+                    session_key is None
+                    or not self.active
+                    or not self.gate.active
+                ):
+                    await self._sleep(0.65)
+                    await asyncio.sleep(0)
+                    continue
+                try:
+                    payload = await self._take_snapshot(generation, session_key)
+                except Exception as ex:
+                    if not self._session_is_current(generation, session_key):
+                        continue
+                    consecutive_errors += 1
+                    if consecutive_errors >= 3:
+                        await self._persistent_snapshot_controller_failed(ex, generation, session_key)
+                        return
+                    await self._sleep(0.65)
+                    await asyncio.sleep(0)
+                    continue
+                if not self._session_is_current(generation, session_key):
+                    continue
+                consecutive_errors = 0
+                code = await asyncio.to_thread(decode_qr_frame, payload)
+                if not self._session_is_current(generation, session_key):
+                    continue
+                self._log_snapshot_decoded(code, generation, session_key)
+                if code:
+                    self.on_snapshot_code(code, generation, session_key)
+                await self._sleep(0.65)
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self.runtime.snapshot_task is task:
+                self.runtime.snapshot_task = None
+
+    async def _persistent_snapshot_controller_failed(
+        self,
+        error: Exception,
+        generation: int,
+        session_key: tuple[int, int],
+    ) -> None:
+        if self._snapshot_controller_recovery_active:
+            return
+        self._snapshot_controller_recovery_active = True
+        kiosk_log(
+            self.page,
+            "KIOSK-QR",
+            "snapshot_controller_failed",
+            **self._diagnostic_fields(
+                generation=generation,
+                exception_type=type(error).__name__,
+                sanitized_error=_safe_camera_error_detail(error),
+                snapshot_task_id=id(self.runtime.snapshot_task),
+                snapshot_task_done=False,
+            ),
         )
-        if snapshot_failure is not None:
-            raise _WarmResumeSnapshotCaptureFailure(snapshot_failure)
+        self.active = False
+        self.gate.stop()
+        self._session_key = None
+        self.runtime.invalidate()
+        if self.runtime.snapshot_task is asyncio.current_task():
+            self.runtime.snapshot_task = None
+        kiosk_log(
+            self.page,
+            "KIOSK-QR",
+            "full_restart_fallback",
+            **self._diagnostic_fields(reason="persistent_snapshot_controller_failed"),
+        )
+        await self.restart_scan()
 
     def on_snapshot_code(
         self,
@@ -1376,6 +1479,15 @@ class KioskQrScanner:
             polling_task = self.runtime.snapshot_task
             current_task = asyncio.current_task()
             if polling_task is not None and polling_task is not current_task and not polling_task.done():
+                kiosk_log(
+                    self.page,
+                    "KIOSK-QR",
+                    "snapshot_polling_stopped_strong",
+                    **self._diagnostic_fields(
+                        snapshot_task_id=id(polling_task),
+                        snapshot_task_done=False,
+                    ),
+                )
                 polling_task.cancel()
                 try:
                     await polling_task
@@ -1412,7 +1524,19 @@ class KioskQrScanner:
         if not session_already_invalidated:
             self.runtime.invalidate()
         self._session_key = None
-        await self._suspend_capture_for_phase()
+        if self.strategy == "snapshot":
+            polling_task = self.runtime.snapshot_task
+            kiosk_log(
+                self.page,
+                "KIOSK-QR",
+                "snapshot_gate_closed",
+                **self._diagnostic_fields(
+                    snapshot_task_id=id(polling_task) if polling_task is not None else None,
+                    snapshot_task_done=polling_task.done() if polling_task is not None else None,
+                ),
+            )
+        else:
+            await self._suspend_capture_for_phase()
         self.set_preview_visible(False)
         kiosk_log(
             self.page,
