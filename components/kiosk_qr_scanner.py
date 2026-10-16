@@ -17,7 +17,6 @@ from services.qr_scanner_service import (
     QrFrameGate,
     enumerate_cameras_with_retry,
     initialize_camera_with_retry,
-    classify_camera_resume_outcome,
     is_camera_transient,
     process_qr_camera_frame,
     run_qr_snapshot_polling,
@@ -35,7 +34,7 @@ class _CachedCameraDescriptionUnavailable(RuntimeError):
 
 
 class _FastResumeFallback(RuntimeError):
-    """Internal signal to leave the camera lock before one full restart."""
+    """Internal signal to leave the warm path before one full restart."""
 
 
 def _description_to_cache_value(description: fcam.CameraDescription) -> str | None:
@@ -235,28 +234,27 @@ class KioskQrScanner:
         self._schedule_startup("reset", restart=True)
 
     def resume_for_next_guest(self) -> None:
-        """Resume a paused controller for the normal next-guest transition.
-
-        This deliberately differs from :meth:`restart`: it keeps the mounted
-        Camera/controller when the QR finalizer paused it cleanly.  A lost or
-        inconsistent controller gets one full restart fallback; arbitrary
-        camera errors retain the existing error UI path.
-        """
+        """Reactivate capture after the normal QR warm-idle transition."""
         startup_task = self._startup_task
         if self._closing or self.active or (startup_task is not None and not startup_task.done()):
-            print("[KIOSK-QR][FAST-RESUME] fallback reason=scanner_not_idle")
+            kiosk_log(
+                self.page,
+                "KIOSK-QR",
+                "full_restart_fallback",
+                **self._diagnostic_fields(reason="scanner_not_idle"),
+            )
             self.restart()
             return
 
         async def resume_next_guest() -> None:
-            await self._resume_for_next_guest()
+            await self._resume_warm_capture()
 
         self._startup_id += 1
         startup_id = self._startup_id
         print(f"[KIOSK-QR][CYCLE] next_guest begin startup_id={startup_id}")
         self._startup_task = self.page.run_task(resume_next_guest)
 
-    def _fast_resume_ready(self) -> bool:
+    def _warm_resume_ready(self) -> bool:
         polling_task = self.runtime.snapshot_task
         return (
             not self._closing
@@ -265,30 +263,26 @@ class KioskQrScanner:
             and self._page_connection_available()
             and self._camera_is_mounted()
             and self.runtime.controller_initialized
-            and self.runtime.preview_paused
+            and not self.runtime.preview_paused
+            and self.runtime.camera_description is not None
+            and self.runtime.camera_metadata_ready
             and (polling_task is None or polling_task.done())
         )
 
-    async def _resume_for_next_guest(self) -> None:
-        """Perform one fast resume, or one lock-safe full restart fallback."""
+    async def _resume_warm_capture(self) -> None:
+        """Rearm capture without pausing, discovering, or initializing Camera."""
         startup_id = self._startup_id
         began = time.perf_counter()
-        polling_task = self.runtime.snapshot_task
-        polling_status = (
-            "none"
-            if polling_task is None
-            else f"id={id(polling_task)} done={polling_task.done()}"
-        )
         fallback_reason: str | None = None
         generation: int | None = None
         session_key: tuple[int, int] | None = None
         try:
-            if not self._fast_resume_ready():
-                fallback_reason = "controller_or_polling_not_reusable"
+            if not self._warm_resume_ready():
+                fallback_reason = "warm_controller_or_capture_not_reusable"
                 raise _FastResumeFallback(fallback_reason)
             async with self.runtime.lifecycle_lock:
-                if not self._fast_resume_ready():
-                    fallback_reason = "controller_changed_while_waiting_lock"
+                if not self._warm_resume_ready():
+                    fallback_reason = "warm_controller_changed_while_waiting_lock"
                     raise _FastResumeFallback(fallback_reason)
                 generation = self.runtime.invalidate()
                 session_key = (id(self), generation)
@@ -301,63 +295,54 @@ class KioskQrScanner:
                 self._perf_startups = {
                     generation: {
                         "startup_id": startup_id,
-                        "source": "fast_resume",
+                        "source": "warm_resume",
                         "startup_begin": began,
                         "first_capture_completed": False,
                     }
                 }
-                self._startup_generation = (startup_id, generation, "fast_resume")
+                self._startup_generation = (startup_id, generation, "warm_resume")
                 self._perf_mark(generation, "startup_begin")
-                print(
-                    "[KIOSK-QR][FAST-RESUME] begin "
-                    f"cycle_id={startup_id} generation={generation} "
-                    f"controller_initialized={self.runtime.controller_initialized} "
-                    f"preview_paused={self.runtime.preview_paused} snapshot_task={polling_status}"
+                kiosk_log(
+                    self.page,
+                    "KIOSK-QR",
+                    "warm_resume_begin",
+                    **self._diagnostic_fields(generation=generation, startup_id=startup_id),
                 )
-                try:
-                    resume_began = self._perf_mark(generation, "resume_preview_begin")
-                    await self.camera.resume_preview()
-                    self._perf_duration(generation, "resume_preview_end", resume_began)
-                except Exception as ex:
-                    if classify_camera_resume_outcome(ex) == "controller_lost":
-                        self.active = False
-                        self.gate.stop()
-                        self.runtime.invalidate()
-                        fallback_reason = "controller_lost"
-                        raise _FastResumeFallback(fallback_reason) from ex
-                    raise
-                self.runtime.preview_paused = False
-                self.runtime.controller_initialized = True
-                self._native_ready_generation = generation
-                self._perf_mark(generation, "preview_ready")
-                self._log_camera_identity("fast_resume_ready")
             if not self._session_is_current(generation, session_key):
                 return
             self.strategy = await self._resolve_capture_strategy(generation)
-            await self._start_capture(generation, session_key, self.strategy)
-            print(
-                "[KIOSK-QR][FAST-RESUME] success "
-                f"cycle_id={startup_id} generation={generation} "
-                f"elapsed_ms={(time.perf_counter() - began) * 1000:.1f}"
+            kiosk_log(
+                self.page,
+                "KIOSK-QR",
+                "warm_resume_ready",
+                **self._diagnostic_fields(
+                    generation=generation,
+                    startup_id=startup_id,
+                    elapsed_ms=round((time.perf_counter() - began) * 1000, 1),
+                ),
             )
-        except _FastResumeFallback:
-            # The lifecycle lock has been released before entering restart_scan().
-            print(
-                "[KIOSK-QR][FAST-RESUME] fallback "
-                f"startup_id={startup_id} reason={fallback_reason}"
+            await self._start_capture(generation, session_key, self.strategy)
+        except Exception as ex:
+            if fallback_reason is None:
+                fallback_reason = type(ex).__name__
+            self.active = False
+            self.gate.stop()
+            self._session_key = None
+            if generation is not None:
+                self.runtime.invalidate()
+            kiosk_log(
+                self.page,
+                "KIOSK-QR",
+                "warm_resume_failed",
+                **self._diagnostic_fields(reason=fallback_reason, startup_id=startup_id),
+            )
+            kiosk_log(
+                self.page,
+                "KIOSK-QR",
+                "full_restart_fallback",
+                **self._diagnostic_fields(reason=fallback_reason, startup_id=startup_id),
             )
             await self.restart_scan()
-        except Exception as ex:
-            if generation is not None and session_key is not None:
-                await self._fail_session(ex, generation, session_key)
-            else:
-                # A precondition failure that is not a controller-loss fallback
-                # is surfaced through the established strong recovery path.
-                print(
-                    "[KIOSK-QR][FAST-RESUME] fallback "
-                    f"startup_id={startup_id} reason={type(ex).__name__}"
-                )
-                await self.restart_scan()
         finally:
             if self._startup_task is asyncio.current_task():
                 self._startup_task = None
@@ -862,7 +847,7 @@ class KioskQrScanner:
         self._perf_startups = {
             generation: {
                 "startup_id": startup_id if startup_id is not None else 0,
-                "source": startup_source if startup_id is not None else "direct",
+                "source": startup_source,
                 "startup_begin": time.perf_counter(),
                 "first_capture_completed": False,
             }
@@ -1272,6 +1257,7 @@ class KioskQrScanner:
         self.active = False
         self.gate.stop()
         self.runtime.invalidate()
+        self._session_key = None
         self._log_camera_identity("qr_accepted")
         kiosk_log(
             self.page,
@@ -1333,6 +1319,28 @@ class KioskQrScanner:
         finally:
             self._closing = False
 
+    async def _enter_warm_idle(self, *, session_already_invalidated: bool = False) -> None:
+        """Stop QR capture while retaining a valid mounted native controller."""
+        kiosk_log(
+            self.page,
+            "KIOSK-QR",
+            "warm_idle_enter",
+            **self._diagnostic_fields(),
+        )
+        self.active = False
+        self.gate.stop()
+        if not session_already_invalidated:
+            self.runtime.invalidate()
+        self._session_key = None
+        await self._suspend_capture_for_phase()
+        self.set_preview_visible(False)
+        kiosk_log(
+            self.page,
+            "KIOSK-QR",
+            "warm_idle_ready",
+            **self._diagnostic_fields(),
+        )
+
     async def _shutdown_camera(self, *, reason: str) -> None:
         print(
             "[KIOSK-QR][SHUTDOWN] "
@@ -1347,6 +1355,9 @@ class KioskQrScanner:
             "shutdown_begin",
             **self._diagnostic_fields(reason=reason),
         )
+        if reason == "qr_accepted":
+            await self._enter_warm_idle(session_already_invalidated=True)
+            return
         await self._suspend_capture_for_phase()
         if not self._camera_is_mounted():
             return
