@@ -1,0 +1,22 @@
+[project]
+name = "evkor-web-qr-probe-example"
+version = "0.0.1"
+description = "Example host app for the isolated EVKOR Flet custom-control probe."
+requires-python = ">=3.14"
+dependencies = [
+    "evkor-web-qr-probe",
+    "flet>=0.85.3",
+]
+
+[tool.flet]
+org = "com.evkor.diagnostics"
+product = "EVKOR Web QR Probe"
+
+[tool.flet.app]
+path = "src"
+
+[tool.flet.dev_packages]
+evkor-web-qr-probe = "../.."
+
+[tool.uv.sources]
+evkor-web-qr-probe = { path = "../..", editable = true }

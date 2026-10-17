@@ -8,6 +8,7 @@ os.environ.setdefault("EVENTPLUS_ASGI", "true")
 import flet as ft
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
+from starlette.staticfiles import StaticFiles
 
 from app import main as eventplus_main
 from config import (
@@ -28,6 +29,13 @@ from services.webclient_telemetry import (
 
 session_repository = InMemorySessionRepository()
 _QR_WEB_SPIKE_FILE = Path(__file__).resolve().parent / "assets" / "qr_web_spike.html"
+_FLET_WEB_QR_PROBE_DIR = (
+    Path(__file__).resolve().parent
+    / "diagnostics"
+    / "evkor_web_qr_probe"
+    / "deploy"
+    / "web"
+)
 
 
 def asgi_main(page: ft.Page) -> None:
@@ -62,6 +70,11 @@ async def qr_web_spike() -> FileResponse:
     return FileResponse(_QR_WEB_SPIKE_FILE, media_type="text/html")
 
 
+@app.get("/diagnostics/flet-web-qr-probe", include_in_schema=False)
+async def flet_web_qr_probe_redirect() -> RedirectResponse:
+    return RedirectResponse("/diagnostics/flet-web-qr-probe/", status_code=307)
+
+
 @app.get("/session/logout")
 async def session_logout(request: Request) -> RedirectResponse:
     opaque_id = request.cookies.get(EVENTPLUS_SESSION_COOKIE_NAME)
@@ -78,6 +91,11 @@ async def session_logout(request: Request) -> RedirectResponse:
     return response
 
 
+app.mount(
+    "/diagnostics/flet-web-qr-probe",
+    StaticFiles(directory=_FLET_WEB_QR_PROBE_DIR, html=True),
+    name="flet-web-qr-probe",
+)
 app.mount("/", flet_app)
 app.add_middleware(
     EventPlusSessionMiddleware,

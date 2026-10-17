@@ -1,0 +1,13 @@
+name: evkor_web_qr_probe
+description: Isolated EVKOR Flet custom-control diagnostic probe.
+publish_to: none
+version: 0.0.1
+
+environment:
+  sdk: ">=3.6.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flet: 0.85.3
+  web: ^1.1.1

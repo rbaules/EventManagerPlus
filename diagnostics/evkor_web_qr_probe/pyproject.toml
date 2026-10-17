@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evkor-web-qr-probe"
+version = "0.0.1"
+description = "Isolated Flet Web custom-control diagnostic probe."
+readme = "README.md"
+# Flet Web 0.85.3 packages Python code for its bundled Pyodide 3.12 runtime.
+# The local development environment may use a newer Python release.
+requires-python = ">=3.12"
+dependencies = ["flet==0.85.3"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"flutter.evkor_web_qr_probe" = ["**/*"]
