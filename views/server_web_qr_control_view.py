@@ -142,6 +142,7 @@ def build_server_web_qr_control_view(page: ft.Page) -> None:
         page.update()
 
     probe = EvkorServerWebQrProbe(
+        diagnostic=True,
         on_test_event=on_test_event,
         on_lifecycle_action=on_lifecycle_action,
         on_qr_detected=on_qr_detected,

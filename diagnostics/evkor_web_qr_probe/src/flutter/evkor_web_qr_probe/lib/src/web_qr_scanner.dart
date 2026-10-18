@@ -30,12 +30,14 @@ extension type _VideoConstraints._(JSObject _) implements JSObject {
 }
 
 class WebQrScanner extends StatefulWidget {
-  const WebQrScanner({super.key, this.active = true, this.detectorEnabled = true, this.previewVisible = true, required this.facingMode, this.generation = 0, required this.onState, required this.onMetrics, required this.onQrDetected, required this.onError});
+  const WebQrScanner({super.key, this.active = true, this.detectorEnabled = true, this.previewVisible = true, required this.facingMode, this.generation = 0, this.previewWidth = 560, this.previewHeight = 300, required this.onState, required this.onMetrics, required this.onQrDetected, required this.onError});
   final bool active;
   final bool detectorEnabled;
   final bool previewVisible;
   final String facingMode;
   final int generation;
+  final double previewWidth;
+  final double previewHeight;
   final ValueChanged<String> onState;
   final ValueChanged<String> onMetrics;
   final ValueChanged<String> onQrDetected;
@@ -169,5 +171,5 @@ class _WebQrScannerState extends State<WebQrScanner> {
   }
 
   @override void dispose() { unawaited(_stopCamera()); super.dispose(); }
-  @override Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Opacity(opacity: widget.previewVisible ? 1 : 0, child: SizedBox(height: 260, width: 360, child: HtmlElementView(viewType: _viewType)))]);
+  @override Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Opacity(opacity: widget.previewVisible ? 1 : 0, child: SizedBox(height: widget.previewHeight, width: widget.previewWidth, child: HtmlElementView(viewType: _viewType)))]);
 }

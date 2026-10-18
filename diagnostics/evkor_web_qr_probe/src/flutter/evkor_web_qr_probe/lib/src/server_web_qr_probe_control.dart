@@ -19,6 +19,8 @@ class _EvkorServerWebQrProbeControlState
 
   bool _bool(String name, bool fallback) =>
       widget.control.getString(name, fallback.toString()) == "true";
+  double _dimension(String name, double fallback) =>
+      double.tryParse(widget.control.getString(name, fallback.toString())!) ?? fallback;
 
   @override
   Widget build(BuildContext context) => LayoutControl(
@@ -27,21 +29,26 @@ class _EvkorServerWebQrProbeControlState
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(widget.control.getString("label", "EVKOR Server Web QR Control")!),
-            const SizedBox(height: 12),
+            if (_bool("diagnostic", false)) ...[
+              Text(widget.control.getString("label", "EVKOR Server Web QR Control")!),
+              const SizedBox(height: 12),
+            ],
             WebQrScanner(
               active: _bool("active", false),
               detectorEnabled: _bool("detector_enabled", false),
               previewVisible: _bool("preview_visible", true),
               facingMode: widget.control.getString("facing_mode", "user")!,
               generation: int.tryParse(widget.control.getString("generation", "0")!) ?? 0,
+              previewWidth: _dimension("preview_width", 560),
+              previewHeight: _dimension("preview_height", 300),
               onState: (value) => _event("scanner_state", value),
               onMetrics: (value) => _event("scanner_metrics", value),
               onQrDetected: (value) => _event("qr_detected", value),
               onError: (value) => _event("scanner_error", value),
             ),
-            const SizedBox(height: 8),
-            Wrap(
+            if (_bool("diagnostic", false)) ...[
+              const SizedBox(height: 8),
+              Wrap(
               spacing: 8,
               children: [
                 TextButton(
@@ -81,7 +88,8 @@ class _EvkorServerWebQrProbeControlState
                   child: const Text("Enviar evento server-side"),
                 ),
               ],
-            ),
+              ),
+            ],
           ],
         ),
       );

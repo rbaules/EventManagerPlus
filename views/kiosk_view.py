@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 import flet as ft
 
-from components.kiosk_qr_scanner import KioskQrScanner
+from components.kiosk_scanner_factory import create_kiosk_scanner
 from components.kiosk_route_map import build_kiosk_route_map, build_route_overlay_data_url
 from components.kiosk_route_map_viewer import MAX_ZOOM, MIN_ZOOM, build_kiosk_route_map_viewer
 from components.evkor_brand import build_evkor_brand
@@ -1361,7 +1361,7 @@ def build_kiosk_view(
         scanner.set_preview_visible(False)
         render()
 
-    scanner = KioskQrScanner(
+    scanner = create_kiosk_scanner(
         page=page,
         on_qr_finalized=on_kiosk_qr_finalized,
         on_camera_error=on_kiosk_camera_error,

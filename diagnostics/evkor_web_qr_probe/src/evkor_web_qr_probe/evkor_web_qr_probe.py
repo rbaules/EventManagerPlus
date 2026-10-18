@@ -26,6 +26,9 @@ class EvkorServerWebQrProbe(ft.LayoutControl):
     preview_visible: bool = True
     facing_mode: str = "user"
     generation: int = 0
+    diagnostic: bool = False
+    preview_width: int = 560
+    preview_height: int = 300
     on_test_event: Optional[ft.ControlEventHandler["EvkorServerWebQrProbe"]] = None
     on_lifecycle_action: Optional[ft.ControlEventHandler["EvkorServerWebQrProbe"]] = None
     on_qr_detected: Optional[ft.ControlEventHandler["EvkorServerWebQrProbe"]] = None
