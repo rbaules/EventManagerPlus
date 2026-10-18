@@ -1,5 +1,6 @@
 flet==0.85.3
 flet-web==0.85.3
+-e ./diagnostics/evkor_web_qr_probe
 flet-camera==0.85.3
 opencv-python-headless==4.14.0.94
 supabase==2.31.0

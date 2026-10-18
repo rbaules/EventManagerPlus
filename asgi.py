@@ -1,9 +1,27 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 os.environ.setdefault("EVENTPLUS_ASGI", "true")
+
+_PROJECT_ROOT = Path(__file__).resolve().parent
+_CUSTOM_CONTROL_SOURCE = _PROJECT_ROOT / "diagnostics" / "evkor_web_qr_probe" / "src"
+if str(_CUSTOM_CONTROL_SOURCE) not in sys.path:
+    sys.path.insert(0, str(_CUSTOM_CONTROL_SOURCE))
+
+# The committed server-side Flutter client is deliberately selected before Flet
+# initializes its ASGI runtime.  A deployment can override this setting, but a
+# clean process (including Render) needs no inherited local shell variables.
+_SERVER_WEB_CLIENT_DIR = (
+    _PROJECT_ROOT
+    / "diagnostics"
+    / "evkor_server_web_qr_client"
+    / "deploy"
+    / "server_web"
+)
+os.environ.setdefault("FLET_WEB_PATH", str(_SERVER_WEB_CLIENT_DIR))
 
 import flet as ft
 from fastapi import FastAPI, Request

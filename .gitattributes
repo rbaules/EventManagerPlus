@@ -1,1 +1,4 @@
+# Preserve generated Flutter bundle assets verbatim; third-party notices contain
+# intentional trailing spaces and must not fail repository whitespace checks.
+diagnostics/evkor_server_web_qr_client/deploy/server_web/** whitespace=-trailing-space
 diagnostics/evkor_web_qr_probe/deploy/web/** -whitespace
