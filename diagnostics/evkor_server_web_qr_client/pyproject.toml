@@ -1,0 +1,15 @@
+[project]
+name = "evkor-server-web-qr-client"
+version = "0.0.1"
+description = "Build-only custom Flet client for the EVKOR server-side QR transport probe."
+requires-python = ">=3.14"
+dependencies = [
+    "evkor-web-qr-probe",
+    "flet==0.85.3",
+]
+
+[tool.flet.app]
+path = "src"
+
+[tool.flet.dev_packages]
+evkor-web-qr-probe = "../evkor_web_qr_probe"

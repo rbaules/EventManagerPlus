@@ -11,6 +11,10 @@ from services.web_reliability import PageWebTelemetry
 from views.login_view import build_login_view
 from views.authenticated_router import AuthenticatedViewRouter
 from views.kiosk_router import KioskStandaloneRouter, is_kiosk_standalone_route
+from views.server_web_qr_control_view import (
+    build_server_web_qr_control_view,
+    is_server_web_qr_control_route,
+)
 
 
 def main(
@@ -20,6 +24,10 @@ def main(
 ) -> None:
     web_telemetry = PageWebTelemetry(page)
     web_telemetry.page_created()
+    if is_server_web_qr_control_route(getattr(page, "route", None)):
+        build_server_web_qr_control_view(page)
+        web_telemetry.ready(restored_session=False)
+        return
     standalone_kiosk_requested = is_kiosk_standalone_route(
         getattr(page, "route", None)
     )

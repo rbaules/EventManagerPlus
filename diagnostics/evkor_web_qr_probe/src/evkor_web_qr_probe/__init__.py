@@ -1,3 +1,3 @@
-from .evkor_web_qr_probe import EvkorWebQrProbe
+from .evkor_web_qr_probe import EvkorServerWebQrProbe, EvkorWebQrProbe
 
-__all__ = ["EvkorWebQrProbe"]
+__all__ = ["EvkorServerWebQrProbe", "EvkorWebQrProbe"]
