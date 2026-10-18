@@ -18,6 +18,11 @@ class EvkorWebQrProbe(ft.LayoutControl):
 
 @ft.control("EvkorServerWebQrProbe")
 class EvkorServerWebQrProbe(ft.LayoutControl):
-    """Minimal browser control used to verify the server-side Flet transport."""
+    """Browser camera probe that reports only diagnostic events to the server."""
 
+    label: str = "EVKOR Server Web QR Control"
     on_test_event: Optional[ft.ControlEventHandler["EvkorServerWebQrProbe"]] = None
+    on_qr_detected: Optional[ft.ControlEventHandler["EvkorServerWebQrProbe"]] = None
+    on_scanner_state: Optional[ft.ControlEventHandler["EvkorServerWebQrProbe"]] = None
+    on_scanner_metrics: Optional[ft.ControlEventHandler["EvkorServerWebQrProbe"]] = None
+    on_scanner_error: Optional[ft.ControlEventHandler["EvkorServerWebQrProbe"]] = None
