@@ -52,10 +52,12 @@ def test_camera_start_precedes_optional_detector_setup() -> None:
         / "web_qr_scanner.dart"
     ).read_text(encoding="utf-8")
 
-    start = scanner.index("Future<void> _start()")
-    detector = scanner.index("Future<void> _startDetector")
-    stream = scanner.index("getUserMedia", start)
+    lifecycle = scanner.index("Future<void> _syncLifecycle()")
+    camera = scanner.index("Future<void> _ensureCamera()")
+    detector = scanner.index("Future<void> _resumeDetector()")
+    stream = scanner.index("getUserMedia", camera)
 
     assert stream < detector
-    assert "await _startDetector(started);" in scanner[start:detector]
+    assert "await _ensureCamera();" in scanner[lifecycle:camera]
+    assert "if (widget.detectorEnabled) { await _resumeDetector(); }" in scanner[lifecycle:camera]
     assert '_reportDetectorCapability("unavailable")' in scanner

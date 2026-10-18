@@ -26,32 +26,21 @@ extension type _Barcode._(JSObject _) implements JSObject {
 
 @anonymous
 extension type _VideoConstraints._(JSObject _) implements JSObject {
-  external factory _VideoConstraints({
-    required String facingMode,
-    required int width,
-    required int height,
-    required int frameRate,
-  });
+  external factory _VideoConstraints({required String facingMode, required int width, required int height, required int frameRate});
 }
 
 class WebQrScanner extends StatefulWidget {
-  const WebQrScanner({
-    super.key,
-    required this.facingMode,
-    required this.onState,
-    required this.onMetrics,
-    required this.onQrDetected,
-    required this.onError,
-  });
-
+  const WebQrScanner({super.key, this.active = true, this.detectorEnabled = true, this.previewVisible = true, required this.facingMode, this.generation = 0, required this.onState, required this.onMetrics, required this.onQrDetected, required this.onError});
+  final bool active;
+  final bool detectorEnabled;
+  final bool previewVisible;
   final String facingMode;
+  final int generation;
   final ValueChanged<String> onState;
   final ValueChanged<String> onMetrics;
   final ValueChanged<String> onQrDetected;
   final ValueChanged<String> onError;
-
-  @override
-  State<WebQrScanner> createState() => _WebQrScannerState();
+  @override State<WebQrScanner> createState() => _WebQrScannerState();
 }
 
 class _WebQrScannerState extends State<WebQrScanner> {
@@ -61,105 +50,90 @@ class _WebQrScannerState extends State<WebQrScanner> {
   web.MediaStream? _stream;
   _BarcodeDetector? _detector;
   Timer? _loop;
-  var _running = false;
+  var _cameraActive = false;
+  var _detectorAvailable = false;
+  var _cameraReused = false;
+  var _getUserMediaCount = 0;
   var _attempts = 0;
   var _startedAt = 0;
   var _lastValue = "";
   var _lastEmitAt = 0;
 
-  @override
-  void initState() {
+  @override void initState() {
     super.initState();
     _viewType = "evkor-web-qr-video-${_nextView++}";
-    _video = web.HTMLVideoElement()
-      ..autoplay = true
-      ..muted = true
-      ..playsInline = true
-      ..style.width = "100%"
-      ..style.height = "100%"
-      ..style.objectFit = "cover";
+    _video = web.HTMLVideoElement()..autoplay = true..muted = true..playsInline = true..style.width = "100%"..style.height = "100%"..style.objectFit = "cover";
     ui_web.platformViewRegistry.registerViewFactory(_viewType, (_) => _video);
+    unawaited(_syncLifecycle());
   }
 
-  @override
-  void didUpdateWidget(covariant WebQrScanner oldWidget) {
+  @override void didUpdateWidget(covariant WebQrScanner oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (_running && oldWidget.facingMode != widget.facingMode) {
-      unawaited(_restart());
+    if (_cameraActive && oldWidget.facingMode != widget.facingMode) { unawaited(_restartCamera()); return; }
+    if (oldWidget.active != widget.active || oldWidget.detectorEnabled != widget.detectorEnabled) {
+      unawaited(_syncLifecycle());
+    } else if (oldWidget.previewVisible != widget.previewVisible) {
+      _reportMetrics();
     }
   }
 
-  Future<void> _restart() async {
-    await _stop();
-    await _start();
+  bool get _streamLive {
+    final stream = _stream;
+    if (stream == null) return false;
+    return stream.getVideoTracks().toDart.any((track) => track.readyState == "live");
+  }
+  Future<void> _restartCamera() async { await _stopCamera(emitState: false); await _syncLifecycle(); }
+
+  Future<void> _syncLifecycle() async {
+    if (!widget.active) { await _stopCamera(); return; }
+    await _ensureCamera();
+    if (!mounted || !_cameraActive) return;
+    if (widget.detectorEnabled) { await _resumeDetector(); } else { _pauseDetector(); }
   }
 
-  Future<void> _start() async {
-    if (_running) return;
+  Future<void> _ensureCamera() async {
+    if (_streamLive) { _cameraActive = true; _cameraReused = true; _reportMetrics(); return; }
     widget.onState("requesting_camera");
     final started = DateTime.now().millisecondsSinceEpoch;
     try {
-      final constraints = web.MediaStreamConstraints(
-        audio: false.toJS,
-        video: _VideoConstraints(
-          facingMode: widget.facingMode,
-          width: 1280,
-          height: 720,
-          frameRate: 30,
-        ),
-      );
-      _stream = await web.window.navigator.mediaDevices.getUserMedia(constraints).toDart;
+      _stream = await web.window.navigator.mediaDevices.getUserMedia(web.MediaStreamConstraints(audio: false.toJS, video: _VideoConstraints(facingMode: widget.facingMode, width: 1280, height: 720, frameRate: 30))).toDart;
       _video.srcObject = _stream;
       await _video.play().toDart;
-      _running = true;
+      _cameraActive = true;
+      _cameraReused = false;
+      _getUserMediaCount++;
       _startedAt = DateTime.now().millisecondsSinceEpoch;
       widget.onState("camera_active");
-      widget.onMetrics(jsonEncode({
-        "getUserMediaMs": _startedAt - started,
-        "videoReadyMs": _startedAt - started,
-        "videoWidth": _video.videoWidth,
-        "videoHeight": _video.videoHeight,
-        "facingMode": widget.facingMode,
-        "barcodeDetector": globalContext.has("BarcodeDetector"),
-      }));
-      await _startDetector(started);
-    } catch (error) {
-      _fail(_cameraErrorCode(error));
-    }
+      _reportMetrics(cameraReused: false, started: started);
+    } catch (error) { _fail(_cameraErrorCode(error)); }
   }
 
-  Future<void> _startDetector(int started) async {
-    if (!globalContext.has("BarcodeDetector")) {
-      _reportDetectorCapability("unavailable");
-      return;
-    }
+  Future<void> _resumeDetector() async {
+    if (!_cameraActive || !widget.detectorEnabled || _loop != null) return;
+    if (!globalContext.has("BarcodeDetector")) { _reportDetectorCapability("unavailable"); return; }
     try {
-      final formats = await _BarcodeDetector.getSupportedFormats().toDart;
-      if (!formats.toDart.map((format) => format.toDart).contains("qr_code")) {
-        _reportDetectorCapability("qr_code_not_supported");
-        return;
+      if (_detector == null) {
+        final formats = await _BarcodeDetector.getSupportedFormats().toDart;
+        if (!formats.toDart.map((format) => format.toDart).contains("qr_code")) { _reportDetectorCapability("qr_code_not_supported"); return; }
+        _detector = _BarcodeDetector(_BarcodeDetectorOptions(formats: ["qr_code".toJS].toJS));
+        _detectorAvailable = true;
       }
-      _detector = _BarcodeDetector(_BarcodeDetectorOptions(
-        formats: ["qr_code".toJS].toJS,
-      ));
-      widget.onMetrics(jsonEncode({
-        "detector": "ready",
-        "detectorReadyMs": DateTime.now().millisecondsSinceEpoch - started,
-        "qrCodeSupported": true,
-      }));
+      _reportMetrics(detector: "ready");
       widget.onState("detector_ready");
       _loop = Timer.periodic(const Duration(milliseconds: 180), (_) => _detect());
-    } catch (_) {
-      _reportDetectorCapability("initialization_failed");
-    }
+    } catch (_) { _reportDetectorCapability("initialization_failed"); }
   }
 
-  void _reportDetectorCapability(String value) {
-    widget.onMetrics(jsonEncode({"detector": value, "qrCodeSupported": false}));
+  void _pauseDetector() {
+    _loop?.cancel();
+    _loop = null;
+    if (_cameraActive) widget.onState("detector_paused");
+    _reportMetrics();
   }
+  void _reportDetectorCapability(String value) { _detectorAvailable = false; _reportMetrics(detector: value); }
 
   Future<void> _detect() async {
-    if (!_running || _detector == null || _video.readyState < 2) return;
+    if (!_cameraActive || !widget.detectorEnabled || _detector == null || _video.readyState < 2) return;
     try {
       _attempts++;
       final matches = await _detector!.detect(_video).toDart;
@@ -167,67 +141,33 @@ class _WebQrScannerState extends State<WebQrScanner> {
       final value = matches.toDart.first.rawValue.trim();
       final now = DateTime.now().millisecondsSinceEpoch;
       if (value.isEmpty || (value == _lastValue && now - _lastEmitAt < 1800)) return;
-      _lastValue = value;
-      _lastEmitAt = now;
+      _lastValue = value; _lastEmitAt = now;
       widget.onQrDetected(value);
       widget.onState("qr_detected");
-      widget.onMetrics(jsonEncode({
-        "attempts": _attempts,
-        "qrLatencyMs": now - _startedAt,
-        "videoWidth": _video.videoWidth,
-        "videoHeight": _video.videoHeight,
-      }));
-    } catch (_) {
-      _fail("detector_failure");
-    }
+      _pauseDetector();
+      _reportMetrics(qrLatencyMs: now - _startedAt);
+    } catch (_) { _fail("detector_failure"); }
   }
 
-  void _fail(String code) {
-    _loop?.cancel();
-    _loop = null;
-    _running = false;
-    widget.onState("error");
-    widget.onError(code);
+  void _reportMetrics({bool? cameraReused, String? detector, int? qrLatencyMs, int? started}) => widget.onMetrics(jsonEncode({
+    "camera_reused": cameraReused ?? _cameraReused, "getUserMedia_count": _getUserMediaCount, "generation": widget.generation,
+    "stream_live": _streamLive, "detector_enabled": widget.detectorEnabled, "preview_visible": widget.previewVisible,
+    "videoWidth": _video.videoWidth, "videoHeight": _video.videoHeight, "facingMode": widget.facingMode,
+    "barcodeDetector": globalContext.has("BarcodeDetector"), "detector": detector ?? (_detectorAvailable ? "ready" : "unavailable"),
+    "getUserMediaMs": started == null ? null : _startedAt - started, "qrLatencyMs": qrLatencyMs, "attempts": _attempts,
+  }));
+
+  void _fail(String code) { _pauseDetector(); _cameraActive = false; widget.onState("error"); widget.onError(code); }
+  String _cameraErrorCode(Object error) { final text = error.toString(); if (text.contains("NotAllowedError")) return "permission_denied"; if (text.contains("NotFoundError")) return "camera_not_found"; if (text.contains("NotReadableError")) return "camera_busy"; if (text.contains("mediaDevices")) return "get_user_media_unavailable"; return "camera_or_detector_failure"; }
+
+  Future<void> _stopCamera({bool emitState = true}) async {
+    _loop?.cancel(); _loop = null;
+    for (final track in _stream?.getTracks().toDart ?? <web.MediaStreamTrack>[]) { track.stop(); }
+    _stream = null; _video.srcObject = null; _detector = null; _detectorAvailable = false; _cameraActive = false; _cameraReused = false;
+    if (emitState) widget.onState("stopped");
+    _reportMetrics();
   }
 
-  String _cameraErrorCode(Object error) {
-    final text = error.toString();
-    if (text.contains("NotAllowedError")) return "permission_denied";
-    if (text.contains("NotFoundError")) return "camera_not_found";
-    if (text.contains("NotReadableError")) return "camera_busy";
-    if (text.contains("mediaDevices")) return "get_user_media_unavailable";
-    return "camera_or_detector_failure";
-  }
-
-  Future<void> _stop() async {
-    _loop?.cancel();
-    _loop = null;
-    for (final track in _stream?.getTracks().toDart ?? <web.MediaStreamTrack>[]) {
-      track.stop();
-    }
-    _stream = null;
-    _video.srcObject = null;
-    _detector = null;
-    _running = false;
-    widget.onState("stopped");
-  }
-
-  @override
-  void dispose() {
-    unawaited(_stop());
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(height: 260, width: 360, child: HtmlElementView(viewType: _viewType)),
-          const SizedBox(height: 8),
-          Wrap(spacing: 8, children: [
-            ElevatedButton(onPressed: _start, child: const Text("Iniciar cámara")),
-            OutlinedButton(onPressed: _stop, child: const Text("Detener cámara")),
-          ]),
-        ],
-      );
+  @override void dispose() { unawaited(_stopCamera()); super.dispose(); }
+  @override Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Opacity(opacity: widget.previewVisible ? 1 : 0, child: SizedBox(height: 260, width: 360, child: HtmlElementView(viewType: _viewType)))]);
 }
